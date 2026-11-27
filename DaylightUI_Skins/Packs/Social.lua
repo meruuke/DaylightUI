@@ -483,7 +483,7 @@ local function onFrame(frame, names, fn)
 end
 
 Engine.Window({ key = "communities", pack = "social", addon = "Blizzard_Communities", frame = "CommunitiesFrame", watch = true,
-    auto = { lines = true, skip = { ".MaximizeMinimizeFrame" } },
+    auto = { lines = true, skip = { ".MaximizeMinimizeFrame", ".GuildMemberDetailFrame" } },
     after = function(Kit, f)
         -- These tabs sit against the window's right edge, so each wears the
         -- whole tab look joined to the window. An outline around the icon alone
@@ -571,12 +571,26 @@ Engine.Window({ key = "communities", pack = "social", addon = "Blizzard_Communit
             end
         end
         -- The member card beside the roster: a panel, with the notes as insets.
+        -- Dressed quietly, and left out of the automatic walk. A click on a
+        -- member fills the card in one go: the game resizes it, shows the rank
+        -- menu, enables Remove, then compares the member's details, which can
+        -- be secret and only the game's own untainted code may compare. Any
+        -- Daylight UI script on the card's pieces ran inside that and tainted
+        -- it, and the card never opened (no promote, demote or remove).
         local card = f.GuildMemberDetailFrame
         if type(card) == "table" then
-            Kit.Panel(card)
+            Kit.Strip(card)
+            Kit.Shell(card, "window", { quiet = true })
             Kit.Hide(card.Border)
             Kit.Inset(card.NoteBackground)
             Kit.Inset(card.OfficerNoteBackground)
+            Kit.Close(card.CloseButton)
+            Kit.Button(card.RemoveButton, card)
+            Kit.Button(card.GroupInviteButton, card)
+            Kit.Dropdown(card.RankDropdown)
+            Kit.InkGameText(card)
+            Kit.InkGameText(card.NoteBackground)
+            Kit.InkGameText(card.OfficerNoteBackground)
         end
     end })
 
@@ -652,6 +666,15 @@ Engine.Window({ key = "trade", pack = "social", frame = "TradeFrame",
         local Style = DUI.Style
         tradeItems(Kit, "TradePlayerItem")
         tradeItems(Kit, "TradeRecipientItem")
+        -- Each side's item, enchant and money boxes are inset frames with the
+        -- game's marble art. They're named but not keyed, so the window walk
+        -- doesn't know them as insets: dressed here like every other inset.
+        for _, side in ipairs({ "Player", "Recipient" }) do
+            Kit.Inset(_G["Trade" .. side .. "ItemsInset"])
+            Kit.Inset(_G["Trade" .. side .. "EnchantInset"])
+        end
+        Kit.Inset(_G.TradePlayerInputMoneyInset)
+        Kit.Inset(_G.TradeRecipientMoneyInset)
         Kit.Strip(_G.TradeRecipientMoneyFrame)
         -- Their money sits on a gold-edged box: a text box's look instead.
         local theirBox = _G.TradeRecipientMoneyBg

@@ -144,8 +144,9 @@ function Map.SetIconScale(scale)
 end
 
 -- Round by choice, or because it turns: a turning square showed empty corners.
-function Map.Round()
-    local cfg = Map.cfg
+-- cfg: the map's settings, when asked before the map has been laid out.
+function Map.Round(cfg)
+    cfg = cfg or Map.cfg
     return Map.Turning() or (type(cfg) == "table" and cfg.shape == "round")
 end
 
@@ -231,13 +232,16 @@ local function clockOnEnter(self)
     Tips.Title(L["Time"])
     Tips.Line(L["Local"], formatClock(lh, lm, cfg.twentyFour, ls))
     Tips.Line(L["Server"], formatClock(sh, sm, cfg.twentyFour, ls))
+    ns.DataTexts.ClockHint()
     Tips.Flush(GameTooltip)
     GameTooltip:Show()
+    -- The game's own clock button takes the click out of a fight, laid over this.
+    DUI.SafeCall(ns.DataTexts.WindowOver, self)
 end
 
 local function ensureClock(mm)
     if Map.clock then return Map.clock end
-    local f = CreateFrame("Frame", nil, mm)
+    local f = CreateFrame("Button", nil, mm)
     f:SetFrameLevel(mm:GetFrameLevel() + Map.TEXT_LIFT)   -- over the ring and the map's dots
     f:SetSize(70, 12)
     f:EnableMouse(true)
@@ -246,8 +250,13 @@ local function ensureClock(mm)
     -- Left and right only: the text keeps its own height, so a big or tall
     -- font isn't cropped by its frame (tall letters got their tops cut off).
     f.text:SetPoint("LEFT", f, "LEFT"); f.text:SetPoint("RIGHT", f, "RIGHT")
+    -- A click opens the game's alarm and stopwatch window, as its own clock does.
+    f:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    f.key = "time"   -- the data texts' secure button opens what the Time text opens
     f:SetScript("OnEnter", clockOnEnter)
     f:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    f:SetScript("OnClick", function() ns.DataTexts.ClockClick() end)
+    f.enter, f.leave = clockOnEnter, f:GetScript("OnLeave")
     Map.clock = f
     return f
 end
@@ -808,18 +817,28 @@ function Map.WatchButtons()
     if not (area and Map.cfg and Map.cfg.buttons) then return end
     local over = area:IsMouseOver() == true
     for btn, d in pairs(dressed) do
-        local want = (over or btn:IsMouseOver() == true or menuOpen(btn)
-            or (d.kind == "calendar" and invitePending())) and 1 or 0
-        if d.goal ~= want then
-            d.goal = want
-            if want == 1 and d.kind == "calendar" then setDay(d) end
-            DUI.Motion.Tween("infopanel:mapButton:" .. d.kind, d.alpha, want, DUI.Motion.FAST, function(v)
-                d.alpha = v
-                d.frame:SetAlpha(v)
-            end)
+        local invite = d.kind == "calendar" and invitePending()
+        -- At rest (the mouse away from the map, the button gone, unlit, no invite):
+        -- nothing more to ask. The buttons sit on the map, so over one is over the map.
+        if over or invite or d.goal ~= 0 or d.lit then
+            Map.WatchButton(btn, d, over, invite)
         end
-        Map.PaintButton(d)
     end
+end
+
+-- One dressed button: shown while the mouse is on the map or it, its menu is open
+-- or (the calendar) an invite waits.
+function Map.WatchButton(btn, d, over, invite)
+    local want = (over or btn:IsMouseOver() == true or menuOpen(btn) or invite) and 1 or 0
+    if d.goal ~= want then
+        d.goal = want
+        if want == 1 and d.kind == "calendar" then setDay(d) end
+        DUI.Motion.Tween("infopanel:mapButton:" .. d.kind, d.alpha, want, DUI.Motion.FAST, function(v)
+            d.alpha = v
+            d.frame:SetAlpha(v)
+        end)
+    end
+    Map.PaintButton(d)
 end
 
 -- Never nudge the zoom to force the map to redraw: players saw it zoom in and
@@ -852,6 +871,10 @@ function Map.Fit()
         DUI.AfterCombat(Map.Fit, "infopanel:mapFit")
         return
     end
+    -- Turning makes the map round, so a panel without a box around a round
+    -- map lays itself out again (which applies the map too).
+    local mod = ns.module
+    if mod and ns.Panel.Bare(mod.db) ~= ns.Panel.bare then return ns.Refresh(mod) end
     Map.Apply(cfg)
 end
 
@@ -907,6 +930,23 @@ end
 
 DUI.RegisterEvent("LOADING_SCREEN_DISABLED", redrawSoon)
 
+-- The quest areas the client draws on the map (their fill and glowing edge)
+-- ignore its alpha, as the arrow does, but stay inside its mask. So while the
+-- map is fully out of sight it wears a see-through mask, and its own shape
+-- comes back with it.
+Map.areasAway = false
+function Map.PutMask(mm)
+    if type(mm) ~= "table" or type(mm.SetMaskTexture) ~= "function" then return end
+    local mask = Map.areasAway and Map.ERASE or (Map.Round() and Map.ROUND_MASK or Map.MASK)
+    if Map.maskSet == mask then return end
+    if InCombatLockdown() and mm.IsProtected and mm:IsProtected() then
+        DUI.AfterCombat(function() Map.PutMask(Minimap) end, "infopanel:mapMask")
+        return
+    end
+    mm:SetMaskTexture(mask)
+    Map.maskSet = mask
+end
+
 -- The game stops updating the minimap's picture while it's even slightly
 -- see-through: walk indoors meanwhile and it stays empty, at full alpha
 -- again too, until its zoom changes. So the map ignores the panel's opacity
@@ -943,6 +983,9 @@ function Map.Follow()
     if type(was) ~= "number" or math.abs(was - want) > 0.0001 then mm:SetAlpha(want) end
     -- Its arrow and dots ignore its alpha: fully out of sight, they go too.
     DUI.Fade.MapDots(want > 0)
+    -- So do the quest areas, which stay inside its mask.
+    Map.areasAway = want == 0
+    Map.PutMask(mm)
     if want < 1 then
         Map.dim = true
     elseif Map.dim then
@@ -1030,11 +1073,7 @@ function Map.Apply(cfg)
         Map.ParentTo(f, area)
         Map.PlaceAt(f, "TOPLEFT", area, "TOPLEFT")
         Map.SizeTo(f, size, size)
-        local mask = Map.Round() and Map.ROUND_MASK or Map.MASK
-        if f.SetMaskTexture and Map.maskSet ~= mask then
-            f:SetMaskTexture(mask)
-            Map.maskSet = mask
-        end
+        Map.PutMask(f)
     end)
     -- The map's layer first: the ring (+2) and texts (+TEXT_LIFT) go over it.
     Map.LevelTo(mm, area:GetFrameLevel() + 1)

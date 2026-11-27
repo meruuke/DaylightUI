@@ -137,12 +137,6 @@ T.test("nameplates: the game's plate is put away and ours shows the unit", funct
     T.eq(np.__hit, click, "the same click frame, which never left that game plate")
 end)
 
-T.test("nameplates: another nameplate addon loaded is warned about once in chat", function()
-    login(function() stub.loadedAddOns.TidyPlates_ThreatPlates = true end)
-    T.truthy(stub.ChatContains("Threat Plates is also loaded"))
-    T.falsy(stub.ChatContains("Plater is also loaded"))
-end)
-
 T.test("nameplates: the game's plates (what takes the clicks) cover ours, centered on them", function()
     local size
     login(function()
@@ -217,6 +211,36 @@ T.test("nameplates: the level's own color and size (levelColor, levelCustom, lev
     DaylightUI:Set("Nameplates", "levelSize", 17)
     stub.RunTimers()
     T.eq(select(2, p.level:GetFont()), 17, "its own size")
+end)
+
+T.test("nameplates: a friendly level is never gray by difficulty: class and reaction by default, or the picked color", function()
+    login(function()
+        _G.UnitLevel = function(u) if u == "player" then return 60 end return 10 end
+        _G.UnitClassification = function() return "normal" end
+        stub.units.nameplate3 = { name = "Stormwind Guard", reaction = 5, health = 100, maxHealth = 100 }
+    end)
+    local set = function(k, v) DaylightUI:Set("Nameplates", k, v); stub.RunTimers() end
+    set("friendly.enabled", true)
+    set("friendly.level", true)
+    local Style = DaylightUI.Style
+    local mage, guard, mob = added("nameplate2"), added("nameplate3"), added("nameplate1")
+    local function same(fs, what, r, g, b)
+        local c = fs.__textColor
+        T.truthy(math.abs(c[1] - r) < 1e-6 and math.abs(c[2] - g) < 1e-6 and math.abs(c[3] - b) < 1e-6, what)
+    end
+    T.eq(mage.level.__text, "10")
+    same(mage.level, "a level 10 mage seen at 60: her class color, not gray", Style.ClassTextColor("MAGE"))
+    local rr, rg, rb = Style.ReactionColor(5)
+    same(guard.level, "a friendly NPC: its reaction color, as its name", Style.Lighten(rr, rg, rb, stub.nameplates.Plate.NAME_LIGHTEN))
+    local gray = mob.level.__textColor
+    T.truthy(math.abs(gray[1] - gray[2]) < 0.05, "the enemy at level 10 keeps the game's gray")
+    set("friendly.levelColor", "white")
+    same(mage.level, "white", Style.INK.VALUE[1], Style.INK.VALUE[2], Style.INK.VALUE[3])
+    set("friendly.levelColor", "custom")
+    set("friendly.levelCustom", { 0.2, 0.4, 0.9 })
+    same(mage.level, "one picked color", 0.2, 0.4, 0.9)
+    set("levelColor", "white")
+    same(mage.level, "the enemy setting leaves friends be", 0.2, 0.4, 0.9)
 end)
 
 T.test("nameplates: friendly plates are just the name by default, no casts or auras", function()
@@ -1444,17 +1468,21 @@ T.test("nameplates: your debuffs, crowd control and purgeable buffs have their c
     T.eq(p.auras.cc.__groups.cc.filter, "HARMFUL|CROWD_CONTROL")
     T.eq(p.auras.cc.__groups.cc.max, 1, "one round icon")
     -- The client tags none of the classic defensives as BIG_DEFENSIVE (seen in
-    -- game: Divine Shield, Ice Block, Evasion... all false), so the row names them.
+    -- game: Divine Shield, Ice Block, Evasion... all false), so the slot names them.
+    -- The client matches that list only on someone you can help (or a spell it
+    -- marks never secret); an enemy player's plate keeps the same list
+    -- (test_nameplates_tickets).
     local big = p.auras.defensives.__groups.big
     T.eq(big.filter, "HELPFUL", "every buff, narrowed by the list")
     local shows = require("aura_rules")
     local group = { filter = big.filter, opts = big.opts }
-    local enemyPlayer = { canAssist = false, groupMember = false, playerControlled = true }
-    local mob = { canAssist = false, groupMember = false, playerControlled = false }
-    T.truthy(shows(group, enemyPlayer, { spellId = 1020 }), "Divine Shield rank 2 on a duel opponent")
-    T.truthy(shows(group, enemyPlayer, { spellId = 11958 }), "Ice Block")
-    T.falsy(shows(group, enemyPlayer, { spellId = 1459 }), "Arcane Intellect is not a big defensive")
-    T.falsy(shows(group, mob, { spellId = 642 }), "a mob: the client won't match buffs by id there")
+    local ally = { canAssist = true, groupMember = true }
+    local enemy = { canAssist = false, groupMember = false }
+    T.truthy(shows(group, ally, { spellId = 1020 }), "Divine Shield rank 2 on someone you can help")
+    T.truthy(shows(group, ally, { spellId = 11958 }), "Ice Block")
+    T.falsy(shows(group, ally, { spellId = 1459 }), "Arcane Intellect is not a big defensive")
+    T.falsy(shows(group, enemy, { spellId = 642 }), "an enemy: the client won't match buffs by id there")
+    T.truthy(shows(group, enemy, { spellId = 642, neverSecret = true }), "unless the spell is never secret")
     T.eq(big.max, 1, "one big defensive icon")
     T.eq(p.auras.defensives.__unit, "nameplate1")
     DaylightUI:Set("Nameplates", "defensives", false)
@@ -3658,6 +3686,42 @@ T.test("nameplates: a friendly totem is a badge instead of its name, a friendly 
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
+T.test("nameplates: friendly totem badges: their own size, picture, shape and border", function()
+    login(function()
+        stub.spells = { [5394] = { name = "Healing Stream Totem" } }
+        C_Spell.GetSpellTexture = function(id) return 1000 + id end
+    end)
+    stub.units.nameplate3 = { name = "Healing Stream Totem III", minion = true, reaction = 5, health = 5, maxHealth = 5 }
+    local NP = stub.nameplates
+    local set = function(k, v) DaylightUI:Set("Nameplates", k, v); stub.RunTimers() end
+    local p = added("nameplate3")
+    local b = p.badge
+    T.eq(b:GetWidth(), DaylightUI:Get("Nameplates", "minionSize"), "0: the enemy badges' size, as before")
+    set("friendly.totemSize", 44)
+    T.eq(b:GetWidth(), 44, "its own size")
+    set("friendly.totemIcon", "spell")
+    T.eq(b.icon.__texture, 1000 + 5394, "the spell's own icon, every rank by its first")
+    T.truthy(b.masked, "cut round in a round badge")
+    set("friendly.totemIcon", "element")
+    T.eq(b.icon.__texture, NP.Minion.ELEMENT_ICONS.water, "its element's picture")
+    set("friendly.totemShape", "square")
+    T.falsy(b.ring:IsShown(), "no ring on a square")
+    T.falsy(b.masked, "a square icon needs no mask")
+    T.truthy(b.back:IsShown())
+    for _, e in ipairs(b.edges) do
+        T.truthy(e:IsShown(), "an edge on each side")
+        T.rgb(e.__vertex, NP.Minion.COLORS.water, "in the element's color")
+    end
+    set("friendly.totemBorder", false)
+    for _, e in ipairs(b.edges) do T.falsy(e:IsShown(), "border off") end
+    T.eq(b.icon:GetWidth(), 44, "the picture takes the whole badge")
+    set("friendly.totemShape", "round")
+    T.falsy(b.ring:IsShown(), "no ring with the border off")
+    set("friendly.totemIcon", "portrait")
+    T.falsy(b.masked, "the game's portrait is round already")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
 T.test("nameplates: a totem put down for the first time gets its picture once the game has it", function()
     login(function() stub.spells = { [5394] = { name = "Healing Stream Totem" } } end)
     stub.units.nameplate3 = { name = "Healing Stream Totem", minion = true, reaction = 5, health = 5, maxHealth = 5 }
@@ -3920,6 +3984,87 @@ local function withExecuteCurves(fn)
     _G.C_CurveUtil, _G.UnitHealthPercent = saved.curves, saved.pct
     if not ok then error(err, 0) end
 end
+
+T.test("nameplates: friendly bars can wait for a fight, and name only until then", function()
+    login()
+    DaylightUI:Set("Nameplates", "friendly.enabled", true)
+    DaylightUI:Set("Nameplates", "friendly.barWhen", "combat")
+    stub.RunTimers()
+    local p, mob = added("nameplate2"), added("nameplate1")
+    T.falsy(p.hp:IsShown(), "out of a fight: just the name")
+    T.truthy(mob.hp:IsShown(), "enemies keep their bar")
+    stub.FireEvent("PLAYER_REGEN_DISABLED")
+    T.truthy(p.hp:IsShown(), "a fight: the bar shows at once")
+    T.eq(stub.Plain(p.health:GetValue()), stub.units.nameplate2.health, "with today's health")
+    stub.FireEvent("PLAYER_REGEN_ENABLED")
+    T.falsy(p.hp:IsShown(), "back to the name after it")
+    DaylightUI:Set("Nameplates", "friendly.barWhen", "always")
+    stub.RunTimers()
+    T.truthy(p.hp:IsShown(), "always: as before")
+end)
+
+T.test("nameplates: friendly bars can show when hurt, through the full-health curve", function()
+    withExecuteCurves(function(alpha)
+        login()
+        DaylightUI:Set("Nameplates", "friendly.enabled", true)
+        DaylightUI:Set("Nameplates", "friendly.barWhen", "hurt")
+        stub.RunTimers()
+        stub.units.nameplate2.health = 100
+        local p = added("nameplate2")
+        T.truthy(p.hp:IsShown(), "laid out, so it can show the moment they're hurt")
+        T.eq(alpha(p.hp), 0, "full health: see-through")
+        T.eq(type(p.hp:GetAlpha()), "table", "the curve's secret answer, handed on whole")
+        stub.units.nameplate2.health = 40
+        stub.FireEvent("UNIT_HEALTH", "nameplate2")
+        T.eq(alpha(p.hp), 1, "hurt: it shows")
+        stub.units.nameplate2.health = 100
+        stub.FireEvent("UNIT_HEALTH", "nameplate2")
+        stub.FireEvent("PLAYER_REGEN_DISABLED")
+        T.eq(alpha(p.hp), 1, "in a fight it always shows")
+        stub.FireEvent("PLAYER_REGEN_ENABLED")
+        T.eq(alpha(p.hp), 0)
+        DaylightUI:Set("Nameplates", "friendly.barWhen", "always")
+        stub.RunTimers()
+        T.eq(alpha(p.hp), 1, "always: back to full")
+    end)
+end)
+
+
+T.test("nameplates: a hidden hurt bar takes your target's outline, glow and arrows with it", function()
+    withExecuteCurves(function(alpha)
+        login()
+        DaylightUI:Set("Nameplates", "friendly.enabled", true)
+        DaylightUI:Set("Nameplates", "friendly.barWhen", "hurt")
+        DaylightUI:Set("Nameplates", "targetArrows", "sides")
+        stub.RunTimers()
+        stub.units.nameplate2.health = 100
+        local p = added("nameplate2")
+        stub.units.target = stub.units.nameplate2
+        stub.FireEvent("PLAYER_TARGET_CHANGED")
+        stub.RunTimers()
+        T.truthy(p.outline:IsShown(), "your target is marked")
+        T.eq(alpha(p.hp), 0, "full health: bar hidden")
+        T.eq(alpha(p.outline), 0, "no outline round a hidden bar")
+        T.eq(alpha(p.arrows.left:GetParent()), 0, "no arrows pointing at nothing")
+        T.eq(p.focusMark[1]:GetParent(), p.arrows.left:GetParent(), "the group focus mark goes with them")
+        DaylightUI:Set("Nameplates", "targetStyle", "glow")
+        stub.RunTimers()
+        T.eq(alpha(p.glow), 0, "no glow either")
+        stub.units.nameplate2.health = 40
+        stub.FireEvent("UNIT_HEALTH", "nameplate2")
+        T.eq(alpha(p.glow), 1, "hurt: the mark comes back with the bar")
+        T.eq(alpha(p.outline), 1)
+        stub.units.nameplate2.health = 100
+        stub.FireEvent("UNIT_HEALTH", "nameplate2")
+        stub.FireEvent("PLAYER_REGEN_DISABLED")
+        T.eq(alpha(p.glow), 1, "in a fight it always shows")
+        stub.FireEvent("PLAYER_REGEN_ENABLED")
+        DaylightUI:Set("Nameplates", "friendly.barWhen", "always")
+        stub.RunTimers()
+        T.eq(alpha(p.glow), 1, "always: back to full")
+        T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    end)
+end)
 
 T.test("nameplates: the execute range lights up once an enemy is in it (health secret)", function()
     withExecuteCurves(function(alpha)
@@ -5020,4 +5165,13 @@ T.test("nameplates: a custom gradient on the health bar; a tapped mob still goes
     stub.units.nameplate1.tapped = false
     stub.FireEvent("UNIT_FLAGS", "nameplate1")
     T.eq(#S.FillStops(fill), 3, "and back")
+end)
+
+T.test("nameplates: a mob's channel with no display name still shows its bar", function()
+    login()
+    local p = added("nameplate1")
+    stub.units.nameplate1.channel = { name = "Mind Flay", displayName = false, texture = 1, notInterruptible = false, duration = stub.Duration(3) }
+    stub.FireEvent("UNIT_SPELLCAST_CHANNEL_START", "nameplate1")
+    T.truthy(p.cast:IsShown(), "the channel shows")
+    T.eq(stub.Text(p.cast.text), "Mind Flay", "named by the spell when the display name is missing")
 end)

@@ -141,18 +141,47 @@ local function cornerY(cfg, holder)
     return -(holder.padUp or 0)
 end
 
+-- Where a header is held in the holder: its corner, or with growCenter the
+-- middle of the side the lines start from. The game's header sizes itself to
+-- the members it shows (configureChildren), so held by the middle a group
+-- that isn't full stays centered, in a fight too. Returns the point and its
+-- y offset.
+function Group.Anchor(cfg, holder)
+    if cfg.growCenter ~= true then return Group.Corner(cfg), cornerY(cfg, holder) end
+    if Group.Direction(cfg) == "rows" then
+        return cfg.growUp == true and "BOTTOM" or "TOP", cornerY(cfg, holder)
+    end
+    return cfg.growLeft == true and "RIGHT" or "LEFT", ((holder.padDown or 0) - (holder.padUp or 0)) / 2
+end
+
 -- How much room count members take, laid out per cfg in rows or columns. w, h
 -- are the button's size (defaults to the settings'). Returns width, height.
-function Group.Footprint(cfg, count, rows, w, h)
-    w, h = w or cfg.width, h or cfg.height
+-- nest: Group.NestCut, how much closer tiles side by side sit.
+function Group.Footprint(cfg, count, rows, w, h, nest)
+    w, h, nest = w or cfg.width, h or cfg.height, nest or 0
     local per = Group.PerLine(cfg)
     local lines = math.max(1, math.ceil(count / per))
     per = math.min(per, count)
-    local long = per * (rows and w or h) + (per - 1) * cfg.spacing
-    local across = lines * (rows and h or w) + (lines - 1) * cfg.groupSpacing
+    local long = per * (rows and w or h) + (per - 1) * (cfg.spacing - (rows and nest or 0))
+    local across = lines * (rows and h or w) + (lines - 1) * (cfg.groupSpacing - (rows and 0 or nest))
     if rows then return long, across end
     return across, long
 end
+
+-- Tiles shaped like a slanted box (both ends angled the same way, / and / or
+-- \ and \) leave a strip as wide as the angled end between two of them side
+-- by side, even with no spacing: one tile's edge leans in at the bottom, the
+-- next one's at the top. Returns that width, so tiles side by side can step
+-- that much closer and the spacing is measured between the angled edges.
+-- 0 for any other shape, whose ends already meet at a corner.
+function Group.NestCut(cfg, spec, region)
+    if type(cfg) ~= "table" or type(spec) ~= "table" or not spec.slant then return 0 end
+    local side, under = UF.FrameEnds({ spec = spec }, cfg)
+    if side ~= "both" or (under ~= "left" and under ~= "right") then return 0 end
+    return Pixel.Snap(region or UIParent, (tonumber(cfg.height) or 0) * UF.SLANT)
+end
+
+function Group:Nest(cfg) return Group.NestCut(cfg, self.opts.spec, self.holder) end
 
 -- The style's reach (UF.StyleReach): the first frame's name row reaches above
 -- the holder and the last one's power line below it, so the holder (the unlock
@@ -280,8 +309,13 @@ end
 -- header may create a button mid-fight, see Group:Dress).
 function Group:LayoutButton(b, cfg, text, range, noAuras)
     b.rangeFade, b.rangeAlpha = range.enabled, UF.RangeAlpha(range, true)
+    -- Nested tiles overlap by the cut, so each gives up half of it at both
+    -- ends: a click lands on the tile whose angled edge it's on (UF.SetHitRect).
+    b.nestInset = self:Nest(cfg) / 2
     self:WearIcons(b)
     UF.Layout(b, cfg, text, true)
+    -- A frame with a portrait sets its hit rect with the ring (UF.LayoutPortrait).
+    if not b.spec.portrait then UF.SetHitRect(b, 0, 0) end
     GP.LayoutTargetMark(b, cfg)
     GP.UpdateTargetMark(b)
     if not noAuras then self:LayoutAuras(b, cfg, text) end
@@ -304,7 +338,7 @@ function Group:LayoutAuras(b, cfg)
     ns.GroupPrivate.Layout(b, cfg)
     if b.auraSet then
         local box = ns.AuraGroups.Box(b, cfg)
-        DUI.SafeCall(ns.AuraGroups.Place, b.auraSet, b, cfg.auras, box)
+        DUI.SafeCall(ns.AuraGroups.Place, b.auraSet, b, cfg.auras, box, cfg.iconBorder)
         DUI.SafeCall(ns.Indicators.Place, b.auraSet, b, cfg.indicators, box)
     end
 end
@@ -363,17 +397,23 @@ function Group:ApplyDirection(cfg)
     local h = self.header
     local rows = Group.Direction(cfg) == "rows"
     local up, left, s = cfg.growUp == true, cfg.growLeft == true, cfg.spacing
+    -- Side by side (frames in a row, or columns of them), slanted boxes nest.
+    local nest = self:Nest(cfg)
+    local across = cfg.groupSpacing - (rows and 0 or nest)
     -- The game's header steps each member by the offset's own sign past the
     -- point's other side (see its group header code), so up and left are
     -- positive y and negative x.
     local point, xo, yo, anchor = up and "BOTTOM" or "TOP", 0, up and s or -s, left and "RIGHT" or "LEFT"
-    if rows then point, xo, yo, anchor = left and "RIGHT" or "LEFT", left and -s or s, 0, up and "BOTTOM" or "TOP" end
+    if rows then
+        s = s - nest
+        point, xo, yo, anchor = left and "RIGHT" or "LEFT", left and -s or s, 0, up and "BOTTOM" or "TOP"
+    end
     for _, hh in ipairs({ h, unpack(self.headers) }) do
         hh:SetAttribute("point", point)
         hh:SetAttribute("xOffset", xo)
         hh:SetAttribute("yOffset", yo)
         hh:SetAttribute("columnAnchorPoint", anchor)
-        hh:SetAttribute("columnSpacing", cfg.groupSpacing)
+        hh:SetAttribute("columnSpacing", across)
     end
     -- Tiles per line: by group (five), or members listed in order.
     local per = Group.PerLine(cfg)
@@ -412,7 +452,7 @@ end
 -- group 3 is always the third line even if 1 or 2 is empty.
 -- Protected, out of combat only.
 function Group:PlaceGroupHeaders(cfg, w, ht, rows)
-    local corner, y0 = Group.Corner(cfg), cornerY(cfg, self.holder)
+    local corner, y0 = Group.Anchor(cfg, self.holder)
     local sx, sy = cfg.growLeft == true and -1 or 1, cfg.growUp == true and 1 or -1
     for i, gh in ipairs(self.headers) do
         gh:SetAttribute("unitWidth", w)
@@ -422,12 +462,12 @@ function Group:PlaceGroupHeaders(cfg, w, ht, rows)
         if rows then
             gh:SetPoint(corner, self.holder, corner, 0, y0 + sy * (i - 1) * (ht + cfg.groupSpacing))
         else
-            gh:SetPoint(corner, self.holder, corner, sx * (i - 1) * (w + cfg.groupSpacing), y0)
+            gh:SetPoint(corner, self.holder, corner, sx * (i - 1) * (w + cfg.groupSpacing - self:Nest(cfg)), y0)
         end
     end
 end
 
--- Sizes the holder to the group shown (in test mode, the preview's). Kept to
+-- Sizes the holder to the group shown (while previewing, the preview's). Kept to
 -- what's there so it never reaches past the screen edge, since it's clamped
 -- to it. Protected, out of combat only.
 function Group:Resize(cfg)
@@ -440,7 +480,7 @@ function Group:Resize(cfg)
         rows = Group.Direction(cfg) == "rows"
         count = self.opts.count(cfg)
     end
-    local fw, fh = Group.Footprint(cfg, count, rows, holder.tileW, holder.tileH)
+    local fw, fh = Group.Footprint(cfg, count, rows, holder.tileW, holder.tileH, self:Nest(cfg))
     holder:SetSize(fw, fh + (holder.padUp or 0) + (holder.padDown or 0))
 end
 
@@ -477,8 +517,8 @@ function Group:Layout(cfg, text, range)
     h:SetAttribute("unitHeight", ht)
     holder.padUp, holder.padDown = self:Pads(cfg)
     h:ClearAllPoints()
-    local corner = Group.Corner(cfg)
-    h:SetPoint(corner, holder, corner, 0, cornerY(cfg, holder))
+    local at, y = Group.Anchor(cfg, holder)
+    h:SetPoint(at, holder, at, 0, y)
     local rows = self:ApplyDirection(cfg)
     self:PlaceGroupHeaders(cfg, w, ht, rows)
     holder.tileW, holder.tileH = w, ht
@@ -501,6 +541,7 @@ function Group:Layout(cfg, text, range)
     self:ApplyTestAlpha()
     self:SetEnabled(on, cfg)
     self:MakeAhead()
+    DUI.Fire("FrameLaidOut", "unitframes." .. tostring(self.key))
 end
 
 -- Creates every button bare before it's needed. The client never runs a
@@ -561,8 +602,7 @@ function Group:SetEnabled(on, cfg)
     end
 end
 
--- While test mode shows samples, the real buttons can step aside. Alpha works
--- in combat too (test mode ends when combat starts).
+-- While previewing, the real buttons can step aside. Alpha works in combat too.
 function Group:ApplyTestAlpha()
     if not self.header then return end
     local a = (self:Previewing() and self.opts.hideHeaderInTest) and 0 or 1
@@ -570,10 +610,9 @@ function Group:ApplyTestAlpha()
     for _, gh in ipairs(self.headers) do gh:SetAlpha(a) end
 end
 
--- Test mode is on and this group's samples are wanted. The test box can untick
--- them, but a sweep shows its group either way.
+-- A sweep shows its group even with the test box unticked.
 function Group:Previewing()
-    return DUI.testMode and (self.sweep ~= nil or DUI.TestPartShown(self.key))
+    return self.revealed == true or (DUI.testMode and (self.sweep ~= nil or DUI.TestPartShown(self.key)))
 end
 
 -- Samples: plain buttons filled with sample members. Test mode uses the
@@ -652,14 +691,15 @@ function Group:LayoutSamples(list, holder, cfg, text, w, h, top, down)
     local corner = Group.Corner(cfg)
     local sx, sy = cfg.growLeft == true and -1 or 1, cfg.growUp == true and 1 or -1
     local y0 = cfg.growUp == true and down or -top
+    local nest = Group.NestCut(cfg, self.opts.spec, holder)
     for i, b in ipairs(list) do
         local line = math.floor((i - 1) / per)
         local member = (i - 1) % per
         local x, y
         if rows then
-            x, y = member * (w + cfg.spacing), line * (h + cfg.groupSpacing)
+            x, y = member * (w + cfg.spacing - nest), line * (h + cfg.groupSpacing)
         else
-            x, y = line * (w + cfg.groupSpacing), member * (h + cfg.spacing)
+            x, y = line * (w + cfg.groupSpacing - nest), member * (h + cfg.spacing)
         end
         b:ClearAllPoints()
         b:SetSize(w, h)
@@ -684,9 +724,11 @@ function Group:LayoutPreview(cfg, text, w, h)
 end
 
 -- Fills the first count sample buttons with sample members and hides the rest.
-function Group:FillSamples(list, count, cfg)
+-- noAuras leaves off every aura piece (the test box's Auras tick).
+function Group:FillSamples(list, count, cfg, noAuras)
     for i, b in ipairs(list) do
         if i <= count then
+            b.noAuras = noAuras == true
             -- The options page's single tile (b.fullSample) carries every piece.
             b.test = b.fullSample and self.opts.fullSample and self.opts.fullSample(cfg) or self.opts.sampleFor(i, cfg)
             b:Show()
@@ -694,7 +736,7 @@ function Group:FillSamples(list, count, cfg)
             if b.apiSeen then DUI.APIReport.Unit(self.key, b, b.unitToken, true)
             else b.apiSeen = true; DUI.APIReport.Made(self.key, b, b.unitToken, true) end
             UF.ShowSample(b)
-            local kind = b.test.dispel
+            local kind = not b.noAuras and b.test.dispel or nil
             local d = b.sampleDispel
             if kind and b.showDispel then
                 local c = ns.Auras.DISPEL_COLORS[kind]
@@ -719,7 +761,7 @@ function Group:FillSamples(list, count, cfg)
             b.targetMark:SetShown(mark)
             b.targetMark:SetAlpha(mark and 1 or 0)
             if self.opts.showSample then self.opts.showSample(b, i, cfg) end
-            ns.GroupPrivate.ShowSample(b, i, cfg)
+            if b.noAuras then ns.GroupPrivate.HideSample(b) else ns.GroupPrivate.ShowSample(b, i, cfg) end
         else
             b.test = nil
             b:Hide()
@@ -732,10 +774,11 @@ function Group:FillSamples(list, count, cfg)
 end
 
 function Group:ShowPreview(on)
-    on = on and self:Previewing() and not (self.opts.hideInTest and self.opts.hideInTest())
+    local hiddenByThisTestMode = DUI.testMode and self.opts.hideInTest and self.opts.hideInTest()
+    on = on and self:Previewing() and not hiddenByThisTestMode
     if on then self:EnsurePreview() end
     if not self.preview then return end
     local cfg = self:Config()
     local count = cfg and self.opts.previewCount(cfg) or #self.preview
-    self:FillSamples(self.preview, on and count or 0, cfg)
+    self:FillSamples(self.preview, on and count or 0, cfg, not ns.Test.ShowsAuras())
 end

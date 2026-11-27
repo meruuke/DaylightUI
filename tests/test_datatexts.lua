@@ -515,6 +515,43 @@ T.test("data texts: gold on another ruleset is never listed or added", function(
     _G.GetRealmName = was
 end)
 
+-- Forever's megaservers: the realm name is empty, only the game's rules say
+-- which ruleset you're on. Each character's is saved at login, so a character
+-- on RP PvP stays out of a PvE character's gold even with no realm to go by.
+T.test("data texts: gold from another ruleset is left out without realm names", function()
+    local was = { _G.GetRealmName, _G.RegionalUniqueNamesEnabled, _G.C_GameRules, _G.Enum.GameRule }
+    local DUI = login(nil, function()
+        _G.GetRealmName = function() return "" end
+        _G.RegionalUniqueNamesEnabled = function() return true end
+        _G.Enum.GameRule = { PvPRuleset = 1, RPRuleset = 2, HardcoreRuleset = 3 }
+        _G.C_GameRules = { IsGameRuleActive = function() return false end }   -- PvE
+    end)
+    local chars = DUI.DB.Root().characters
+    T.eq(DUI.DB.Character().ruleset, "PvE", "this character's ruleset is saved")
+    chars["Spam Bank-"] = { money = 980000, class = "PRIEST", ruleset = "PvE" }
+    chars["Rudimentary Bipedal-"] = { money = 72, class = "PALADIN", ruleset = "RPvP" }
+    chars["Hard Case-"] = { money = 5000, class = "ROGUE", ruleset = "Hardcore" }
+    chars["Not Seen-"] = { money = 300, class = "MAGE" }
+    hover(1)
+    local t = tipText()
+    T.truthy(t:find("Spam Bank", 1, true), "the same ruleset is listed: " .. t)
+    T.falsy(t:find("Rudimentary", 1, true), "RP PvP isn't PvE: " .. t)
+    T.falsy(t:find("Hard Case", 1, true), "nor is Hardcore: " .. t)
+    T.truthy(t:find("Not Seen", 1, true), "a character not logged in since can't be told apart: " .. t)
+    for _, c in ipairs(DT().Characters()) do
+        T.truthy(c.key ~= "Rudimentary Bipedal-" and c.key ~= "Hard Case-", "not in the total either: " .. c.key)
+    end
+    for _, c in ipairs(DUI.Alts.List()) do T.truthy(c.name ~= "Rudimentary Bipedal", "nor in Remove a character") end
+    DT().slots[1]:GetScript("OnLeave")(DT().slots[1])
+    -- The game moving you to another ruleset saves the new one.
+    _G.C_GameRules = { IsGameRuleActive = function(rule) return rule == 1 or rule == 2 end }
+    stub.FireEvent("GAME_RULES_CHANGED")
+    T.eq(DUI.DB.Character().ruleset, "RPvP")
+    T.truthy(DUI.Alts.Reachable("Rudimentary Bipedal-"), "now the paladin is on yours")
+    T.falsy(DUI.Alts.Reachable("Spam Bank-"))
+    _G.GetRealmName, _G.RegionalUniqueNamesEnabled, _G.C_GameRules, _G.Enum.GameRule = was[1], was[2], was[3], was[4]
+end)
+
 -- A right-click on the gold text: the menu it opens, as asked for.
 local function goldMenu(DUI)
     local menu
@@ -836,6 +873,59 @@ T.test("data texts: on a controller nothing opens a game window from addon code,
     clearGameWindows()
 end)
 
+-- The game's minimap clock (Blizzard_TimeManager, loaded at login): a click
+-- turns a ringing alarm off, else opens or closes the Clock window.
+local function gameClock()
+    local clock = { ringing = false }
+    _G.ToggleTimeManager = function() stub.opened[#stub.opened + 1] = "clock" end
+    _G.TimeManager_IsAlarmFiring = function() return clock.ringing end
+    _G.TimeManager_TurnOffAlarm = function()
+        clock.ringing = false
+        stub.opened[#stub.opened + 1] = "alarm off"
+    end
+    local b = CreateFrame("Button", "TimeManagerClockButton", UIParent)
+    b:SetScript("OnClick", function()
+        if clock.ringing then _G.TimeManager_TurnOffAlarm() else _G.ToggleTimeManager() end
+    end)
+    b:Hide()   -- its minimap cluster is hidden under Daylight UI's map
+    return clock
+end
+local function clearGameClock()
+    _G.ToggleTimeManager, _G.TimeManager_IsAlarmFiring, _G.TimeManager_TurnOffAlarm = nil, nil, nil
+    _G.TimeManagerClockButton = nil
+end
+
+T.test("data texts: a click on the time opens the game's Clock, or turns a ringing alarm off", function()
+    local DUI = login()
+    gameWindows()
+    local clock = gameClock()
+    DUI:Set("InfoPanel", "data.slot3", "time")
+    stub.RunTimers()
+    stub.opened = {}
+    playerClick(3, "LeftButton")
+    T.deq(stub.opened, { "clock" }, "the alarm and stopwatch window opens")
+    hover(3)
+    T.truthy(tipText():find("Click: alarm and stopwatch", 1, true), "the tooltip says so: " .. tipText())
+    DT().slots[3]:GetScript("OnLeave")(DT().slots[3])
+    clock.ringing = true
+    hover(3)
+    T.truthy(tipText():find("Click: turn the alarm off", 1, true), "ringing: " .. tipText())
+    DT().slots[3]:GetScript("OnLeave")(DT().slots[3])
+    stub.opened = {}
+    playerClick(3, "LeftButton")
+    T.deq(stub.opened, { "alarm off" }, "a ringing alarm stops, the window stays as it was")
+    -- In a fight no secure button is laid: the text's own click opens it (the
+    -- Clock isn't a protected window).
+    stub.EnterCombat()
+    stub.opened = {}
+    playerClick(3, "LeftButton")
+    T.deq(stub.opened, { "clock" }, "opens in a fight too")
+    stub.LeaveCombat()
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    clearGameClock()
+    clearGameWindows()
+end)
+
 T.test("data texts: clicks open the matching window; character and social wait out combat", function()
     socialIn4(login())
     local S = DT().slots
@@ -1102,8 +1192,10 @@ T.test("data bar: angled ends are a switch, the border a slider from none", func
     T.eq(shell.opts.noBorder, false, "a border")
     T.near(shell.border.LEFT.__vertex[4], 0.4)
     barOn(DUI, "databar.angled", false)
+    barOn(DUI, "databar.angledRight", false)
     T.eq(DUI.Style.GetSlant(bar().body).side, nil, "straight ends")
     barOn(DUI, "databar.angled", true)
+    barOn(DUI, "databar.angledRight", true)
     T.eq(DUI.Style.GetSlant(bar().body).side, "both", "angled again")
 end)
 
@@ -1458,6 +1550,24 @@ T.test("data texts: professions show the primaries' skill; a click opens the las
     _G.GetProfessions, _G.GetProfessionInfo = nil, nil
 end)
 
+T.test("data texts: professions follow the order dragged in the profession window", function()
+    local DUI = login(nil, function()
+        _G.GetProfessions = function() return 1, 2, nil, nil, 3 end
+        local info = { { "Tailoring", 245, 300, 197 }, { "Enchanting", 230, 300, 333 }, { "Cooking", 75, 75, 185 } }
+        _G.GetProfessionInfo = function(i) local p = info[i] return p[1], 0, p[2], p[3], 0, 0, p[4] end
+    end)
+    DUI.DB.Character().craftOrder = { 185, 333, 197 }
+    DUI:Set("InfoPanel", "data.slot4", "professions")
+    stub.RunTimers()
+    measureLikeTheGame()
+    T.eq(shown()[4], "230 · 245", "Enchanting first, as dragged")
+    hover(4)
+    local tip = tipText()
+    local c, e = tip:find("Cooking", 1, true), tip:find("Enchanting", 1, true)
+    T.truthy(c and e and c < e, tip)
+    _G.GetProfessions, _G.GetProfessionInfo = nil, nil
+end)
+
 T.test("data texts: hearthstone shows home and its cooldown; out of combat a secure button over it uses it", function()
     local cd = { 0, 0 }
     local DUI = login(nil, function()
@@ -1668,4 +1778,16 @@ T.test("data texts: with no equipment sets the text says so and a click does not
     T.isnil(DUI.Widgets.menuOwner, "no empty menu")
     hover(4)
     T.truthy(tipText():find("No equipment sets yet.", 1, true), tipText())
+end)
+
+T.test("bar ends: the data bar's ends each on their own; the tab leans the same way", function()
+    local DUI = login()
+    barOn(DUI)
+    local S = DUI.Style
+    T.eq(S.GetSlant(bar().body).side, "both")
+    barOn(DUI, "databar.flipLeft", true)
+    T.eq(S.GetSlant(bar().body).under, "left", "/--/")
+    T.eq(S.GetSlant(bar().tab).under, "left", "the tab too")
+    barOn(DUI, "databar.angledRight", false)
+    T.eq(S.GetSlant(bar().body).side, "left", "the right end straight on its own")
 end)

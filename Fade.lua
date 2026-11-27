@@ -38,6 +38,7 @@ Fade.INTRO_FALLBACK = 8 -- after PLAYER_ENTERING_WORLD it starts anyway
 Fade.INTRO_SAFETY = 20 -- and after PLAYER_LOGIN, if the world never arrives
 Fade.DEFAULT = { mode = "never", alpha = 0, mouseover = true, target = false, targetEnemy = false, delay = 4.5, opacity = 1 }
 Fade.REPAINT = 1 -- a faded area at rest is repainted this often (in case of someone else's SetAlpha)
+Fade.REREAD = 1 -- an area's settings are read again at least this often, even with no change heard
 
 Fade.HUSH_OUT = 2.5 -- a hush eases its areas out this slowly (settling in by the fire)
 Fade.WAKE = 1 -- Float: a change shows its area at least this long (even with a delay of 0)
@@ -99,11 +100,33 @@ local function floats(e, s)
     return e.float ~= false and type(s) == "table" and s.mode == "float"
 end
 
+-- Bumped by every setting change: each area's kept choices are read again then.
+local readGen = 0
+
 -- An area's choices, validated: a bad or missing value falls back. opacity is
 -- where it sits while shown, and the faded alpha never goes above it. Float
 -- stands in for the mode as out of combat.
+-- The ticker asks for every area ten times a second, so the answer is kept
+-- until a setting changes. A write that skips DUI:Set (a profile filled in place)
+-- is still picked up within about Fade.REREAD seconds.
+local readFresh
+local stepAt = 0 -- GetTime() at the last tick: the kept choices age by it
 function Fade.Read(e)
-    local s = DUI:Get(e.scope, e.path)
+    local c = e.readKept
+    if c and c.gen == readGen and stepAt - c.at < Fade.REREAD then
+        return c[1], c[2], c[3], c[4], c[5], c[6]
+    end
+    c = c or {}
+    e.readKept = c
+    c.gen, c.at = readGen, stepAt
+    c[1], c[2], c[3], c[4], c[5], c[6] = readFresh(e)
+    return c[1], c[2], c[3], c[4], c[5], c[6]
+end
+
+function readFresh(e)
+    -- An area with no setting of its own never fades by itself; it only
+    -- follows the hushes (a flight path, the campfire).
+    local s = e.path and DUI:Get(e.scope, e.path) or nil
     local d = Fade.DEFAULT
     local mode, alpha, mouseover, delay, opacity, target
     if type(s) ~= "table" then
@@ -141,10 +164,15 @@ end
 
 -- Inside an instance with "Fades only in the open world" on, every area shows
 -- as if its fade were Never (fights there need everything).
+local asideKept = {}
 function Fade.Aside()
     if not Fade.inInstance then return false end
+    -- Asked for every area each tick: read once a tick (and again after a setting change).
+    local k = asideKept
+    if k.tick == tick and k.gen == readGen then return k.yes end
     local g = DUI.DB and DUI.DB.General and DUI.DB.General()
-    return g ~= nil and g.fadeOpenWorldOnly == true
+    k.tick, k.gen, k.yes = tick, readGen, g ~= nil and g.fadeOpenWorldOnly == true
+    return k.yes
 end
 
 -- Where the player is, checked at login and after each zone change.
@@ -161,12 +189,23 @@ function Fade.CheckInstance()
     return changed
 end
 
+-- The options page on show (nil when the window is closed), read once a tick:
+-- every area asks it on every tick.
+local pageKept = {}
+local function pageShown()
+    local k = pageKept
+    if k.tick == tick then return k.page end
+    local P = DUI.OptionsPanel
+    k.tick, k.page = tick, nil
+    if P ~= nil and P.IsShown() then k.page = P.Current() or false end
+    return k.page
+end
+
 local function forced(e)
     if DUI.Movers and DUI.Movers.unlocked == true then return true end
     if Fade.editMode or DUI.testMode == true then return true end
-    local P = DUI.OptionsPanel
-    if P == nil or not P.IsShown() then return false end
-    local current = P.Current()
+    local current = pageShown()
+    if current == nil then return false end
     if current == Fade.HUB_PAGE then return Fade.HubShows(e) end
     if e.page == nil then return false end
     -- A single page id, or a list (an area shown on several pages).
@@ -222,6 +261,10 @@ function Fade.Goal(e, now)
     -- Leaving (Fade.Leave): invisible no matter what else asks.
     if e.gone then return 0 end
     local mode, alpha, mouseover, delay, opacity, target = Fade.Read(e)
+    -- Never fades and nothing caps or hushes it: shown, whatever else is asked
+    -- below (most areas, ten times a second). Its last-wanted time is left alone,
+    -- as before: switched to a fade later, it fades without waiting the delay again.
+    if mode == "never" and not e.cap and not e.peeking and next(hushes) == nil then return opacity end
     -- Stepped aside: shown, and back in the world the delay runs first.
     if Fade.Aside() then e.lastNear = now; return opacity end
     if Fade.showAll then e.lastNear = now; return opacity end
@@ -229,7 +272,7 @@ function Fade.Goal(e, now)
         if Fade.Held() then return mode == "never" and opacity or alpha end
         e.peeking = nil
     end
-    if forced(e) then e.lastNear = now; return opacity end
+    if forced(e) or (e.shownFor and next(e.shownFor)) then e.lastNear = now; return opacity end
     -- Hushed (sitting by a campfire): hidden out of combat, back on mouseover.
     -- The second return asks for the slow ease out.
     if hushed(e) and not (Fade.fighting or InCombatLockdown()) then
@@ -317,8 +360,8 @@ local function wholeNow()
     for f in pairs(wholeDue) do
         wholeDue[f] = nil
         -- A frame asked once to stay whole-off never made its list of reasons.
-        local whys = f.fadeWhy
-        local on = whys ~= nil and next(whys) ~= nil and not uiAway
+        local whys, nots = f.fadeWhy, f.fadeNotWhole
+        local on = whys ~= nil and next(whys) ~= nil and not uiAway and not (nots and next(nots))
         if (f.fadeWhole == true) ~= on then setWhole(f, on) end
     end
 end
@@ -367,6 +410,24 @@ function Fade.Whole(f, why, on)
     DUI.AfterCombat(wholeNow, "fade:whole")
 end
 
+-- Keeps a frame from fading as one picture while anyone asks (why: a key per
+-- asker). A frame drawn to its own buffer draws over what sits on its layer
+-- just above it: a cast bar hung under the player frame went behind it.
+function Fade.NotWhole(f, why, on)
+    if type(f) ~= "table" then return end
+    local nots = f.fadeNotWhole
+    if not nots then
+        if not on then return end
+        nots = {}
+        f.fadeNotWhole = nots
+    end
+    if nots[why] == (on or nil) then return end
+    nots[why] = on or nil
+    wholeAll[f] = true
+    wholeDue[f] = true
+    DUI.AfterCombat(wholeNow, "fade:whole")
+end
+
 -- A list may be refilled in place, so keep membership separately. Each area
 -- owns its own reason: leaving one area must not clear another area's request
 -- or the unit frames' range fade. Retain the token and membership on re-register.
@@ -401,9 +462,18 @@ local function paint(e)
     modsDue = true
     local seen = e.seen or {}
     e.seen = seen
+    -- Frames left painted below full, so one that leaves the list faded and
+    -- comes back after the area is full again still gets painted.
+    local dim = e.dim
+    if not dim then
+        dim = setmetatable({}, { __mode = "k" })
+        e.dim = dim
+    end
+    local faded = e.now < 1 or nil
     local n = 0
     for _, f in ipairs(e.list) do
         if e.paint then e.paint(f, e.now) else f:SetAlpha(e.now) end
+        dim[f] = faded
         n = n + 1
         seen[n] = f
     end
@@ -466,6 +536,7 @@ Fade.driver = driver
 -- Updates every area's goal and starts the driver if any has to move.
 function Fade.Step()
     local now = GetTime()
+    stepAt = now
     -- The fade-in waits for the loading screen. These start it if that never
     -- reports being gone.
     if loginPhase and ((worldAt and now - worldAt >= Fade.INTRO_FALLBACK)
@@ -501,6 +572,11 @@ function Fade.Step()
             -- checks per tick on a faded raid).
             listOf(e)
             if newcomers(e) or now - (e.paintedAt or 0) >= Fade.REPAINT then paint(e) end
+        elseif e.dim and next(e.dim) ~= nil then
+            -- Full, but a frame painted faded is away (a window hidden after the
+            -- fight): when it's shown again it would keep that alpha.
+            listOf(e)
+            if newcomers(e) then paint(e) end
         end
         -- A frame can leave, or its fade become Never, without any alpha change.
         -- Only areas currently needing whole-fading read their lists here.
@@ -511,7 +587,7 @@ function Fade.Step()
 end
 
 -- def needs a key and a frames function, plus the scope and path of the area's
--- fade setting. page is the options page (an id or a list) that shows it. The
+-- fade setting (no path: it never fades by itself and only follows the hushes). page is the options page (an id or a list) that shows it. The
 -- optional functions cap (an opacity limit), wake, over (whether the mouse is on
 -- it, when its frames can't tell) and paint (sets the alpha itself) tune it.
 -- float = false drops the "Only when something changes" choice, and whole = true
@@ -612,7 +688,7 @@ end
 function Fade.Wake(key)
     local e = entries[key]
     if e == nil then return end
-    local s = DUI:Get(e.scope, e.path)
+    local s = e.path and DUI:Get(e.scope, e.path) or nil
     if not floats(e, s) then return end
     local delay = type(s.delay) == "number" and math.max(0, s.delay) or Fade.DEFAULT.delay
     e.lastNear = math.max(e.lastNear or 0, GetTime() + math.max(0, Fade.WAKE - delay))
@@ -622,7 +698,7 @@ end
 -- its watching when none of its areas do.
 function Fade.Floats(key)
     local e = entries[key]
-    return e ~= nil and floats(e, DUI:Get(e.scope, e.path))
+    return e ~= nil and floats(e, e.path and DUI:Get(e.scope, e.path) or nil)
 end
 
 -- Float everything (General > Fade): on while every area that can float does.
@@ -699,6 +775,26 @@ function Fade.Hold(key, on)
     if not on then readFrames(e); paint(e) end
 end
 
+-- Keeps an area shown while any reason (why) asks: it eases to its opacity, and back once none do.
+function Fade.Show(key, why, on)
+    local e = entries[key]
+    if not e then return end
+    on = on and true or nil
+    e.shownFor = e.shownFor or {}
+    if e.shownFor[why] == on then return end
+    e.shownFor[why] = on
+    if e.held or loginPhase then return end
+    listOf(e)
+    local goal = Fade.Goal(e, GetTime())
+    if motionOn() then
+        aim(e, goal)
+        driver:Show()
+    else
+        e.now, e.from, e.to = goal, goal, goal
+        paint(e)
+    end
+end
+
 -- A feature quiets some areas for a while (the campfire hides bars and unit
 -- frames while you sit). Every area whose key starts with one of prefixes
 -- slowly eases to 0 out of combat. The mouse, a fight, unlock, test mode and
@@ -763,7 +859,9 @@ end
 DUI.FadeShowAll = Fade.ToggleShowAll
 -- Every Daylight UI key sits in its own section of the game's Key Bindings, named by this.
 _G.BINDING_HEADER_DAYLIGHTUI = "Daylight UI"
-_G.BINDING_NAME_DAYLIGHTUI_SHOWALL = DUI.L["Fade Toggle"]
+DUI.WithLanguage(function()
+    _G.BINDING_NAME_DAYLIGHTUI_SHOWALL = DUI.L["Fade Toggle"]
+end)
 
 -- The game draws the minimap's dots (your arrow, quest marks, tracking,
 -- party) at full strength regardless of its parents' alpha. So whoever fades
@@ -1115,12 +1213,28 @@ end
 -- for a new character): "Welcome back, <you>" with your name in the accent,
 -- rising in above the middle, then drifting up and away like the level-up
 -- showpiece. Takes no clicks.
-local welcome
+local welcome, welcomeHolder
+
+-- The line's own spot, with an unlock handle so a player with several monitors
+-- can put it on their game screen. Unscaled, as the line always was.
+Fade.WELCOME_MOVER = "welcome"
+function Fade.WelcomeHolder()
+    if welcomeHolder then return welcomeHolder end
+    local W = Fade.WELCOME
+    welcomeHolder = CreateFrame("Frame", "DaylightUIWelcomeHolder", UIParent)
+    welcomeHolder:SetSize(600, W.size * 2)
+    welcomeHolder:EnableMouse(false)
+    DUI.Movers.Register(welcomeHolder, Fade.WELCOME_MOVER, "Welcome line",
+        { "CENTER", nil, "CENTER", 0, W.y }, { scale = false })
+    return welcomeHolder
+end
+DUI.On("Login", function() Fade.WelcomeHolder() end)
+
 function Fade.Welcome()
     local W = Fade.WELCOME
     local M, Style = DUI.Motion, DUI.Style
     if not welcome then
-        welcome = CreateFrame("Frame", nil, UIParent)
+        welcome = CreateFrame("Frame", nil, Fade.WelcomeHolder())
         welcome:EnableMouse(false)
         welcome:SetFrameStrata("HIGH")
         welcome:SetSize(600, W.size * 2)
@@ -1142,7 +1256,7 @@ function Fade.Welcome()
     Style.InkText(welcome.text, "TEXT")
     local function at(p, a)
         welcome:ClearAllPoints()
-        welcome:SetPoint("CENTER", UIParent, "CENTER", 0, W.y + p)
+        welcome:SetPoint("CENTER", welcomeHolder, "CENTER", 0, p)
         welcome:SetAlpha(a)
     end
     at(-W.rise, 0)
@@ -1249,6 +1363,7 @@ DUI.RegisterEvent("GLOBAL_MOUSE_UP", function()
 end)
 
 DUI.On("SettingChanged", function(scope, path)
+    readGen = readGen + 1
     if type(path) ~= "string" then return end
     -- "Fades only in the open world": no preview, it applies at once.
     if scope == "general" and path == "fadeOpenWorldOnly" then Fade.Step(); return end
@@ -1294,8 +1409,11 @@ Fade.CARD_LABEL = "Opacity & fade"
 -- (Fade.HubGroups).
 -- opts.own: a switch giving the area a fade of its own (the XP bar's, apart
 -- from its panel). It goes first, and the rows below it only count while it's on.
+-- opts.noTarget: hides Show with a target and Only enemies, for an area that
+-- only shows while you have a target anyway (the target frame).
 function Fade.Items(prefix, extra, disabled, name, opts)
     local noFloat = opts ~= nil and opts.noFloat == true
+    local noTarget = opts ~= nil and opts.noTarget == true
     local own = opts ~= nil and opts.own or nil
     local function areaOff(get) return disabled ~= nil and disabled(get) == true end
     local function pageOff(get) return areaOff(get) or (own ~= nil and get(own.key) ~= true) end
@@ -1325,6 +1443,10 @@ function Fade.Items(prefix, extra, disabled, name, opts)
         { type = "slider", key = prefix .. "delay", label = "Delay", min = 0, max = 30, step = 0.5,
           desc = "How long it waits before it fades, in seconds: after a fight ends, once a fight starts, after your mouse leaves it, after you clear your target, or after a change it shows.", disabled = off },
     }
+    if noTarget then
+        local function never() return true end
+        items[5].hidden, items[6].hidden = never, never
+    end
     local area = { prefix = prefix, name = name, base = {}, extras = {}, areaOff = areaOff }
     for i, field in ipairs(Fade.FIELDS) do
         items[i].fadeArea = area

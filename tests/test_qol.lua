@@ -418,6 +418,48 @@ T.test("qol: camera slider's top end is the client's limit, found when its page 
     camDone()
 end)
 
+-- The slider that shows the setting, wherever it was drawn first.
+local function camSlider(DUI)
+    for _, row in pairs(DUI.OptionsPanel.Results().rows) do
+        if row.item and row.item.key == "cameraZoom" and row:IsShown() then return row.control.slider end
+    end
+end
+
+T.test("qol: the camera slider found by search reaches the client's limit", function()
+    camSetup(3.4)
+    local DUI = DaylightUI
+    DUI.OptionsPanel.Show("home")
+    DUI.OptionsPanel.Search("camera distance")
+    local s = camSlider(DUI)
+    T.truthy(s, "the search shows the camera slider")
+    local _, hi = s:GetMinMaxValues()
+    T.eq(hi, 1.7, "3.4 of a normal 2.0 is 170%, not the 200% guess")
+    camDone()
+end)
+
+T.test("qol: a camera slider first drawn in a fight takes the client's limit after it", function()
+    camSetup(3.4)
+    local DUI = DaylightUI
+    stub.combat = true
+    DUI.OptionsPanel.Show("QoL.qol")
+    stub.combat = false
+    DUI.OptionsPanel.Show("home")
+    DUI.OptionsPanel.Show("QoL.qol")
+    local row
+    local function find(f)
+        for _, c in ipairs({ f:GetChildren() }) do
+            if c.item and c.item.key == "cameraZoom" then row = c return end
+            find(c)
+            if row then return end
+        end
+    end
+    find(UIParent)
+    T.truthy(row and row.control, "the page drew the camera slider")
+    local _, hi = row.control.slider:GetMinMaxValues()
+    T.eq(hi, 1.7)
+    camDone()
+end)
+
 T.test("qol: the camera's top is never asked in a fight", function()
     local _, cvars = camSetup(3.4)
     stub.combat = true
@@ -1080,6 +1122,28 @@ T.test("qol: fishing: pointing at a unit or a thing with a tooltip leaves the cl
     press()
     _G.GameTooltip = nil
     T.truthy(bound(), "a tooltip fading away has been left behind")
+end)
+
+T.test("qol: fishing: a bobber whose tooltip is muted still leaves the click to the game", function()
+    fishSetup(true)
+    _G.GameTooltip = { IsShown = function() return true end, GetAlpha = function() return 0 end }
+    local was = _G.C_TooltipInfo
+    _G.C_TooltipInfo = { GetWorldCursor = function() return { type = 33, lines = {} } end }
+    press()
+    T.eq(bound(), nil, "the world says something is under the mouse")
+    _G.C_TooltipInfo = was
+    _G.GameTooltip = nil
+end)
+
+-- The client's GetWorldCursor may return no value at all (not even nil) when
+-- nothing is under the mouse.
+T.test("qol: fishing: nothing under the mouse, the world's answer is empty, the click casts", function()
+    fishSetup(true)
+    local was = _G.C_TooltipInfo
+    _G.C_TooltipInfo = { GetWorldCursor = function() end }
+    press()
+    _G.C_TooltipInfo = was
+    T.truthy(bound(), "an empty answer is no thing under the mouse")
 end)
 
 T.test("qol: fishing: a fight starting takes the mouse back", function()

@@ -220,7 +220,7 @@ function CB.Create(unit, attachTo, into, opts)
     local overlay = CreateFrame("Frame", nil, h)
     overlay:SetAllPoints(h)
     overlay:SetFrameLevel(h.bar:GetFrameLevel() + 3)
-    -- The spell icon sits over the bar, so the fill can run under it.
+    -- The spell icon sits over the bar's level; the fill starts past it (CB.Layout).
     if not attachTo then
         h.icon = overlay:CreateTexture(nil, "ARTWORK")
         Style.CropIcon(h.icon)
@@ -241,18 +241,31 @@ function CB.Create(unit, attachTo, into, opts)
     end)
     -- Inside a frame the bar covers the power bar, so the power text would run
     -- into the spell name: it fades out while the bar shows. Only the show and
-    -- hide matter here, so a secret cast never gets read.
+    -- hide matter here, so a secret cast never gets read. underCast tells the
+    -- power text's writers to leave its alpha alone until the bar goes.
     if into then
         h:HookScript("OnShow", function(self)
             local t = attachTo.powerText
             if type(t) ~= "table" then return end
+            if self.coveredText and self.coveredText ~= t then self.coveredText.underCast = nil end
             self.coveredText = t
+            if t.underCast then return end
+            t.underCast = true
             DUI.Motion.Fade(t, 1, 0, DUI.Motion.FAST)
         end)
         h:HookScript("OnHide", function(self)
             local t = self.coveredText
             self.coveredText = nil
-            if t then DUI.Motion.Fade(t, 0, 1, DUI.Motion.FAST) end
+            if not t then return end
+            t.underCast = nil
+            -- Hidden at full power: its alpha is the game's answer (secret in a
+            -- fight), so it is written straight back rather than faded to.
+            local u = attachTo.unitToken
+            if attachTo.hideFullPower and type(u) == "string" then
+                ns.UF.PowerTextAlpha(t, u, true)
+            else
+                DUI.Motion.Fade(t, 0, 1, DUI.Motion.FAST)
+            end
         end)
     end
     h:Hide()
@@ -345,14 +358,15 @@ function CB.Hang(h)
     h:ClearAllPoints()
     h:SetPoint("TOPLEFT", f, "BOTTOMLEFT", 0, lift + drop)
     local total = c.fH + H - lift - drop
-    local cut = c.slant and (f.cut or 0) * total / c.fH or 0
     -- One reused shape table, since this runs every frame of a slide.
     local ref = c.ref or {}
-    c.ref, ref.frame, ref.height = ref, f, total
-    local side = cut > 0 and c.side or nil
-    -- Under a bar angled at both ends (the free power bar) it continues both.
-    Style.Slant(h, side and (c.ends or side), cut, ref)
-    -- The fill's moving edge carries the same angle.
+    c.ref = ref
+    -- It continues each of the frame's angled ends (a flipped one as a chevron).
+    local ends, cut = ns.UF.HangEnds(f, total, ref, c.fH)
+    if not c.slant then ends, cut = nil, 0 end
+    Style.Slant(h, ends, cut, ref)
+    -- The fill's moving edge carries the angle of the end it runs toward.
+    local side = ns.UF.HasEnd(ends, c.side) and c.side or nil
     Style.AngleFill(h.bar, side, cut * (H - 2 * T) / total)
     if h.moved then h.moved() end
 end
@@ -443,14 +457,30 @@ function CB.Layout(h, cfg, parentCfg)
         local pf = frames.player
         local pb = pf.freePower
         local db = ns.module and ns.module.db
-        -- Not from a power bar with flipped angles: its line can't be continued.
-        local onPower = cfg.from == "power" and type(pb) == "table" and pb:IsShown() and not pb.flip
+        local onPower = cfg.from == "power" and type(pb) == "table" and pb:IsShown()
             and type(db) == "table" and db.player.powerAt == "free"
         h.under = onPower and pb or pf
     end
     local at = CB.At(h.kind, cfg)
     local hang = type(h.under) == "table" and at == (h.hangAt or "below")
     h.cfgAttach = hang
+    -- A frame fading as one picture draws over a cast bar that overlaps it,
+    -- even one on a higher layer, so while this bar hangs under a frame that
+    -- frame fades piece by piece. Your own bar standing on its own may sit
+    -- anywhere by the player frame and its pieces, so they all do.
+    local holds
+    if cfg.enabled ~= false and not h.preview then
+        if hang then holds = { h.under }
+        elseif h.kind == "player" and frames and frames.player then holds = frames.player.pieces end
+    end
+    local key = "castbar:" .. tostring(h.kind)
+    local now = {}
+    for _, f in ipairs(holds or {}) do now[f] = true end
+    for f in pairs(h.notWholeOf or {}) do
+        if not now[f] then DUI.Fade.NotWhole(f, key, false) end
+    end
+    for f in pairs(now) do DUI.Fade.NotWhole(f, key, true) end
+    h.notWholeOf = next(now) and now or nil
     -- Hung under the player frame it takes that frame's size, otherwise its own.
     if h.inFrame then
         h:SetScale(1)
@@ -484,6 +514,7 @@ function CB.Layout(h, cfg, parentCfg)
         if hang then s = h.under:GetFrameStrata()
         elseif middle then s = pf:GetFrameStrata()
         elseif at == "personal" and ns.Personal.frame then s = ns.Personal.frame:GetFrameStrata()
+        elseif cfg.strata == "FRAME" and ns.frames and ns.frames[h.unit] then s = ns.frames[h.unit]:GetFrameStrata()
         elseif type(cfg.strata) == "string" then s = ns.StrataOf(cfg) end
         if s then h:SetFrameStrata(s) end
     end
@@ -518,10 +549,14 @@ function CB.Layout(h, cfg, parentCfg)
         -- Drawn just above the frame (and below its portrait), so its straight
         -- border covers the rounded tip of the frame's angle where they meet.
         h:SetFrameLevel(f:GetFrameLevel() + 4)
-        h.column = { f = f, base = base, lift = lift, fH = fH, height = height, T = T, side = side, slant = cfg.slant ~= false,
-                     ends = f.ends }
+        h.column = { f = f, base = base, lift = lift, fH = fH, height = height, T = T, side = side, slant = cfg.slant ~= false }
         local total = fH + height - lift
-        cut = cfg.slant == false and 0 or (f.cut or 0) * total / fH
+        -- How far in the end it runs toward is at its bottom, for its text: under
+        -- a flipped end (a chevron) the line starts at the frame's bottom.
+        local over = ns.UF.FlipAt(f, side) and (total - fH) or total
+        cut = (cfg.slant == false or not ns.UF.HasEnd(f.ends, side)) and 0 or (f.endCut or f.cut or 0) * over / fH
+        -- Its other end can be angled on its own too.
+        h.hangPad = cfg.slant ~= false and (f.endCut or 0) * total / fH or 0
         CB.Hang(h)
     elseif middle then
         h.column = nil
@@ -569,8 +604,8 @@ function CB.Layout(h, cfg, parentCfg)
         end
     end
     if h.under and not h.inFrame then DUI.Movers.Suspend(h.moverKey, at ~= "free") end
-    -- The fill runs the whole bar (under a portrait ring, if any). The icon and
-    -- text start past the ring.
+    -- The fill runs the whole bar (under a portrait ring, if any), or starts
+    -- past the spell icon. The icon and text start past the ring.
     h.bar:ClearAllPoints()
     h.bar:SetPoint("TOPLEFT", h, "TOPLEFT", T, -T)
     h.bar:SetPoint("BOTTOMRIGHT", h, "BOTTOMRIGHT", -T, T)
@@ -584,6 +619,9 @@ function CB.Layout(h, cfg, parentCfg)
         h.icon:SetSize(s, s)
         h.icon:Show()
         contentLead = lead + s
+        -- The fill starts past the icon: run under it, a cast's first stretch
+        -- filled out of sight and the bar looked like nothing had started.
+        h.bar:SetPoint("TOPLEFT", h, "TOPLEFT", T + contentLead, -T)
     elseif h.icon then
         h.icon:Hide()
     end
@@ -618,7 +656,9 @@ function CB.Layout(h, cfg, parentCfg)
     -- The text stays clear of angled ends: the frame's when inside it, the
     -- bar's own otherwise.
     local endCut, slant = cut, cut > 0 and side or nil
-    if slant and hang and h.under.ends then slant = h.under.ends end
+    if hang and cfg.slant ~= false and h.under.ends then
+        slant, endCut = h.under.ends, math.max(endCut, h.hangPad or 0)
+    end
     if h.into then
         endCut = h.attached.cut or 0
         slant = h.attached.spec and h.attached.spec.slant
@@ -627,8 +667,9 @@ function CB.Layout(h, cfg, parentCfg)
     local leftPad = CB.PAD + contentLead + (clearLeft and endCut or 0)
     local rightPad = CB.PAD + ((slant == "right" or slant == "both") and endCut or 0)
     if h.into then
-        -- The frame's portrait ring sits over the outer end.
-        local ring = h.attached.ringInset or 0
+        -- The frame's portrait ring sits over the outer end; the power bar
+        -- already starts at it (powerRing), so only what's left.
+        local ring = math.max(0, (h.attached.ringInset or 0) - (h.attached.powerRing or 0))
         if slant == "left" then rightPad = rightPad + ring elseif slant == "right" then leftPad = leftPad + ring end
     elseif hang and side == "left" then
         -- The target's ring hangs over the bar's right end, so the time stays clear.
@@ -739,6 +780,143 @@ function CB.Painted(h)
         notInterruptible = h.notInterruptible, interrupted = h.holding == true })
 end
 
+-- The color picked for the spell on your own bar (casts.spellColors, a list of
+-- { name, color, icon }), or nil. It goes by name so every rank matches, and
+-- the latest pick wins. Only your own bar asks: another unit's spell id can
+-- be secret, yours never is.
+function CB.SpellColor(h)
+    if h.kind ~= "player" then return nil end
+    local list = CB.cfg.spellColors
+    if type(list) ~= "table" or #list == 0 then return nil end
+    local name = h.sampleSpell
+    if not h.test then
+        local id = h.spellID
+        if isSecret(id) or type(id) ~= "number" then return nil end
+        name = C_Spell.GetSpellName(id)
+    end
+    if isSecret(name) or type(name) ~= "string" then return nil end
+    name = name:lower()
+    for i = #list, 1, -1 do
+        local e = list[i]
+        if type(e) == "table" and type(e.name) == "string" and type(e.color) == "table"
+            and e.name:lower() == name then
+            return e.color
+        end
+    end
+    return nil
+end
+
+-- Editing the list (the Cast Bars page). A new spell starts in the next of
+-- these colors, so adding one shows a change at once; a click on its swatch
+-- picks another.
+CB.SPELL_COLOR_START = {
+    { 0.36, 0.78, 0.38 }, { 0.62, 0.38, 0.86 }, { 0.32, 0.62, 0.92 },
+    { 0.94, 0.58, 0.24 }, { 0.86, 0.30, 0.30 }, { 0.30, 0.78, 0.74 },
+}
+
+local function spellColorList()
+    local list = {}
+    for i, e in ipairs(type(CB.cfg.spellColors) == "table" and CB.cfg.spellColors or {}) do
+        if type(e) == "table" then
+            list[i] = { name = e.name, icon = e.icon,
+                        color = type(e.color) == "table" and { e.color[1], e.color[2], e.color[3] } or nil }
+        end
+    end
+    return list
+end
+
+local function saveSpellColors(list)
+    DUI:Set("UnitFrames", "casts.spellColors", list)
+end
+
+-- The spell's game name and icon, from a name or an id typed in.
+local function spellOf(text)
+    local id = tonumber(text)
+    if id then
+        local name = C_Spell.GetSpellName(id)
+        if type(name) ~= "string" or name == "" then return nil end
+        return name, C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(id)
+    end
+    local info = C_Spell.GetSpellInfo and C_Spell.GetSpellInfo(text)
+    if type(info) == "table" and type(info.name) == "string" then return info.name, info.iconID end
+    -- Your spellbook, any case.
+    local low = text:lower()
+    for _, e in ipairs(CB.BookSpells()) do
+        if e.name:lower() == low then return e.name, e.icon end
+    end
+    return nil
+end
+
+-- Your spellbook's spells, highest rank, by name: { name, icon }.
+function CB.BookSpells()
+    local SD = DUI.Book and DUI.Book.SpellData
+    local data = SD and SD.Read(false)
+    local out, seen = {}, {}
+    for _, section in ipairs(data and data.sections or {}) do
+        for _, e in ipairs(section.spells or {}) do
+            if type(e.name) == "string" and not e.passive and not e.future and not seen[e.name] then
+                seen[e.name] = true
+                out[#out + 1] = { name = e.name, icon = e.icon }
+            end
+        end
+    end
+    table.sort(out, function(a, b) return a.name < b.name end)
+    return out
+end
+
+-- Adds a spell by name or id. Returns its name, or nil and why not.
+function CB.AddSpellColor(text)
+    text = strtrim(text or "")
+    if text == "" then return nil end
+    local name, icon = spellOf(text)
+    if not name then
+        return nil, tonumber(text) and DUI.L["No spell has that ID."]
+            or DUI.L["No spell by that name in your spellbook. Type its spell ID instead."]
+    end
+    local list = spellColorList()
+    for i, e in ipairs(list) do
+        if type(e.name) == "string" and e.name:lower() == name:lower() then
+            -- Already there: it moves to the end, so the preview shows it.
+            table.remove(list, i)
+            list[#list + 1] = e
+            saveSpellColors(list)
+            return name
+        end
+    end
+    local start = CB.SPELL_COLOR_START[(#list % #CB.SPELL_COLOR_START) + 1]
+    list[#list + 1] = { name = name, icon = icon, color = { start[1], start[2], start[3] } }
+    saveSpellColors(list)
+    return name
+end
+
+function CB.RemoveSpellColor(i)
+    local list = spellColorList()
+    if not list[i] then return end
+    table.remove(list, i)
+    saveSpellColors(list)
+end
+
+function CB.SetSpellColor(i, rgb)
+    local list = spellColorList()
+    if not (list[i] and type(rgb) == "table") then return end
+    list[i].color = { rgb[1], rgb[2], rgb[3] }
+    saveSpellColors(list)
+end
+
+-- Names from your spellbook that start with what was typed (W.Complete).
+function CB.SuggestSpells(text)
+    text = strtrim(text or "")
+    if #text < 2 or text:match("^%d+$") then return nil end
+    local low, out = text:lower(), {}
+    for _, e in ipairs(CB.BookSpells()) do
+        if e.name:lower():find(low, 1, true) == 1 then
+            out[#out + 1] = { insert = e.name, from = 1, to = #text, label = e.name }
+            if #out >= 8 then break end
+        end
+    end
+    return #out > 0 and out or nil
+end
+
 function paintColor(h)
     -- Reset the empty part to the plain color the last secret flag picked from.
     local off, back = h.backOff, backOf(h)
@@ -773,6 +951,15 @@ function paintColor(h)
             back:SetVertexColor(pal.locked.r * k, pal.locked.g * k, pal.locked.b * k, Style.BAR_BACK_ALPHA)
         end
         CB.PaintHiddenClass(h)
+        return
+    end
+    -- A spell given its own color: a gradient from that color, whatever the fill.
+    local own = CB.SpellColor(h)
+    if own then
+        Style.SetBarGradient(h.bar, false)
+        Style.ClearBarStops(h.bar)
+        CB.PaintHiddenClass(h)
+        DUI.Gradients.PaintFrom(h.bar, own)
         return
     end
     -- A caster whose class the game hides (battlegrounds): the class layers
@@ -852,9 +1039,30 @@ function CB.Stop(h, glide)
     end
 end
 
+-- The fade engine's paint for your cast bar, which has a fade setting of its
+-- own. A bar fading out at the end of a cast is left to finish.
+function CB.PaintFade(h, a)
+    h.fadeNow = a
+    local key = h.__duiAlphaKey
+    if key and key.goal == 0 then return end
+    h:SetAlpha(a)
+end
+
+-- Puts a bar that was just shown back at its fade: its own (yours), or its
+-- frame's (the target's and focus's), so a cast never snaps a faded bar to full.
+function CB.Refade(h)
+    local o = h.fadeOf
+    if o then
+        ns.UF.PaintFade(o, o.fadeNow)
+    elseif type(h.fadeNow) == "number" then
+        h:SetAlpha(h.fadeNow)
+    end
+end
+
 -- Show the bar at once, cancelling a fade out in progress.
 local function showBar(h)
     DUI.Motion.AlphaTo(h, 1, 0)
+    CB.Refade(h)
     CB.SetUp(h, true)
 end
 
@@ -912,9 +1120,14 @@ local function rightAt(h, W, y, inset)
         dy, dx, FW, FH = ft - ht, hl - fl, frame:GetWidth(), frame:GetHeight()
         inset = Pixel.Px(frame, DUI.DB.General().borderPx)
     end
-    local cut = sl and (sl.side == "right" or sl.side == "both") and not sl.ref and not sl.under and sl.cut or 0
+    local angled = sl and (sl.side == "right" or sl.side == "both") and not sl.ref
+    local cut = angled and sl.cut or 0
     if type(cut) ~= "number" or type(FH) ~= "number" or FH <= 0 then cut = 0 end
-    return math.min(W, FW - dx - inset - cut * (dy + y) / (FH or 1))
+    -- How far in the end is at that height: most at the bottom, or at the top
+    -- on a flipped end (its bottom corner sticks out).
+    local t = (dy + y) / (FH or 1)
+    if angled and (sl.under == "right" or sl.under == "both") then t = 1 - t end
+    return math.min(W, FW - dx - inset - cut * t)
 end
 
 -- The bar's shape for the kick's pieces (Motion.LayPiece): its right end
@@ -1025,6 +1238,13 @@ function CB.ShowSample(h, cast)
     if not h then return end
     -- With channel ticks on, your bar's sample is a channel, to show them.
     if h.kind == "player" and CB.cfg.channelTicks == true and cast.channel then cast = cast.channel end
+    -- With spell colors set, your bar's sample is the last spell picked, in its color.
+    local list = h.kind == "player" and CB.cfg.spellColors
+    local last = type(list) == "table" and list[#list]
+    if type(last) == "table" and type(last.name) == "string" then
+        cast = { text = last.name, value = cast.value, icon = last.icon or cast.icon }
+    end
+    h.sampleSpell = cast.text
     h.test = true
     h.duration = nil
     CB.PlaceTicks(h, cast.ticks or 0)
@@ -1228,25 +1448,28 @@ function CB.Refresh(h, glide)
     if type(u) ~= "string" then CB.Stop(h); return end
     local channel = false
     -- displayName, like the game's own bar. The first value can be a raw untranslated name.
-    local _, name, texture, from, to, craft, _, notInterruptible, spell = UnitCastingInfo(u)
+    -- Whether there is a cast is the first value, as the game's bar asks: a mob's channel
+    -- can come without a display name, and then the spell's own name stands in.
+    local real, name, texture, from, to, craft, _, notInterruptible, spell = UnitCastingInfo(u)
     -- A craft reports it can't be interrupted, but the locked gray is meant as
     -- a warning about casts you can't kick, so draw a craft like any other cast.
     local batch
     if not isSecret(craft) and craft == true then
         notInterruptible = false
         batch = CB.Batch(h, spell, from, to)
-    elseif type(name) ~= "nil" then
+    elseif type(real) ~= "nil" then
         h.batch = nil
     end
-    if type(name) == "nil" then
-        _, name, texture, _, _, _, notInterruptible, spell = UnitChannelInfo(u)
+    if type(real) == "nil" then
+        real, name, texture, _, _, _, notInterruptible, spell = UnitChannelInfo(u)
         channel = true
-        if type(name) ~= "nil" then h.batch = nil end
+        if type(real) ~= "nil" then h.batch = nil end
     end
-    if type(name) == "nil" then
+    if type(real) == "nil" then
         if not CB.BatchWait(h) then CB.Stop(h, glide) end
         return
     end
+    if type(name) == "nil" then name = real end
     local duration, count = batch, nil
     if batch then
         local b = h.batch

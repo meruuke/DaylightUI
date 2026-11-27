@@ -239,7 +239,7 @@ T.test("rolls data: a history drop with a bare [Name] pairs by the name", functi
     local D = S.RollData
     local id = RW.Drop({ name = "Band of Accuria", link = RING, players = SEVEN })
     local d = D.drops[id]
-    d.lootListKey = nil
+    d.lootListKey, d.historyID = nil, nil
     RW.drops[id].link = "[Band of Accuria]"
     RW.drops[id].historyID = 900
     RW.drops[id].players[2].state = Enum.EncounterLootDropRollState.Greed
@@ -993,6 +993,43 @@ T.test("rolls data: your own line from the game wins over what you pressed", fun
     T.eq(D.drops[id].mine, "pass")
 end)
 
+-- Two copies whose history keys run the other way from their roll ids: the first
+-- guess pairs them backwards. Your pick and the win on one copy must not end the
+-- other, which you haven't rolled on yet.
+local function crossedTwins(history)
+    local S, RW = rollsLogin({ history = history })
+    local a = RW.Drop({ name = "Band of Accuria", link = RING, players = SEVEN, announce = false })
+    local b = RW.Drop({ name = "Band of Accuria", link = RING, players = SEVEN, announce = false })
+    RW.Announce(b); RW.Announce(a)
+    T.eq(S.RollData.drops[a].historyID, RW.drops[b].historyID, "the first guess pairs them backwards")
+    return S, RW, a, b
+end
+
+for _, history in ipairs({ true, false }) do
+    local how = history and "history" or "chat only"
+    T.test("rolls data: crossed twins, winning one leaves the other open (" .. how .. ")", function()
+        local S, RW, a, b = crossedTwins(history)
+        local D = S.RollData
+        RW.Pick(a, "Bram Holloway", "need"); RW.Pick(b, "Bram Holloway", "greed")
+        cardFor(S, a).buttons.need:Click()
+        T.eq(D.drops[a].mine, "need", "your pick stays on the card you clicked")
+        T.isnil(D.drops[b].mine, "the other copy still waits on you")
+        RW.Roll(a, "Mira Calloway", 40); RW.Roll(a, "Bram Holloway", 90)
+        RW.Win(a, "Bram Holloway")
+        T.eq(D.drops[a].done, true); T.eq(D.drops[a].winner, "Bram")
+        T.falsy(D.drops[b].done, "the copy you haven't rolled on isn't over")
+        T.isnil(D.drops[b].winner)
+        T.eq(D.drops[b].players.Bram.pick, "greed", "Bram's pick on the other copy follows it")
+        tick(S, 10)
+        local card = cardFor(S, b)
+        T.truthy(card, "its card is still up")
+        T.truthy(card.buttons.need:IsShown(), "with its buttons")
+        card.buttons.greed:Click()
+        T.eq(D.drops[b].mine, "greed")
+        T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    end)
+end
+
 T.test("rolls data: two copies' history records pair in order, whichever comes first", function()
     local S, RW = rollsLogin()
     local D = S.RollData
@@ -1154,6 +1191,71 @@ T.test("rolls stack: the stack stays on screen", function()
     St.Layout()
     T.eq(#St.Cards(), 4, "all four with room")
     T.truthy(St.frame:IsClampedToScreen(), "kept inside the screen as a last guard")
+end)
+
+-- Whether anything on a frame, or inside it, takes the mouse.
+local function takesMouse(f)
+    if f:IsMouseEnabled() then return true end
+    for _, child in ipairs({ f:GetChildren() }) do
+        if child:IsShown() and takesMouse(child) then return true end
+    end
+    return false
+end
+
+-- Every card of the stack that is in sight but not one of its placed cards:
+-- one fading out where it stood is fine, as long as nothing on it takes a
+-- click meant for the card gliding into its spot.
+local function strayCards(St)
+    local placed, out = {}, {}
+    for _, card in ipairs(St.Cards()) do placed[card] = true end
+    for _, child in ipairs({ St.frame:GetChildren() }) do
+        if child.buttons and not placed[child] and child:IsShown() and child:GetAlpha() > 0
+            and (not child.leaving or takesMouse(child)) then
+            out[#out + 1] = child
+        end
+    end
+    return out
+end
+
+T.test("rolls stack: with room for two, three to five drops never leave a card over another", function()
+    for n = 3, 5 do
+        local S, RW = rollsLogin()
+        local St = S.RollStack
+        local one = RW.Drop({ name = "Item 0", link = "|cffa335ee|Hitem:900|h[Item 0]|h|r", players = SEVEN })
+        St.Layout()
+        local h = S.RollCard.Height(St.Cards()[1], St.Cards()[1].look)
+        S.RollData.Remove(one)
+        tick(S, 1); settle()
+        local room = 2 * (h + St.Settings().spacing) + DaylightUI.Style.SIZE.small + St.Settings().spacing + 1
+        St.Room = function() return room end
+        local ids = {}
+        -- All at once, the way a boss's loot comes, then out of order: a pick
+        -- from someone else on the newest while the others wait.
+        for i = 1, n do ids[i] = RW.Drop({ name = "Item " .. i, link = "|cffa335ee|Hitem:" .. (900 + i) .. "|h[Item " .. i .. "]|h|r", players = SEVEN }) end
+        RW.Pick(ids[n], "Bram Holloway", "need")
+        tick(S, 1); settle()
+        T.eq(#St.Cards(), 2, n .. " drops: two fit")
+        T.eq(#strayCards(St), 0, n .. " drops: only the placed cards show once settled")
+        -- The mouse going over a card, and more picks from the group: each lays
+        -- the stack out again.
+        for round = 1, 3 do
+            stub.MouseEnter(St.Cards()[1]); St.Cards()[1]:GetScript("OnEnter")(St.Cards()[1])
+            T.eq(#strayCards(St), 0, n .. " drops, hover " .. round .. ": no card comes back over the others")
+            stub.MouseLeave(St.Cards()[1]); St.Cards()[1]:GetScript("OnLeave")(St.Cards()[1])
+            RW.Pick(ids[1], SEVEN[round].name, "greed")
+            T.eq(#strayCards(St), 0, n .. " drops, pick " .. round .. ": no card comes back over the others")
+        end
+        -- Each placed card sits on its own row, under the next one.
+        local cards = St.Cards()
+        for i = 2, #cards do
+            T.truthy(cards[i].y >= cards[i - 1].y + cards[i - 1]:GetHeight(), n .. " drops: card " .. i .. " clear of the one below")
+        end
+        -- Your buttons on a waiting roll still work.
+        local drop = cards[1].drop
+        cards[1].buttons.need:Click()
+        T.truthy(drop.pending or drop.mine, n .. " drops: the press is taken")
+        T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    end
 end)
 
 T.test("rolls card: a folded part is never sized 0 and hides its pieces", function()

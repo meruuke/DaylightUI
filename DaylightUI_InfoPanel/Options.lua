@@ -180,6 +180,14 @@ ns.OPTIONS = { pages = {
             DaylightUI.Options.BackRow("media.xp", "Experience bar", "the experience and reputation bars", noBars),
         }) },
         shellGroup("xp", "Experience bar border and shadow", "xp.enabled", true),
+        DaylightUI.Options.BarFxCard({ module = "InfoPanel", tab = "Look",
+            desc = "The experience and reputation bars move: their colors roll along them. An upright bar stays still.",
+            choices = {
+                { id = "xp", label = "Experience bar", base = "xp.barFx.", kind = "xp",
+                  gate = function(get) return get("xp.enabled") ~= true end },
+                { id = "rep", label = "Reputation bar", base = "rep.barFx.", kind = "rep",
+                  gate = function(get) return get("rep.enabled") ~= true end },
+            } }),
         { tab = "Size", label = "Experience bar size", items = {
             { type = "toggle", key = "xp.detached", label = "Separate experience bar",
               desc = "Takes the bar off the panel and puts it under your action bars. Move it in unlock mode; drag its corner to resize.",
@@ -284,9 +292,12 @@ ns.OPTIONS = { pages = {
               reload = true, disabled = off("map.enabled") },
         } },
         { label = "Minimap box", desc = "The box around the minimap, with the damage meter and data texts in it.", items = {
-            { type = "dropdown", key = "map.meterSide", label = "Damage meter side",
-              values = { auto = "Automatic", left = "Left", right = "Right" }, order = { "auto", "left", "right" },
-              desc = "Which side of the minimap the damage meter slides out of, with the threat meter beside it. Automatic picks the side toward the middle of the screen, so it follows when you move the panel." },
+            { type = "toggle", key = "map.noBox", label = "Frameless round map", since = "2.2.5",
+              desc = "A round minimap stands on its own ring. The damage meter slides out from behind it in a box of its own, and the data texts sit in a small box under it. Needs Minimap shape set to Round, or Rotate as you turn.",
+              disabled = function(get)
+                  return get("map.enabled") ~= true
+                      or (get("map.shape") ~= "round" and not (type(GetCVarBool) == "function" and GetCVarBool("rotateMinimap") == true))
+              end },
         } },
         { label = "Borders and background", desc = "The box around the minimap, with the damage meter and data texts in it.", items = mapLook },
         { label = "Clock", desc = "A small time at the bottom of the map. Hover it for both local and server time.", items = {
@@ -395,8 +406,10 @@ ns.OPTIONS = { pages = {
               desc = "Short labels like Gear, Bags and Guild before each number. They drop off when the bar is too narrow." },
             { type = "toggle", key = "databar.line", label = "Data bar accent line", disabled = noBar,
               desc = "The line along the top of the bar, in your accent color." },
-            { type = "toggle", key = "databar.angled", label = "Data bar angled ends", disabled = noBar,
-              desc = "Cuts both ends of the bar at an angle. When off, they're straight." },
+            DaylightUI.Options.EndRows({ name = "Data bar", disabled = noBar, note = "The tab in the middle leans the same way.",
+                left = { on = "databar.angled", flip = "databar.flipLeft" }, right = { on = "databar.angledRight", flip = "databar.flipRight" } })[1],
+            DaylightUI.Options.EndRows({ name = "Data bar", disabled = noBar, note = "The tab in the middle leans the same way.",
+                left = { on = "databar.angled", flip = "databar.flipLeft" }, right = { on = "databar.angledRight", flip = "databar.flipRight" } })[2],
         } },
         { label = "Borders and background", desc = "The data bar has no border on the global style: on a strip this thin the accent line is enough.", items = barLook },
         DaylightUI.Fade.Card("databar.fade.", nil, noBar, "Data bar"),

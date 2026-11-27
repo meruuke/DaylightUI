@@ -1,7 +1,6 @@
 -- French (frFR). English text is the key (Locales/Locales.lua).
 local _, DUI = ...
-if DUI.LOCALE ~= "frFR" then return end
-local L = DUI.L
+DUI.AddLanguage("frFR", function(L)
 
 -- Machine draft below this line: not yet checked by a native speaker.
 L["A crown on the party leader's frame. It rides with the name tab or portrait until you pick a spot for it."] = "Une couronne sur le cadre du chef de groupe. Il suit l'onglet du nom ou le portrait jusqu'à ce que vous lui choisissiez une place."
@@ -157,7 +156,6 @@ L["%s found, showing %d: narrow the search"] = "%s trouvés, %d affichés : affi
 L["%s hidden."] = "%s masqué."
 L["%s honorable kills, and counting."] = "%s victoires honorables, et ce n'est pas fini."
 L["%s honorable kills. The other faction remembers you."] = "%s victoires honorables. L'autre faction se souvient de vous."
-L["%s is also loaded. Both replace the same %s; disable one of them."] = "%s est aussi chargé. Les deux remplacent le même %s ; désactivez l'un d'eux."
 L["%s is also on. Both change your %s."] = "%s est aussi actif. Les deux modifient votre %s."
 L["%s is guarding your spot."] = "%s garde votre place."
 L["%s is made again from %s, with your picks."] = "%s est recréé à partir de %s, avec vos choix."
@@ -195,6 +193,7 @@ L["%s spent at level %d so far."] = "%s passés au niveau %d jusqu'ici."
 L["%s to spend"] = "%s à dépenser"
 L["%s was made for an older DaylightUI and is off: look for an update of it."] = "%s a été conçu pour une ancienne version de DaylightUI et est désactivé : cherchez-en une mise à jour."
 L["Its name in the AddOns list should read \"%s %s\": every plugin\'s does."] = "Son nom dans la liste des AddOns devrait être \"%s %s\" : c\'est le cas de chaque plugin."
+L["Its .toc should say \"## Category: %s\" and \"## Group: %s\", so it sits under the plugins' heading in the AddOns list."] = "Son .toc devrait contenir \"## Category: %s\" et \"## Group: %s\", pour se ranger sous le titre des plugins dans la liste des AddOns."
 L["%s wonders where you went."] = "%s se demande où vous êtes passé."
 L["%s x%d"] = "%s x%d"
 L["%s · %s of %d free"] = "%s · %s sur %d libres"
@@ -1506,6 +1505,8 @@ L["Focus cast bar"] = "Barre de sorts de la focalisation"
 L["Focus cast bar text size"] = "Taille du texte de la barre de sorts de la focalisation"
 L["Fold it"] = "Replier"
 L["Fold ready quests"] = "Replier les quêtes prêtes"
+L["Filter under the title"] = "Filtre sous le titre"
+L["Shows All and This zone as words under the Quests title, always there, instead of buttons on its line that appear when you hover the list. The tracker grows by one line."] = "Affiche Tout et Cette zone sous le titre Quêtes, toujours visibles, au lieu de boutons sur sa ligne qui apparaissent au survol de la liste. Le suivi gagne une ligne."
 L["Fold Quests"] = "Replier les quêtes"
 L["Fade Toggle"] = "Basculer l'estompage"
 L["Fold this quest"] = "Replier cette quête"
@@ -5072,3 +5073,12 @@ L["The data bar has no border on the global style: on a strip this thin the acce
 L["The color of every chat panel's border. The border still lights up in your accent color while you drag a corner to size the chat."] = "La couleur de bordure de chaque panneau de chat. La bordure s'illumine toujours de votre couleur d'accent quand vous tirez un coin pour redimensionner le chat."
 L["Every chat panel: the main one, the second one and a chat window pulled out on its own. On the global style the Classic chat keeps a thin line."] = "Chaque panneau de chat : le principal, le second et une fenêtre de chat détachée. Avec le style global, le chat classique garde une ligne fine."
 L["Gives the second chat panel its own background opacity, set in the row below. When off, it's as see-through as the main chat panel. Shown while the chat's Use Daylight UI global style is off."] = "Donne au second panneau de chat sa propre opacité de fond, réglée dans la ligne ci-dessous. Désactivé, il est aussi transparent que le panneau principal. Visible tant qu'Utiliser le style global de Daylight UI est désactivé pour le chat."
+
+-- Mailbox: what happened to an auction house letter's item (machine draft, not yet checked by a native speaker;
+-- Canceled, Expired and Outbid follow the game's own words where it has one that fits).
+L["Sold"] = "Vendu"
+L["Expired"] = "Expiré"
+L["Canceled"] = "Annulé"
+L["Won"] = "Remporté"
+L["Outbid"] = "Offre dépassée"
+end)

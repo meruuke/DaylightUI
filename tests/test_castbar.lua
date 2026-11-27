@@ -34,6 +34,16 @@ T.test("a channel drains", function()
     T.eq(h.bar.__timer[3], Enum.StatusBarTimerDirection.RemainingTime)
 end)
 
+T.test("a mob's channel with no display name still shows its bar", function()
+    local _, ns = setup()
+    local t = ns.CastBar.Create("target")
+    ns.CastBar.Layout(t, ns.DEFAULTS.targetCastbar)
+    stub.units.target = { name = "Foe", reaction = 2, channel = { name = "Mind Flay", displayName = false, duration = stub.Duration(3) } }
+    stub.FireEvent("UNIT_SPELLCAST_CHANNEL_START", "target")
+    T.truthy(t:IsShown(), "the channel shows")
+    T.eq(stub.Text(t.text), "Mind Flay", "named by the spell when the display name is missing")
+end)
+
 T.test("channel ticks: lines between a channel's ticks on your own bar only", function()
     local h, ns = setup()
     local CB = ns.CastBar
@@ -65,6 +75,74 @@ T.test("channel ticks: lines between a channel's ticks on your own bar only", fu
     T.eq(shown(h), 4, "the sample turns into a channel to show them")
     T.eq(h.text.__text, "Drain Life")
     CB.cfg.channelTicks = false
+end)
+
+-- A warlock wants Drain Life green and Drain Soul purple at a glance.
+T.test("spell colors: your cast of a listed spell takes its color, any rank, others keep theirs", function()
+    local h, ns = setup()
+    local CB, Style = ns.CastBar, DaylightUI.Style
+    stub.spells = { [689] = { name = "Drain Life" }, [11700] = { name = "Drain Life" }, [686] = { name = "Shadow Bolt" } }
+    CB.cfg.spellColors = { { name = "drain life", color = { 0.2, 0.8, 0.3 } } }
+    local function hi(bar)
+        local g = bar:GetStatusBarTexture().__gradient
+        return g and g[3]
+    end
+    local wr, wg, wb = Style.Soften(0.2, 0.8, 0.3)
+    for _, id in ipairs({ 689, 11700 }) do
+        stub.units.player = { channel = { name = "Drain Life", spellID = id, duration = stub.Duration(5) } }
+        stub.FireEvent("UNIT_SPELLCAST_CHANNEL_START", "player")
+        local c = hi(h.bar)
+        T.truthy(c, "a gradient from the picked color, rank " .. id)
+        T.near(c.r, wr, 1e-6); T.near(c.g, wg, 1e-6); T.near(c.b, wb, 1e-6)
+    end
+    stub.units.player = { cast = { name = "Shadow Bolt", spellID = 686, duration = stub.Duration(3) } }
+    stub.FireEvent("UNIT_SPELLCAST_START", "player")
+    T.isnil(hi(h.bar), "a spell not on the list keeps the cast color")
+    T.near(h.bar:GetStatusBarTexture().__vertex[1], CB.cfg.cast[1], 1e-6)
+    stub.units.player = { cast = { name = "Drain Life", spellID = 689, notInterruptible = true, duration = stub.Duration(3) } }
+    stub.FireEvent("UNIT_SPELLCAST_START", "player")
+    T.isnil(hi(h.bar), "can't be interrupted still wins: it's a warning")
+    local t = CB.Create("target")
+    CB.Layout(t, ns.DEFAULTS.targetCastbar)
+    stub.units.target = { name = "Foe", reaction = 2, channel = { name = "Drain Life", spellID = 689, duration = stub.Duration(3) } }
+    stub.FireEvent("UNIT_SPELLCAST_CHANNEL_START", "target")
+    T.isnil(hi(t.bar), "only your own bar: another unit's spell can be secret")
+    -- The preview shows the last spell picked, in its color.
+    CB.ShowSample(h, ns.Test.CASTS.player)
+    T.eq(h.text.__text, "drain life")
+    T.truthy(hi(h.bar), "the sample in the picked color")
+    CB.cfg.spellColors = {}
+    CB.ShowSample(h, ns.Test.CASTS.player)
+    T.eq(h.text.__text, "Holy Light", "no list: the usual sample")
+    T.isnil(hi(h.bar))
+    stub.spells = nil
+end)
+
+T.test("spell colors: added by id or name, each in its own color, recolored and taken off", function()
+    local DUI, ns = stub.Load({ module = true })
+    stub.RunTimers()
+    local CB = ns.CastBar
+    stub.spells = { [689] = { name = "Drain Life" }, [1120] = { name = "Drain Soul" } }
+    T.eq(CB.AddSpellColor("689"), "Drain Life", "by id, the game's name kept")
+    local name, why = CB.AddSpellColor("424242")
+    T.isnil(name); T.truthy(why, "an id with no spell says so")
+    T.eq(CB.AddSpellColor("1120"), "Drain Soul")
+    local list = DUI:Get("UnitFrames", "casts.spellColors")
+    T.eq(#list, 2)
+    T.truthy(list[1].color[1] ~= list[2].color[1] or list[1].color[3] ~= list[2].color[3], "each starts in its own color")
+    CB.AddSpellColor("689")
+    list = DUI:Get("UnitFrames", "casts.spellColors")
+    T.eq(#list, 2, "no second line for the same spell")
+    T.eq(list[2].name, "Drain Life", "it moves last, so the preview shows it")
+    CB.SetSpellColor(2, { 0.1, 0.9, 0.2 })
+    T.eq(DUI:Get("UnitFrames", "casts.spellColors")[2].color[2], 0.9)
+    T.eq(CB.cfg.spellColors[2].color[2], 0.9, "the bars read the saved list")
+    CB.RemoveSpellColor(1)
+    list = DUI:Get("UnitFrames", "casts.spellColors")
+    T.eq(#list, 1); T.eq(list[1].name, "Drain Life")
+    CB.RemoveSpellColor(1)
+    T.eq(#DUI:Get("UnitFrames", "casts.spellColors"), 0)
+    stub.spells = nil
 end)
 
 T.test("a secret interruptible flag lays the locked color over the fill, the client picks", function()
@@ -418,6 +496,27 @@ T.test("a cast bar of its own can angle its left end, its right end, or both", f
     DUI:Set("UnitFrames", "playerCastbar.slantLeft", true)
     stub.RunTimers()
     T.eq(Style.GetSlant(ns.playerCastbar).side, "both", "yours, with its right end on by default")
+end)
+
+-- A player's report: with the icon on, the cast's first stretch filled hidden
+-- behind the icon, so a cast looked like it hadn't started.
+T.test("with the spell icon on, the fill starts past the icon, never under it", function()
+    local DUI, ns = stub.Load({ module = true })
+    DUI:Set("UnitFrames", "playerCastbar.at", "free")
+    DUI:Set("UnitFrames", "playerCastbar.showIcon", true)
+    DUI:Set("UnitFrames", "targetCastbar.at", "below")
+    DUI:Set("UnitFrames", "targetCastbar.slantLeft", true)
+    stub.RunTimers()
+    for _, h in ipairs({ ns.playerCastbar, ns.targetCastbarFree }) do
+        T.truthy(h.icon:IsShown(), "the icon shows")
+        local _, _, _, ix = h.icon:GetPoint(1)
+        local _, _, _, bx = h.bar:GetPoint(1)
+        T.truthy(bx >= ix + h.icon:GetWidth() - 0.01, "the fill starts at the icon's right edge")
+    end
+    DUI:Set("UnitFrames", "playerCastbar.showIcon", false)
+    stub.RunTimers()
+    local _, _, _, bx, by = ns.playerCastbar.bar:GetPoint(1)
+    T.near(bx, -by, 0.01, "no icon: the fill runs the whole bar, inside the border")
 end)
 
 T.test("a cast bar of its own can flip each angled end on its own", function()
@@ -1059,11 +1158,15 @@ T.test("the player's cast bar and swing timer take their own border, and can sli
     DUI:Set("UnitFrames", "player.powerSlantBoth", false)
     stub.RunTimers()
     T.eq(Style.GetSlant(pb).side, "right")
-    -- Flipped, its angle can't be continued, so the cast bar hangs under the frame.
+    -- Flipped, the cast bar still hangs from it and leans back in from its
+    -- bottom corner: a chevron.
     DUI:Set("UnitFrames", "player.powerSlantUnder", true)
     stub.RunTimers()
     T.eq(Style.GetSlant(pb).under, "right", "the power bar's end leans under")
-    T.eq(h.under, ns.frames.player, "the cast bar slides out from the frame instead")
+    T.eq(h.under, pb, "the cast bar still slides out from the power bar")
+    local hs = Style.GetSlant(h)
+    T.eq(hs.side, "right"); T.isnil(hs.under, "it leans the usual way")
+    T.eq(hs.ref.drop.right, pb:GetHeight(), "its line starts at the power bar's bottom corner")
     DUI:Set("UnitFrames", "player.powerSlantBoth", true)
     stub.RunTimers()
     T.eq(Style.GetSlant(pb).under, "right", "its other end keeps its own lean")
@@ -1073,7 +1176,9 @@ T.test("the player's cast bar and swing timer take their own border, and can sli
     DUI:Set("UnitFrames", "player.powerSlantUnder", false)
     stub.RunTimers()
     T.eq(Style.GetSlant(pb).under, "left", "the left end alone")
-    T.eq(h.under, ns.frames.player, "either end flipped, the cast bar slides out from the frame")
+    T.eq(h.under, pb, "either end flipped, it stays under the power bar")
+    hs = Style.GetSlant(h)
+    T.eq(hs.ref.drop.left, pb:GetHeight()); T.isnil(hs.ref.drop.right)
     DUI:Set("UnitFrames", "player.powerSlantUnder", true)
     -- The spell cost shade leans the same way as the fill it sits on.
     local cost, fill = pb.set.cost, pb.set.power
@@ -1093,7 +1198,8 @@ T.test("the player's cast bar and swing timer take their own border, and can sli
     DUI:Set("UnitFrames", "player.powerSlantBoth", false)
     stub.RunTimers()
     T.isnil(Style.GetSlant(pb).under)
-    T.eq(h.under, pb, "unflipped: from the power bar again")
+    T.eq(h.under, pb, "unflipped: from the power bar as before")
+    T.isnil(Style.GetSlant(h).ref.drop.right, "its line from the power bar's top again")
     DUI:Set("UnitFrames", "player.powerAt", "inside")
     stub.RunTimers()
     T.eq(h.under, ns.frames.player, "the power bar back inside: under the frame again")
@@ -1282,4 +1388,182 @@ T.test("a cast bar inside a frame fades the power text while it shows, never a f
     local free = ns.CastBar.Create("target")
     free:Show()
     T.eq(g.powerText:GetAlpha(), 1)
+end)
+
+-- A player's report: the target's power text came back over a mount being
+-- summoned, now and then. Every power change wrote the text's alpha back to 1
+-- (or to the full-power fade) under the cast bar.
+T.test("the target's power text stays hidden under its cast bar through power changes and target swaps", function()
+    local DUI, ns = stub.Load({ module = true })
+    DUI:Set("UnitFrames", "target.showPowerText", true)
+    stub.RunTimers()
+    local f = _G.DaylightUIFrame_target
+    local h = ns.targetCastbar
+    stub.units.target = { name = "Rider", reaction = 4, power = 2600, powerMax = 2600,
+        cast = { name = "Black Skeletal Horse", duration = stub.Duration(1.5) } }
+    stub.FireEvent("PLAYER_TARGET_CHANGED")
+    stub.UnitWatch()
+    stub.FireEvent("UNIT_SPELLCAST_START", "target")
+    T.truthy(h:IsVisible(), "the cast shows inside the frame")
+    T.truthy(f.powerText:IsShown(), "the power text is on")
+    T.eq(f.powerText:GetAlpha(), 0, "hidden under the spell name")
+    stub.FireEvent("UNIT_POWER_FREQUENT", "target", "MANA")
+    T.eq(f.powerText:GetAlpha(), 0, "a power change keeps it hidden")
+    stub.FireEvent("UNIT_MAXPOWER", "target", "MANA")
+    stub.FireEvent("UNIT_DISPLAYPOWER", "target")
+    T.eq(f.powerText:GetAlpha(), 0, "so does a new max or power type")
+    -- A swap to another caster: the bar stays up, the frame redraws.
+    stub.units.target = { name = "Other", reaction = 4, power = 100, powerMax = 2600,
+        cast = { name = "Frostbolt", duration = stub.Duration(2) } }
+    stub.FireEvent("PLAYER_TARGET_CHANGED")
+    stub.UnitWatch()
+    stub.FireEvent("UNIT_SPELLCAST_START", "target")
+    T.eq(f.powerText:GetAlpha(), 0, "a target swap mid-cast keeps it hidden")
+    DUI:Set("UnitFrames", "target.hideFullPower", true)
+    stub.RunTimers()
+    stub.FireEvent("UNIT_POWER_FREQUENT", "target", "MANA")
+    T.eq(f.powerText:GetAlpha(), 0, "the full-power fade doesn't bring it back either")
+    DUI:Set("UnitFrames", "target.hideFullPower", false)
+    stub.RunTimers()
+    -- The cast ends: the text comes back and power changes show it again.
+    stub.units.target.cast = nil
+    stub.FireEvent("UNIT_SPELLCAST_STOP", "target")
+    fadeOut()
+    T.falsy(h:IsShown(), "the bar is gone")
+    T.eq(f.powerText:GetAlpha(), 1, "back when the cast ends")
+    stub.FireEvent("UNIT_POWER_FREQUENT", "target", "MANA")
+    T.eq(f.powerText:GetAlpha(), 1, "and stays back")
+    -- The target goes away mid-cast.
+    stub.units.target.cast = { name = "Frostbolt", duration = stub.Duration(2) }
+    stub.FireEvent("UNIT_SPELLCAST_START", "target")
+    T.eq(f.powerText:GetAlpha(), 0)
+    stub.units.target = nil
+    stub.FireEvent("PLAYER_TARGET_CHANGED")
+    stub.UnitWatch()
+    stub.RunTimers()
+    stub.units.target = { name = "Third", reaction = 4, power = 50, powerMax = 100 }
+    stub.FireEvent("PLAYER_TARGET_CHANGED")
+    stub.UnitWatch()
+    stub.RunTimers()
+    T.falsy(h:IsShown())
+    T.eq(f.powerText:GetAlpha(), 1, "a new target with no cast shows its power text")
+end)
+
+-- A player's report: with the player frame set to fade, a cast bar hung under it
+-- went behind it. A frame that fades as one picture (Fade's whole mode, drawn to
+-- its own buffer) draws over a bar hung on its layer one step above it, so while
+-- a cast bar hangs under a frame that frame fades piece by piece instead.
+T.test("a frame with your cast bar hung under it or on its own never fades as one picture, and does again with the bar off", function()
+    local DUI, ns = stub.Load({ module = true })
+    local f = ns.frames.player
+    function f:SetFlattensRenderLayers(on) self.flat = on end
+    function f:SetIsFrameBuffer(on) self.buffer = on end
+    local F = DUI.Fade
+    local function settle()
+        stub.RunTimers()
+        for _ = 1, 3 do
+            F.Step()
+            for _ = 1, 60 do stub.RunOnUpdate(F.driver, 1 / 60) end
+            stub.RunTimers()
+        end
+    end
+    DUI:Set("UnitFrames", "player.fade", { mode = "ooc", alpha = 0.3, delay = 0 })
+    DUI:Set("UnitFrames", "playerCastbar.at", "below")
+    settle()
+    T.truthy(ns.playerCastbar.column, "the bar hangs under the frame")
+    T.falsy(f.buffer, "faded with a bar hung under it: piece by piece")
+    -- A player's report after 2.2.6: a cast bar moved off on its own still went
+    -- behind. A frame drawn to its own buffer covered it wherever it stood, its
+    -- layer picked higher or not, so any cast bar of yours keeps it off.
+    DUI:Set("UnitFrames", "playerCastbar.at", "free")
+    DUI:Set("UnitFrames", "playerCastbar.strata", "HIGH")
+    settle()
+    T.falsy(ns.playerCastbar.column, "the bar stands on its own")
+    T.eq(ns.playerCastbar:GetFrameStrata(), "HIGH", "in the layer picked for it")
+    T.falsy(f.buffer, "the bar on its own: the frame still fades piece by piece")
+    DUI:Set("UnitFrames", "player.powerAt", "free")
+    settle()
+    local pb = f.freePower
+    T.truthy(pb, "the power bar on its own")
+    function pb:SetFlattensRenderLayers(on) self.flat = on end
+    function pb:SetIsFrameBuffer(on) self.buffer = on end
+    DUI:Set("UnitFrames", "player.fade", { mode = "ooc", alpha = 0.2, delay = 0 })
+    settle()
+    T.falsy(pb.buffer, "and so do the pieces that fade with it")
+    DUI:Set("UnitFrames", "player.powerAt", "inside")
+    DUI:Set("UnitFrames", "playerCastbar.at", "below")
+    settle()
+    T.falsy(f.buffer, "hung again: piece by piece")
+    DUI:Set("UnitFrames", "playerCastbar.enabled", false)
+    settle()
+    T.eq(f.buffer, true, "no cast bar at all: one picture")
+    T.eq(pb.buffer, true, "its power bar too")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("bar ends: under a flipped player end the hung cast bar and swing bars lean back in, while sliding", function()
+    local DUI, ns = stub.Load({ module = true })
+    stub.RunTimers()
+    local Style = DUI.Style
+    DUI:Set("UnitFrames", "player.slantUnder", true)
+    DUI:Set("UnitFrames", "swing.attach", true)
+    stub.RunTimers()
+    local f, h = ns.frames.player, ns.playerCastbar
+    T.eq(h.under, f)
+    T.eq(Style.GetSlant(f).under, "right", "the player's right end flipped")
+    local fH = f:GetHeight()
+    -- Mid-slide and settled, its line starts at the frame's bottom corner.
+    stub.units.player = stub.units.player or { name = "Me", isPlayer = true, class = "MAGE" }
+    stub.units.player.cast = { name = "Fireball", notInterruptible = false, duration = stub.Duration(2) }
+    stub.FireEvent("UNIT_SPELLCAST_START", "player")
+    for i = 1, 3 do
+        local d = DaylightUI.Motion.Driver()
+        if d and d:GetScript("OnUpdate") then stub.RunOnUpdate(d, 1 / 60) end
+        local sl = Style.GetSlant(h)
+        T.eq(sl.side, "right", "step " .. i)
+        T.isnil(sl.under, "step " .. i .. ": it leans the usual way, top corner out")
+        T.eq(sl.ref.drop.right, fH, "step " .. i .. ": from the frame's bottom corner")
+    end
+    -- The fill's edge leans the usual way too.
+    local edge, _, under = Style.GetFillAngle(h.bar)
+    T.eq(edge, "right"); T.falsy(under)
+    for _, row in ipairs(ns.swing.rows) do
+        local sl = Style.GetSlant(row)
+        if row:IsShown() and sl and sl.ref then
+            T.eq(sl.ref.drop.right, fH, "the swing bars carry on the same line")
+        end
+    end
+    -- Back to the usual end: its line from the frame's top again.
+    DUI:Set("UnitFrames", "player.slantUnder", false)
+    stub.RunTimers()
+    T.isnil(Style.GetSlant(h).ref.drop.right)
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("bar ends: a cast bar's end menus write its switches, each end on its own", function()
+    local DUI, ns = stub.Load({ module = true })
+    stub.RunTimers()
+    local O = DUI.Options
+    -- Each frame's page carries its cast bar's card.
+    local rows, pageOf = {}, {}
+    for id in O.Pages() do
+        local page = O.GetPage(id)
+        for _, g in ipairs(page and page.groups or {}) do
+            for _, it in ipairs(g.items or {}) do
+                if it.ends then rows[it.label], pageOf[it.label] = it, page end
+            end
+        end
+    end
+    local function set(label, v) O.Set(pageOf[label], rows[label], v) end
+    for _, who in ipairs({ "Your cast bar", "Target cast bar", "Focus cast bar", "Party cast bar" }) do
+        T.truthy(rows[who .. " left end"] and rows[who .. " right end"], who .. ": both end menus")
+    end
+    T.falsy(rows["Your cast bar flip right end"], "no flip switches left")
+    -- The target's bar above the frame: \--/ is the left end usual, the right end usual.
+    DUI:Set("UnitFrames", "targetCastbar.at", "above")
+    set("Target cast bar left end", "slash")
+    set("Target cast bar right end", "backslash")
+    stub.RunTimers()
+    local sl = DUI.Style.GetSlant(ns.targetCastbarFree)
+    T.eq(sl.side, "both"); T.eq(sl.under, "both", "/--\\")
 end)

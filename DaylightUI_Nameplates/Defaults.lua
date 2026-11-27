@@ -17,7 +17,7 @@ ns.OUTSIDE_SPOTS = { "above", "below", "outleft", "outright", "outtopleft", "out
 ns.DEFAULTS = {
     media = DaylightUI.Media.AreaDefaults(ns.MEDIA_BARS, ns.MEDIA_FONTS),
     scale = 1,              -- on top of the UI's scale; the game's plate scale is ignored
-    offsetY = 14, -- offset up (+) or down (-) from the center of the game's plate
+    offsetY = -20, -- offset up (+) or down (-) from the center of the game's plate (older profiles keep 14, DB.KeepPlateHeight)
     range = 60, -- max plate distance in yards (the game's maximum)
     targetScale = true, -- size your target's plate and the others separately (below)
     target = { width = 1, height = 1, scale = 1.15, nameSize = 0 }, -- nameSize: target name (0 = Name size); the rest scale target Width and bar height, plus extra zoom
@@ -70,6 +70,10 @@ ns.DEFAULTS = {
     threatPctColor = "threat", -- "threat" (orange or red when it needs you, else white), "white", "accent", "custom"
     threatPctCustom = { INK.WARN[1], INK.WARN[2], INK.WARN[3] }, -- ...color for "custom"
     threatPctSize = 0, -- 0 = scale with bar height
+    mobTarget = false, -- the name of whoever each enemy is attacking, by its plate
+    mobTargetColor = "class", -- "class" (players in their class color, others white), "white", "accent", "custom"
+    mobTargetCustom = { INK.VALUE[1], INK.VALUE[2], INK.VALUE[3] }, -- ...color for "custom"
+    mobTargetSize = 0, -- 0 = a share of the name's size, like the guild line
     quest = true, -- marker on quest targets
     questCount = true, -- ...with the objective count (4/10) beside it
     questIcon = false, -- ...as an objective icon (sword, bag, cog, eye) in the quest color (needs the Quests module)
@@ -85,6 +89,7 @@ ns.DEFAULTS = {
     percentPos = "right", percentX = 0, percentY = 0,
     levelPos = "left", levelX = 0, levelY = 0,
     threatPctPos = "outtopleft", threatPctX = 0, threatPctY = 0,
+    mobTargetPos = "below", mobTargetX = 0, mobTargetY = 0,
     debuffSpot = "above", debuffGrow = "center", debuffX = 0, debuffY = 0,
     ccSpot = "outright", ccX = 0, ccY = 0,
     defensiveSpot = "outright", defensiveX = 0, defensiveY = 0,
@@ -99,10 +104,13 @@ ns.DEFAULTS = {
     executeStyle = "band", -- ...style: "band" (lights up in range), "line" (marker only), "bar" (whole fill lights), "pulse" (band, pulsing), "icon" (your finisher's icon by the bar)
     executeAccent = true, -- ...in the accent color; off uses executeColor
     executeColor = { 0.9, 0.36, 0.26 },
-    executeTexture = "flat", -- ...fill: "flat", "bar" (shared bar texture), "fade" (faint at the low end, full at the line)
+    executeTexture = "flat", -- ...fill: "flat", "bar" (media.execute), "fade" (faint at the low end, full at the line), "stripes", "neon"
     executeStrength = 0.45, -- ...brightness once the enemy is in range
     executeLineSize = 2, -- ...edge line thickness in px (0 = none)
     executeRest = true, -- ...faint band before the enemy is in range
+    executeRestStrength = 0.1, -- ...its brightness (1 = as bright as the lit band can be)
+    executeGlow = false, -- ...a soft glow round the health bar once in range
+    executeSpark = false, -- ...a bright spark on the line once in range
     debuffs = true,         -- your debuffs above the bar
     debuffSize = 24,
     maxDebuffs = 6,
@@ -145,10 +153,17 @@ ns.DEFAULTS = {
     -- With enabled off, friendly plates show just the name.
     friendly = {
         enabled = false, height = 4, width = 170,
+        barWhen = "always", -- "always", "combat" (only in your fights), "hurt" (in a fight or below full health)
         hideInInstance = false, -- turn off the game's friendly plates in dungeons, raids and battlegrounds (Manager.ApplyInstanceFriends)
         totems = true, -- friendly totems as a round badge in their element's color instead of their name
+        totemSize = 0, -- their badge's size, 0 = the enemy badges' (minionSize)
+        totemIcon = "portrait", -- "portrait" (the totem itself), "spell" (its spell's icon) or "element"
+        totemShape = "round", -- "round" or "square"
+        totemBorder = true, -- the ring or edge in the element's color
         percent = false, healthFormat = "percent", percentSign = true, healthSize = 0,
         level = false,
+        levelColor = "class", -- "class" (class and reaction, as the name), "white", "accent", "custom"; never by difficulty
+        levelCustom = { INK.VALUE[1], INK.VALUE[2], INK.VALUE[3] }, -- ...color for "custom"
         power = false, -- power bar under friendly health bars (who: shared powerShow)
         showName = true, -- names on friendly plates (name-only plates keep theirs)
         nameSize = 13, nameColor = "class", guild = true, role = true,
@@ -163,7 +178,7 @@ ns.DEFAULTS = {
         classIconScale = 1.3, -- the icon's size as a share of the name's
         guildColor = "class", guildCustom = { INK.GOOD[1], INK.GOOD[2], INK.GOOD[3] }, guildSize = 0,
         roleColor = "tan", roleCustom = { INK.MONEY[1], INK.MONEY[2], INK.MONEY[3] }, roleSize = 0,
-        namePos = "above", nameX = 0, nameY = 0, -- with the health bar on; name-only stays centered
+        namePos = "above", nameX = 0, nameY = 0, -- the spot needs the health bar; name-only stays centered, nudged by X and Y
         percentPos = "right", percentX = 0, percentY = 0,
         levelPos = "left", levelX = 0, levelY = 0,
         healthColor = "classGradient", healthCustom = { 0.3, 0.7, 0.35 }, healthGradient = DaylightUI.Style.DefaultStops(),
@@ -206,6 +221,10 @@ ns.DEFAULTS = {
 ns.DEFAULTS.media.threatPctFont = "general"
 -- Level font, same rule.
 ns.DEFAULTS.media.levelFont = "general"
+-- The mob's target's font: "general" uses the name's.
+ns.DEFAULTS.media.mobTargetFont = "general"
+-- The execute range's "Bar texture": "general" uses the one on General > Appearance.
+ns.DEFAULTS.media.execute = "general"
 -- Bar animation (the core's BarFx.lua) on every plate's health, power and
 -- cast bars, friendly plates too. Off: forty moving bars in a fight is busy.
 ns.DEFAULTS.barFx = { health = DaylightUI.BarFx.Defaults(), power = DaylightUI.BarFx.Defaults(),

@@ -213,7 +213,9 @@ function Convo.Grip() return grip end
 -- Mouse over it (the grip fades in, Chat.UpdateFade).
 function Convo.Over() return open and card ~= nil and card:IsShown() and card:IsMouseOver() end
 
-function Convo.Open(key)
+-- typeNow = true takes the keyboard for the reply box. Only a Whisper action asks for
+-- it: opening a conversation to read it leaves the keys on spells.
+function Convo.Open(key, typeNow)
     if not card then build() end
     local c = ns.Talk.Get(key)
     if not c then return end
@@ -233,9 +235,22 @@ function Convo.Open(key)
         ns.Tiles.Card(true)
         DUI.Sound.Play("open")
     end
-    thread.input:SetFocus()
+    if typeNow then thread.input:SetFocus() end
     ns.Tiles.Refresh()
 end
+
+-- A Whisper button in Daylight UI's own windows (friends, group finder) opens the
+-- card with that person, so the game's chat box is never opened from addon code.
+-- who = { name } or { bn = account id, name }. False when there's no card to show
+-- (the Classic style, or whispers kept in the chat only).
+function Convo.WhisperTo(who)
+    if not ns.Talk.On() or type(who) ~= "table" then return false end
+    local c = ns.Talk.Start(who.name, who.bn)
+    if not c then return false end
+    Convo.Open(c.key, true)
+    return Convo.Showing(c.key)
+end
+DUI.ChatWhisper = Convo.WhisperTo
 
 function Convo.Close()
     if not open then return end

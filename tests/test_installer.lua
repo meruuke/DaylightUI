@@ -262,7 +262,8 @@ T.test("installer draft: a preview left by a crash is undone at the next login",
 end)
 
 T.test("installer questions: every one writes a setting the options have, with a value that setting takes", function()
-    local DUI = login({ module = true, bags = true, chat = true, infopanel = true, tooltip = true, qol = true, nameplates = true, quests = true })
+    local DUI = login({ module = true, bags = true, chat = true, infopanel = true, tooltip = true, qol = true, nameplates = true, quests = true,
+                        procs = true, actionbars = true })
     local P = DUI.InstallerPages
     local n = 0
     for _, part in ipairs(P.PARTS) do
@@ -281,10 +282,14 @@ T.test("installer questions: every one writes a setting the options have, with a
                 for _, st in ipairs(pr.set) do T.truthy(P.Find(st[1], st[2]), q.id .. ": " .. st[2]) end
             end
             for _, st in ipairs(q.bundle and q.bundle.set or {}) do T.truthy(P.Find(st[1], st[2]), q.id .. ": " .. st[2]) end
-            if q.look then T.truthy(DUI.InstallerLooks.KINDS[q.look], q.id .. ": a look") end
+            if q.look then
+                local spec = DUI.InstallerLooks.KINDS[q.look]
+                T.truthy(spec, q.id .. ": a look")
+                T.truthy(P.Find(spec.ref[1], spec.ref[2]), q.id .. ": an options row for " .. spec.ref[2])
+            end
         end
     end
-    T.eq(n, 14)
+    T.eq(n, 16)
     for _, k in ipairs(P.Keys(P.Questions("quick"))) do T.truthy(P.Find(k[1], k[2]), "quick: " .. k[1] .. " " .. k[2]) end
     T.eq(P.Where("appearance"), "General > Appearance")
     T.eq(P.Module("Bags").addon, "DaylightUI_Bags")
@@ -1000,6 +1005,26 @@ T.test("installer: a login whose layouts came late never asks on a loading scree
     T.isnil(stub.Asked(), "no reload asked")
 end)
 
+-- Seen in game on 2.2.5 still, after a zeppelin or boat: on a loading screen the
+-- game sends its layouts event before PLAYER_ENTERING_WORLD, so a login whose
+-- layouts came late still had its check waiting when that event came.
+T.test("installer: a loading screen's layouts event before entering the world never asks", function()
+    local DUI = login()
+    DUI.Installer.Install()
+    DUI = reload()
+    stub.Dismiss()
+    local active = saved.activeLayout
+    saved.activeLayout = 0
+    stub.FireEvent("EDIT_MODE_LAYOUTS_UPDATED")             -- the login's, nothing active yet
+    saved.activeLayout = active
+    stub.FireEvent("PLAYER_LEAVING_WORLD")                 -- the zeppelin's loading screen starts
+    DUI.EditMode.Add("glitch", function() end, function() return false end)
+    stub.FireEvent("EDIT_MODE_LAYOUTS_UPDATED")             -- before entering the world
+    stub.FireEvent("PLAYER_ENTERING_WORLD", false, false)
+    stub.RunTimers()
+    T.isnil(stub.Asked(), "no reload asked")
+end)
+
 T.test("installer: Healer again leaves an edited Healer profile alone", function()
     local DUI = login()
     DUI.Installer.Install("Healer")
@@ -1025,6 +1050,129 @@ T.test("installer: when the layout can't be placed, Finish says why, changes not
     press(page.go)
     T.eq(page.go.text:GetText(), "Reload and play")
     T.eq(DUI.Installer.State(), "installed", "Try again")
+end)
+
+-- A guide whose Finish ran into the game's limit of 5 account layouts: two of
+-- Daylight UI's left by profiles gone, the standard one, and two of the
+-- player's own, one of them in use on this character.
+local function fullList(DUI)
+    stub.FireEvent("EDIT_MODE_LAYOUTS_UPDATED")
+    Constants = Constants or {}
+    Constants.EditModeConsts = { EditModeMaxLayoutsPerType = 5 }
+    DaylightUIDB.profileData = DaylightUIDB.profileData or {}
+    DaylightUIDB.profileData["DPS/Tank"] = DaylightUIDB.profileData["DPS/Tank"] or {}
+    saved.layouts = {
+        { layoutName = "DaylightUI - Old Raid", layoutType = 1, systems = {} },
+        { layoutName = "DaylightUI - DPS/Tank", layoutType = 1, systems = {} },
+        { layoutName = "Arena", layoutType = 1, systems = {} },
+        { layoutName = "Questing", layoutType = 1, systems = {} },
+        { layoutName = "DaylightUI - Tank 2", layoutType = 1, systems = {} },
+    }
+    saved.activeLayout = 5   -- Arena (the two presets come first)
+    choose(DUI, "Healer"); go(DUI)
+    return DUI.Installer.pages.finish
+end
+local function rowNamed(page, name)
+    for _, r in ipairs(page.layoutRows or {}) do
+        if r:IsShown() and r.layoutName == name then return r end
+    end
+end
+local function twice(b)
+    b:GetScript("OnClick")(b, "LeftButton")
+    stub.now = (stub.now or 0) + 0.5   -- past the double-click guard (abworld's clock)
+    b:GetScript("OnClick")(b, "LeftButton")
+end
+
+T.test("installer finish: a full layout list shows every account layout and whose it is", function()
+    local DUI = login()
+    local page = fullList(DUI)
+    T.falsy(DUI.Installer.flow.finished)
+    T.truthy(page.full and page.full:IsShown(), "the list in place of the picture")
+    T.falsy(page.holder:IsShown(), "the picture makes room")
+    T.truthy(string.find(page.say:GetText() or "", "all 5 are taken", 1, true), page.say:GetText())
+    local shown = 0
+    for _, r in ipairs(page.layoutRows) do if r:IsShown() then shown = shown + 1 end end
+    T.eq(shown, 5, "one row per account layout")
+    T.truthy(string.find(rowNamed(page, "DaylightUI - Old Raid").sub:GetText(), "no profile uses it", 1, true))
+    T.truthy(rowNamed(page, "DaylightUI - Old Raid").leftover, "a leftover gets the accent edge")
+    T.truthy(string.find(rowNamed(page, "DaylightUI - DPS/Tank").sub:GetText(), "DPS/Tank", 1, true), "whose profile")
+    T.falsy(rowNamed(page, "DaylightUI - DPS/Tank").leftover)
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    Constants.EditModeConsts = nil
+end)
+
+T.test("installer finish: deleting a leftover layout frees a slot and Try again finishes", function()
+    local DUI = login()
+    local page = fullList(DUI)
+    local row = rowNamed(page, "DaylightUI - Old Raid")
+    row.del:GetScript("OnClick")(row.del, "LeftButton")
+    T.truthy(layoutNamed("DaylightUI - Old Raid"), "one click only asks")
+    stub.now = (stub.now or 0) + 0.5
+    row.del:GetScript("OnClick")(row.del, "LeftButton")
+    T.isnil(layoutNamed("DaylightUI - Old Raid"), "the second click deletes it")
+    T.eq(saved.deleted, 3, "the game is told which one went")
+    local _, arena = layoutNamed("Arena")
+    T.eq(saved.activeLayout, arena, "the character stays on its layout")
+    T.isnil(rowNamed(page, "DaylightUI - Old Raid"), "gone from the list")
+    press(page.go)
+    T.truthy(DUI.Installer.flow.finished, "Try again finishes")
+    local _, healer = layoutNamed("DaylightUI - Healer")
+    T.eq(saved.activeLayout, healer, "on its new layout")
+    T.falsy(page.full:IsShown(), "the list leaves once it's done")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    Constants.EditModeConsts = nil
+end)
+
+T.test("installer finish: the layout in use shows but can't be deleted", function()
+    local DUI = login()
+    local page = fullList(DUI)
+    local row = rowNamed(page, "Arena")
+    T.truthy(row, "listed")
+    T.falsy(row.del and row.del:IsShown(), "no delete button")
+    T.truthy(string.find(row.sub:GetText(), "In use", 1, true), row.sub:GetText())
+    local _, index = layoutNamed("Arena")
+    local ok = DUI.EditMode.DeleteLayout(index)
+    T.falsy(ok, "refused even when asked directly")
+    T.truthy(layoutNamed("Arena"))
+    Constants.EditModeConsts = nil
+end)
+
+T.test("installer finish: nothing is deleted in a fight or with the controller UI on", function()
+    local DUI = login()
+    local page = fullList(DUI)
+    local row = rowNamed(page, "DaylightUI - Tank 2")
+    stub.combat = true
+    twice(row.del)
+    stub.combat = false
+    T.truthy(layoutNamed("DaylightUI - Tank 2"), "kept in a fight")
+    T.truthy(string.find(page.say:GetText() or "", "combat", 1, true), "says why: " .. tostring(page.say:GetText()))
+    local was = DUI.EditMode.GamepadMode
+    DUI.EditMode.GamepadMode = function() return true end
+    twice(rowNamed(page, "DaylightUI - Tank 2").del)
+    DUI.EditMode.GamepadMode = was
+    T.truthy(layoutNamed("DaylightUI - Tank 2"), "kept with the controller UI on")
+    T.eq(#saved.layouts, 5)
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    Constants.EditModeConsts = nil
+end)
+
+T.test("installer: renaming a profile while its layout can't be renamed doesn't leave a second layout", function()
+    local DUI = login()
+    stub.FireEvent("EDIT_MODE_LAYOUTS_UPDATED")
+    choose(DUI, "Healer"); go(DUI)
+    closeGuide()
+    T.eq(#saved.layouts, 1)
+    EditModeManagerFrame:Show()                        -- Edit Mode open: the layout can't be renamed now
+    T.truthy(DUI.Profiles.Rename("Healer", "Mine"))
+    EditModeManagerFrame:Hide()
+    reload()
+    stub.FireEvent("EDIT_MODE_LAYOUTS_UPDATED")
+    T.eq(#saved.layouts, 1, "the old layout renamed, not a new one made beside it")
+    local _, index = layoutNamed("DaylightUI - Mine")
+    T.truthy(index, "named for the new profile")
+    T.isnil(layoutNamed("DaylightUI - Healer"), "the old name gone")
+    T.eq(saved.activeLayout, index, "and in use")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
 T.test("installer finish: when it can't finish it says why, Try again works, and Back returns", function()
@@ -1422,6 +1570,24 @@ end)
 
 
 
+T.test("installer tour: a Finish that can't place the layout leaves no new profile behind", function()
+    local DUI = login()
+    stub.FireEvent("EDIT_MODE_LAYOUTS_UPDATED")
+    local I = tourPick(DUI, "Healer")
+    local name = I.SaveAs()
+    EditModeManagerFrame:Show()                        -- Edit Mode open: the game won't take a layout
+    I.ToFinish()
+    T.falsy(I.flow.finished)
+    T.isnil(DaylightUIDB.profileData[name], "the profile Make it mine would save into isn't made")
+    T.isnil(DaylightUIDB.profileData.Healer, "nor the ready-made it was built from")
+    EditModeManagerFrame:Hide()
+    I.Finish()
+    T.truthy(I.flow.finished, "Try again finishes")
+    T.truthy(DaylightUIDB.profileData[name], "and saves it")
+    T.truthy(layoutNamed("DaylightUI - " .. name), "with its layout")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
 T.test("installer questions: the bars, plates and calm questions pick their presets through the draft", function()
     local DUI = login({ nameplates = true, module = true })
     stub.FireEvent("EDIT_MODE_LAYOUTS_UPDATED")
@@ -1747,18 +1913,18 @@ local function every(extra)
     return o
 end
 
-T.test("installer: Make it mine walks fourteen questions, each with its pick lit, and Next alone gets to the end", function()
+T.test("installer: Make it mine walks fifteen questions, each with its pick lit, and Next alone gets to the end", function()
     local DUI = login(every())
     stub.FireEvent("EDIT_MODE_LAYOUTS_UPDATED")
     choose(DUI, "mine"); go(DUI)
     local I = DUI.Installer
     T.eq(I.flow.page, "q:role")
     local duel = I.pages.duel
-    T.eq(plainText(duel.stepText), "Step 1 of 14")
+    T.eq(plainText(duel.stepText), "Step 1 of 15")
     local unlit = {}
-    for i = 1, 14 do
+    for i = 1, 15 do
         if duel.picked == nil then unlit[#unlit + 1] = I.flow.page end
-        T.eq(duel.next.text:GetText(), i == 14 and "Finish" or "Next")
+        T.eq(duel.next.text:GetText(), i == 15 and "Finish" or "Next")
         press(duel.next)
     end
     T.eq(table.concat(unlit, ","), "", "every question has its pick lit")
@@ -1787,8 +1953,8 @@ T.test("installer: with nameplates off its four questions are left out and the c
     stub.FireEvent("EDIT_MODE_LAYOUTS_UPDATED")
     choose(DUI, "mine"); go(DUI)
     for _, q in ipairs(DUI.Installer.Questions()) do T.truthy(q.part ~= "Nameplates", q.id) end
-    T.eq(#DUI.Installer.Questions(), 10)
-    T.eq(plainText(DUI.Installer.pages.duel.stepText), "Step 1 of 10")
+    T.eq(#DUI.Installer.Questions(), 11)
+    T.eq(plainText(DUI.Installer.pages.duel.stepText), "Step 1 of 11")
 end)
 
 T.test("installer: another addon drawing nameplates is asked about right after the layout, in both paths, and nothing is switched off unasked", function()

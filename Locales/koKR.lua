@@ -1,7 +1,6 @@
 -- Korean (koKR). English text is the key (Locales/Locales.lua).
 local _, DUI = ...
-if DUI.LOCALE ~= "koKR" then return end
-local L = DUI.L
+DUI.AddLanguage("koKR", function(L)
 
 -- Machine draft below this line: not yet checked by a native speaker.
 L["A crown on the party leader's frame. It rides with the name tab or portrait until you pick a spot for it."] = "파티장의 프레임에 왕관이 표시됩니다. 위치를 직접 정하기 전까지는 이름 탭이나 초상화를 따라갑니다."
@@ -212,7 +211,6 @@ L["%s found, showing %d: narrow the search"] = "%s개 찾음, %d개 표시 중: 
 L["%s hidden."] = "%s 숨김."
 L["%s honorable kills, and counting."] = "명예 승리 %s회, 계속 늘어나는 중."
 L["%s honorable kills. The other faction remembers you."] = "명예 승리 %s회. 상대 진영이 당신을 기억합니다."
-L["%s is also loaded. Both replace the same %s; disable one of them."] = "%s도 불러와져 있습니다. 둘 다 같은 %s 기능을 대체하니 하나를 비활성화하세요."
 L["%s is also on. Both change your %s."] = "%s도 켜져 있습니다. 둘 다 %s 기능을 바꿉니다."
 L["%s is guarding your spot."] = "%s이(가) 자리를 지키고 있습니다."
 L["%s is made again from %s, with your picks."] = "%s: %s에서 선택한 대로 다시 만들어집니다."
@@ -247,6 +245,7 @@ L["%s spent at level %d so far."] = "지금까지 %s 사용 (레벨 %d)."
 L["%s to spend"] = "사용 가능: %s"
 L["%s was made for an older DaylightUI and is off: look for an update of it."] = "%s 애드온은 이전 DaylightUI용으로 만들어져 꺼져 있습니다: 업데이트를 찾아보세요."
 L["Its name in the AddOns list should read \"%s %s\": every plugin\'s does."] = "애드온 목록의 이름은 \"%s %s\"이어야 합니다: 모든 플러그인이 그렇습니다."
+L["Its .toc should say \"## Category: %s\" and \"## Group: %s\", so it sits under the plugins' heading in the AddOns list."] = ".toc에 \"## Category: %s\"와 \"## Group: %s\"가 있어야 애드온 목록에서 플러그인 제목 아래에 놓입니다."
 L["%s wonders where you went."] = "%s이(가) 당신이 어디 갔는지 궁금해합니다."
 L["%s x%d"] = "%s x%d"
 L["%s · Level %d"] = "%s · 레벨 %d"
@@ -1471,6 +1470,8 @@ L["Focus cast bar"] = "주시 대상 시전바"
 L["Focus cast bar text size"] = "주시 대상 시전바 텍스트 크기"
 L["Fold it"] = "접기"
 L["Fold ready quests"] = "완료 가능한 퀘스트 접기"
+L["Filter under the title"] = "제목 아래 필터"
+L["Shows All and This zone as words under the Quests title, always there, instead of buttons on its line that appear when you hover the list. The tracker grows by one line."] = "목록에 마우스를 올릴 때 제목 줄에 나타나는 버튼 대신, 퀘스트 제목 아래에 전체와 이 지역을 항상 글자로 표시합니다. 추적창이 한 줄 늘어납니다."
 L["Fold Quests"] = "퀘스트 접기"
 L["Fade Toggle"] = "흐리기 전환"
 L["Fold this quest"] = "이 퀘스트 접기"
@@ -4959,3 +4960,12 @@ L["The data bar has no border on the global style: on a strip this thin the acce
 L["The color of every chat panel's border. The border still lights up in your accent color while you drag a corner to size the chat."] = "모든 채팅 패널의 테두리 색상입니다. 모서리를 끌어 채팅 크기를 바꾸는 동안에는 여전히 강조색으로 빛납니다."
 L["Every chat panel: the main one, the second one and a chat window pulled out on its own. On the global style the Classic chat keeps a thin line."] = "모든 채팅 패널: 기본 패널, 두 번째 패널, 따로 떼어 낸 채팅 창. 전체 스타일에서 클래식 채팅은 얇은 선을 유지합니다."
 L["Gives the second chat panel its own background opacity, set in the row below. When off, it's as see-through as the main chat panel. Shown while the chat's Use Daylight UI global style is off."] = "두 번째 채팅 패널에 아래 줄에서 정하는 자체 배경 불투명도를 줍니다. 끄면 기본 채팅 패널만큼 투명합니다. 채팅의 'Daylight UI 전체 스타일 사용'이 꺼져 있을 때 표시됩니다."
+
+-- Mailbox: what happened to an auction house letter's item (machine draft, not yet checked by a native speaker;
+-- Canceled, Expired and Outbid follow the game's own words where it has one that fits).
+L["Sold"] = "판매됨"
+L["Expired"] = "만료됨"
+L["Canceled"] = "취소됨"
+L["Won"] = "낙찰됨"
+L["Outbid"] = "상회 입찰"
+end)

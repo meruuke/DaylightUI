@@ -51,6 +51,11 @@ function Clicks.Attach(f)
     f:SetScript("OnClick", function(self, button) DUI.SafeCall(Clicks.OnClick, self, button) end)
     f:SetScript("OnEnter", function(self) DUI.SafeCall(Clicks.OnEnter, self) end)
     f:SetScript("OnLeave", function(self) DUI.SafeCall(Clicks.OnLeave, self) end)
+    if f.kind == "zone" then
+        f:RegisterForDrag("LeftButton")
+        f:SetScript("OnDragStart", function(self) DUI.SafeCall(ns.Tracker.ZoneDragStart, self) end)
+        f:SetScript("OnDragStop", function() DUI.SafeCall(ns.Tracker.ZoneDragStop) end)
+    end
 end
 
 -- mapID: a specific map (the turn-in's), otherwise the quest's.
@@ -148,10 +153,25 @@ end
 function Clicks.OnClick(f, button)
     local b = f.block
     if not b then return end
+    if b.kind == "zone" and ns.Tracker.ZoneDropped() then return end
+    if b.kind == "header" and b.id == "quests" and button == "RightButton" then return Clicks.ZoneMenu(f) end
     if b.kind == "zone" and IsShiftKeyDown and IsShiftKeyDown() then ns.Tracker.FoldZoneQuests(b.label)
     elseif b.kind == "header" or b.kind == "zone" then ns.Tracker.ToggleFold(b.id)
     elseif b.kind == "ach" then Clicks.Achievement(b.ach, button)
     elseif b.kind == "quest" then Clicks.Quest(b.quest, button, f) end
+end
+
+-- Right-click the Quests header: an order for the zones. Dragging a zone name
+-- sets one too; the last row hands the zones back to the quest order setting.
+Clicks.ZONE_MENU_KEYS = { "zonesAZ", "zonesLevel", "zonesLog" }
+Clicks.ZONE_MENU = { zonesAZ = L["Sort zones A to Z"], zonesLevel = L["Sort zones by level"],
+                     zonesLog = L["Zones in the usual order"] }
+function Clicks.ZoneMenu(f)
+    local W = DUI.Widgets
+    if not (W and W.OpenMenu) then return end
+    local current = not ns.Tracker.ZoneOrder() and "zonesLog" or nil
+    W.OpenMenu(f, Clicks.ZONE_MENU_KEYS, Clicks.ZONE_MENU, current,
+        function(k) DUI.SafeCall(ns.Tracker.SortZonesBy, k) end)
 end
 
 -- The menu, Questie's entries in its own wording and order. Flat (the menu has
@@ -239,6 +259,23 @@ local function objColor(o)
     if o.done then return Tips.GOOD end
 end
 
+-- One objective and its count in a tooltip. The game's tooltip never wraps the left
+-- side of a two-sided line, so a long objective was cut short ("Marca de honor de la
+-- Cuenc..."): there the count goes first on one line that wraps, as the game writes it.
+-- The Rich card wraps a row's label by itself, so it keeps the two sides, and with them
+-- the count's progress color; written count first it would read the line as a quest
+-- objective and draw it as one.
+function Clicks.Objective(text, count, color)
+    local Tips = DUI.Tips
+    if DUI.API.TooltipStyle() == "rich" then
+        Tips.Line(text, count, color)
+    elseif count ~= "" and color then
+        Tips.Text(DUI.Win.Parts.Hex(color) .. count .. "|r " .. text)
+    else
+        Tips.Text((count ~= "" and (count .. " ") or "") .. text)
+    end
+end
+
 -- Same look as every DUI.Tips tooltip, with the clicks in the accent.
 -- hints: the clicks for the row it belongs to (the tracker's by default).
 -- With rowTipKind "details" it also carries the quest's story and every reward,
@@ -252,15 +289,20 @@ function Clicks.QuestTip(q, hints)
             and pcall(GT.SetQuestPartyProgress, GT, q.id, false, false)
     if not party then
         Tips.Title(q.title, ns.Look.TitleColor(look, q))
-        Tips.Sub(L["Level %s · %s"]:format(tostring(q.level or "?"), q.zone or ""))
+        -- The level in its difficulty color, like the log, and the zone on its own line.
+        -- Its tag (dungeon, PvP, elite, raid) after the level, in the tag's color, as in the tracker.
+        local tag = DUI:Get("Quests", "questTags") ~= false and ns.Look.TagText(look, q.tag) or nil
+        local level = ns.Look.Level(q)
+        Tips.Sub(tag and L["Level %s · %s"]:format(level, tag) or L["Level %s"]:format(level))
+        if q.zone and q.zone ~= "" then Tips.Sub(q.zone) end
     end
     local story = full and ns.Details.Text(q)
     if story then Tips.Text(story) end
     if not party then
-        if story and #q.objs > 0 then Tips.Gap() end
+        if #q.objs > 0 then Tips.Gap() end
         for _, o in ipairs(q.objs) do
             local right = o.kind == "count" and (o.have .. "/" .. o.need) or (o.kind == "bar" and (o.pct .. "%")) or ""
-            Tips.Line(o.text, right, objColor(o))
+            Clicks.Objective(o.text, right, objColor(o))
         end
     end
     if full then
@@ -274,7 +316,10 @@ function Clicks.QuestTip(q, hints)
         local ok, money = pcall(GetQuestLogRewardMoney, q.id)
         if ok and type(money) == "number" and money > 0 then
             Tips.Gap()
-            Tips.Line(L["Rewards"], DUI.MoneyString(money), Tips.MONEY)
+            -- Under its heading: beside it the value sat far off at the edge, and a long
+            -- reward had no room.
+            Tips.Sub(L["Rewards"])
+            Tips.Text(DUI.MoneyString(money), Tips.MONEY)
         end
     end
     Tips.Gap()
@@ -287,7 +332,7 @@ function Clicks.AchievementTip(a)
     Tips.Clear()
     Tips.Title(a.title)
     for _, o in ipairs(a.objs) do
-        if o.kind == "count" then Tips.Line(o.text, o.have .. "/" .. o.need, objColor(o)) else Tips.Sub(o.text) end
+        if o.kind == "count" then Clicks.Objective(o.text, o.have .. "/" .. o.need, objColor(o)) else Tips.Sub(o.text) end
     end
     Tips.Gap()
     for _, h in ipairs(Clicks.ACH_HINTS) do Tips.Hint(h) end
@@ -333,6 +378,8 @@ function Clicks.OnEnter(f)
 end
 
 function Clicks.OnLeave(f)
+    local d = ns.Tracker.zoneDrag
+    if d and d.frame == f then return end   -- a dragged zone stays lit until it's dropped
     if f.kind == "quest" or f.kind == "ach" then f:SetScript("OnUpdate", nil) end
     f.hoverPart = nil
     ns.Rows.Hover(f, false)

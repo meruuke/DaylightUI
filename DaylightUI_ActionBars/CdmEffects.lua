@@ -170,6 +170,15 @@ end
 -- The saved button table of a claimed item (nil when Daylight UI doesn't hold it).
 function Fx.ButtonOf(item) return opts[item] end
 
+-- Gives a game item its mouse back as the game sets it (CooldownViewerItemMixin:SetTooltipsShown).
+-- Clicks go through to the world, and the hover shows a tooltip only while its viewer's
+-- Edit Mode "Show tooltips" is on.
+function Fx.GameMouse(item)
+    local viewer = item.GetViewerFrame and item:GetViewerFrame()
+    item:SetMouseClickEnabled(false)
+    item:SetMouseMotionEnabled(not (viewer and viewer.tooltipsShown == false))
+end
+
 -- Glow -----------------------------------------------------------------
 -- The game's own proc glow (the looping spell alert ring every player knows) on a
 -- Daylight UI frame, recolored to the option's color or the accent (a gradient accent
@@ -733,11 +742,26 @@ local function playSound(item, button, key)
     DUI.Sound.Alert(s)
 end
 
+-- Plugins hear the moments too (DaylightUI.API: CooldownReady, CooldownStarted,
+-- CooldownUsable, CooldownProc, CooldownBuffUp, CooldownBuffDown), by spell and
+-- the piece's key. id = the piece's key when the caller knows it better than the item.
+local function tell(event, item, id, on)
+    local R = DUI.APIReport
+    if not R.Wants(event) then return end
+    local key = id
+    if key == nil and item then key = item.cooldownID end
+    if secret(key) then key = nil end
+    local sid = id ~= nil and ns.CdmOwn and ns.CdmOwn.SpellOf(id) or nil
+    if sid == nil and item then sid = Fx.SpellOf(item) end
+    R.Event(event, sid, key ~= nil and tostring(key) or nil, on)
+end
+
 -- Called by CdmRows each pass for every piece whose buff state it can tell.
-function Fx.BuffMoment(piece, item, isDown)
+function Fx.BuffMoment(piece, item, isDown, id)
     if type(isDown) ~= "boolean" then return end
     local was = wasDown[piece]
     wasDown[piece] = isDown
+    if was ~= nil and was ~= isDown then tell(isDown and "CooldownBuffDown" or "CooldownBuffUp", item, id) end
     if was == true and not isDown then playSound(item, piece, "buffSound")
     elseif was == false and isDown then
         -- Really ended, not a new target's debuffs leaving view or a zone change
@@ -756,15 +780,6 @@ DUI.RegisterEvent("PLAYER_TARGET_CHANGED", function() targetAt = GetTime() end)
 -- cdState changed from was to now (both plain): ready or on cooldown. quiet = the
 -- light still runs but the sound waits (an aura's time ended over a cooldown that's
 -- still going).
--- Plugins hear it too (DaylightUI.API: CooldownReady, CooldownStarted), by spell.
-local function tell(event, item)
-    local R = DUI.APIReport
-    if not R.Wants(event) then return end
-    local key = item.cooldownID
-    if secret(key) then key = nil end
-    R.Event(event, Fx.SpellOf(item), key ~= nil and tostring(key) or nil)
-end
-
 local function moment(item, was, now, quiet)
     if was == true and now == false then
         Fx.Sweep(item)
@@ -1039,8 +1054,40 @@ local function readAlert(item)
     local m = _G.ActionButtonSpellAlertManager
     if type(m) ~= "table" or type(m.HasAlert) ~= "function" then return end
     local ok, up = pcall(m.HasAlert, m, item)
+    local was = alerts[item] == true
     alerts[item] = (ok and up == true) or nil
+    if was ~= (alerts[item] == true) then tell("CooldownProc", item, nil, not was) end
 end
+
+-- Overpower on Forever: a dodge by your target opens a 5 s window, kept as a
+-- hidden buff on you that can't be read in a fight. The game only answers
+-- "usable" in Battle Stance, so outside it Overpower never lit up for a warrior
+-- who'd swap stances to use it. Outside Battle Stance, the target's dodge
+-- (UNIT_COMBAT's action stays plain) opens the window here. It can't tell whose
+-- attack was dodged, so in Battle Stance the game's own answer stands.
+Fx.OVERPOWER = { [7384] = true, [7887] = true, [11584] = true, [11585] = true }
+Fx.OVERPOWER_WINDOW = 5
+local dodgedAt = nil
+
+local function overpowerOpen(sid)
+    return Fx.OVERPOWER[sid] == true and dodgedAt ~= nil and formNow ~= "Battle"
+        and GetTime() - dodgedAt < Fx.OVERPOWER_WINDOW
+end
+
+local dodges = CreateFrame("Frame")
+dodges:RegisterUnitEvent("UNIT_COMBAT", "target")
+dodges:RegisterEvent("PLAYER_TARGET_CHANGED")
+dodges:SetScript("OnEvent", function(_, event, _, action)
+    if event == "PLAYER_TARGET_CHANGED" then
+        if dodgedAt then dodgedAt = nil; Fx.Soon(false) end
+        return
+    end
+    if secret(action) or action ~= "DODGE" then return end
+    dodgedAt = GetTime()
+    Fx.Soon(false)
+    -- Nothing else says when the window ends.
+    C_Timer.After(Fx.OVERPOWER_WINDOW + 0.05, function() Fx.Soon(false) end)
+end)
 
 -- Castable now, per the game (plain in combat too). A secret or missing answer
 -- keeps the last one, so "When not usable" never hides or darkens a spell when
@@ -1051,7 +1098,8 @@ local function readUsable(item)
     if not glow then usable[item] = nil end
     castable[item], short[item] = nil, nil
     if not (glow or kinds[item] == "icon" or Fx.Get(b, "onUnusable") ~= "show"
-        or Fx.Get(b, "onShort") ~= "show" or Fx.Get(b, "usableSound") ~= "none") then return end
+        or Fx.Get(b, "onShort") ~= "show" or Fx.Get(b, "usableSound") ~= "none"
+        or DUI.APIReport.Wants("CooldownUsable")) then return end
     local ok, can, noPower
     local C = ns.CdmCustom
     if C and C.ItemOf(item.cooldownID) then   -- an item with none left in your bags reads not usable
@@ -1060,7 +1108,11 @@ local function readUsable(item)
     else
         local sid = Fx.SpellOf(item)
         if not sid or type(C_Spell) ~= "table" or type(C_Spell.IsSpellUsable) ~= "function" then return end
-        ok, can, noPower = pcall(C_Spell.IsSpellUsable, sid)
+        if overpowerOpen(sid) then
+            ok, can, noPower = true, true, false
+        else
+            ok, can, noPower = pcall(C_Spell.IsSpellUsable, sid)
+        end
     end
     if not ok or type(can) ~= "boolean" or secret(can) then return end
     if glow then usable[item] = can end
@@ -1091,7 +1143,10 @@ local function usableMoment(item)
     else return end
     local was = wasUsable[item]
     wasUsable[item] = now
-    if was == false and now then playSound(item, opts[item], "usableSound") end
+    if was == false and now then
+        playSound(item, opts[item], "usableSound")
+        tell("CooldownUsable", item)
+    end
 end
 
 -- Gray: true, false, or nil for the game's own. An element piece's cooldown totem,
@@ -1235,7 +1290,7 @@ local function applyAlpha(item)
         item:EnableMouse(false)
     elseif mouseOff[item] then
         mouseOff[item] = nil
-        item:EnableMouse(true)
+        Fx.GameMouse(item)
     end
 end
 
@@ -1315,6 +1370,23 @@ local function refresh(item, read)
 end
 
 function Fx.Refresh(item) refresh(item, true) end
+
+-- What a held item reads now, every answer plain (nil = the game won't say). For
+-- plugins (DaylightUI.API.CooldownState): the same answers Daylight UI's own effects go by.
+function Fx.State(item, into)
+    local t = into or {}
+    local cd = cdState[item]
+    if buffOnly[item] then cd = nil end
+    t.onCooldown = cd
+    if cd ~= nil then t.ready = not cd else t.ready = nil end
+    local c = castable[item]
+    if type(c) == "boolean" then t.usable = c and not short[item]; t.noPower = short[item] == true
+    else t.usable, t.noPower = nil, nil end
+    t.proc = alerts[item] == true
+    if type(down[item]) == "boolean" then t.buffUp = not down[item] else t.buffUp = nil end
+    t.glowing = lit[item] == true
+    return t
+end
 refreshNow = function(item) refresh(item, false) end
 
 -- Whether a piece's buff is down (true), up (false) or unknown (nil), reported by
@@ -1430,7 +1502,7 @@ function Fx.Clear(item)
         wash.__on = nil
         wash:SetAlpha(0)
     end
-    if mouseOff[item] then mouseOff[item] = nil; item:EnableMouse(true) end
+    if mouseOff[item] then mouseOff[item] = nil; Fx.GameMouse(item) end
     cdState[item], away[item], usable[item], castable[item], down[item] = nil, nil, nil, nil, nil
     short[item] = nil
     buffOnly[item] = nil
@@ -1464,6 +1536,7 @@ local casts = CreateFrame("Frame")
 casts:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
 casts:SetScript("OnEvent", function(_, _, _, _, sid)
     if type(sid) ~= "number" or secret(sid) then return end
+    if Fx.OVERPOWER[sid] and dodgedAt then dodgedAt = nil; Fx.Soon(false) end
     DUI.SafeCall(Fx.Armed, sid)
 end)
 

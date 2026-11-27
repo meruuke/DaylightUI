@@ -95,8 +95,13 @@ end
 
 function Party.ShowSample(b, i, cfg)
     local box, n = ns.AuraGroups.Box(b, cfg), not b.fullSample and i or nil
-    ns.AuraGroups.ShowSample(b.sampleSet, b, cfg.auras, box, n)
-    ns.Indicators.ShowSample(b.sampleSet, b, cfg.indicators, box, n)
+    if b.noAuras then
+        ns.AuraGroups.HideSample(b.sampleSet)
+        ns.Indicators.HideSample(b.sampleSet)
+    else
+        ns.AuraGroups.ShowSample(b.sampleSet, b, cfg.auras, box, n, cfg.iconBorder)
+        ns.Indicators.ShowSample(b.sampleSet, b, cfg.indicators, box, n)
+    end
     ns.PartyPets.ShowSample(b)
     ns.PartyTargets.ShowSample(b, i)
     -- The healer is casting, so the page's preview shows every piece.
@@ -166,10 +171,27 @@ local function preview(on)
     Party.group:ShowPreview(on and Party.group:IsOn(d.party))
     DUI.AfterCombat(function() Party.group:Layout(d.party, d.partyText, d.range) end, "party:preview")
 end
-DUI.On("TestModeChanged", preview)
+local function previewForTestMode(testModeOn)
+    preview(testModeOn or Party.group.revealed == true)
+end
+DUI.On("TestModeChanged", previewForTestMode)
+
+-- In a party, unless the raid frames stand in for it, as its visibility decides.
+local function realPartyShows()
+    local d = db()
+    return IsInGroup() and not IsInRaid() and not (d and ns.Raid.InParty(d.raid))
+end
+
+-- The layout editor reveals the party while a group it edits follows it. Real
+-- party frames already show, so they aren't swapped for samples.
+DUI.On("RevealFrame", function(key, on)
+    if key ~= "unitframes.party" then return end
+    Party.group.revealed = (on and not realPartyShows()) or nil
+    preview(Party.group.revealed or DUI.testMode)
+end)
 
 DUI.RegisterTestPart("party", "Party", 60, function()
     local d = db()
     return d ~= nil and Party.group:IsOn(d.party) == true
 end)
-DUI.On("TestPartChanged", function(key) if key == "party" then preview(DUI.testMode) end end)
+DUI.On("TestPartChanged", function(key) if key == "party" or key == "auras" then previewForTestMode(DUI.testMode) end end)

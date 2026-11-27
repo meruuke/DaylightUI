@@ -1956,6 +1956,35 @@ T.test("bags: a right-click sell still holds the spot", function()
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
+-- Ticket: after selling junk the Junk group kept its emptied spots until the
+-- bag was closed and opened again. A sale Daylight UI didn't start (the game's
+-- own vendor button, another vendor addon) and right-click sales hold their
+-- spots while the vendor is open; walking away closes them up.
+T.test("bags: spots held at a vendor close up when the vendor closes", function()
+    local ns, f = junkAtVendor()
+    local gray, weapon = ns.Bags.buttons[0][2], ns.Bags.buttons[0][1]
+    -- The game's sell-all: every gray item goes at once, nothing of Daylight UI's asked.
+    world.items[0][2] = nil
+    bagChanged(0)
+    -- And one more sold by right-click.
+    C_Container.UseContainerItem(0, 1)
+    for _ = 1, 5 do stub.RunTimers() end
+    T.truthy(f.stale, "held while the vendor is open")
+    T.truthy(weapon:IsShown(), "the right-clicked slot keeps its spot")
+    local laid = 0
+    local relayout = ns.Window.EaseRelayout
+    ns.Window.EaseRelayout = function(...) laid = laid + 1 return relayout(...) end
+    stub.FireEvent("MERCHANT_CLOSED")
+    for _ = 1, 3 do stub.RunTimers() end
+    ns.Window.EaseRelayout = relayout
+    T.eq(laid, 1, "the vendor closed: one eased layout")
+    T.falsy(f.stale, "no reopen needed")
+    T.truthy(DaylightUI.Win.Feel.Moving(gray) or (f.fading and f.fading[gray]), "the emptied spot moves off, eased")
+    settleFeel()
+    nothingMoves(f, "settled")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
 T.test("bags: more than EASE_MAX moves cross-fade instead", function()
     local ns = login()
     local L, Motion = ns.Layout, DaylightUI.Motion
@@ -2395,6 +2424,27 @@ T.test("bags: Pawn's upgrade arrows show on gear and answer the upgrade search",
     T.eq(type(registered.o.RefreshAll), "function", "so it refreshes them when gear or scales change")
     _G.PawnRegisterThirdPartyBag, _G.PawnShouldItemLinkHaveUpgradeArrow = nil, nil
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- Caerdon Wardrobe, BetterBags and BaudBag list Pawn as an optional dependency
+-- and sort before DaylightUI_Bags, so the client loads Pawn first. The hook then
+-- runs while the bags' own files are still loading.
+T.test("bags: Pawn loaded before the bags still hooks up, with no error at load", function()
+    local registered
+    _G.PawnRegisterThirdPartyBag = function(name, o) registered = { name = name, o = o } end
+    _G.PawnShouldItemLinkHaveUpgradeArrow = function(link) return link == "|Hitem:6|h" end
+    stub.Load({ bags = true, before = function()
+        setup()
+        categoryWorld()
+        stub.loadedAddOns.Pawn = true
+    end })
+    stub.RunTimers()
+    local ns = stub.bags
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    T.eq(registered and registered.name, "Daylight UI", "Pawn knows these bags")
+    T.eq(type(ns.Search.KEYWORDS.upgrade), "function", "the upgrade search word is there")
+    T.truthy(ns.Plugins.IsUpgrade("|Hitem:6|h"), "and asks Pawn")
+    _G.PawnRegisterThirdPartyBag, _G.PawnShouldItemLinkHaveUpgradeArrow = nil, nil
 end)
 
 T.test("bags: Can I Mog It marks show on gear, told the bag and slot", function()

@@ -103,6 +103,41 @@ T.test("bridge: one quest's icons grow, the others fade, on both maps, all come 
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
+-- A player's video: with the mouse still over packed icons in a fight, Questie's
+-- hover went on and off a few times a second. A grown icon took the mouse from
+-- the bare map (where Questie hovers a patrol path) or from the icon it was over,
+-- that hover ended, everything shrank back, and the hover began again.
+T.test("bridge: a grown icon keeps the mouse area it had at rest", function()
+    local B = load(function()
+        questie({ QuestieMap = { questIdFrames = { [1] = { DuiHitMap = "DuiHitMap", DuiHitMini = "DuiHitMini" } } } })
+    end)
+    DaylightUI.DB.General().motion = false
+    local map = CreateFrame("Frame", "DuiHitMap", UIParent)
+    map:SetSize(16, 16)
+    local mini = CreateFrame("Frame", "DuiHitMini", UIParent)
+    mini.miniMapIcon = true
+    mini:SetSize(10, 10)
+    -- How wide the mouse area is on screen, in the parent's units.
+    local function reach(f)
+        local hit = f.__hitRect or { 0, 0, 0, 0 }
+        local s = f:GetScale()
+        return (f:GetWidth() - hit[1] - hit[2]) * s, (f:GetHeight() - hit[3] - hit[4]) * s
+    end
+    B.FocusIcons(1, 0.2, 1.35)
+    T.eq(map:GetScale(), 1.35, "it still grows")
+    local w, h = reach(map)
+    T.near(w, 16, 1e-6, "the map icon's mouse area stays its resting width")
+    T.near(h, 16, 1e-6)
+    w, h = reach(mini)
+    T.eq(mini:GetWidth(), 13.5, "the minimap icon still grows")
+    T.near(w, 10, 1e-6, "the minimap icon's mouse area stays its resting width")
+    T.near(h, 10, 1e-6)
+    B.FocusIcons(nil)
+    T.deq(map.__hitRect or { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, "the whole icon takes the mouse again")
+    T.deq(mini.__hitRect or { 0, 0, 0, 0 }, { 0, 0, 0, 0 })
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
 T.test("bridge: an icon Questie gave to something else keeps what Questie set", function()
     local mini
     local B = load(function()
@@ -209,6 +244,42 @@ T.test("aside: untracked quests leave Questie's maps while ours tracks, not with
     T.eq(p.hideUntrackedQuestsMapIcons, false, "the whole log is listed, nothing watched: all show")
     DaylightUI:Set("Quests", "filter", "zone")
     T.eq(p.hideUntrackedQuestsMapIcons, true)
+    DaylightUI.questsOwnTracker = nil
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- A player's ask: Questie's "Hide icons of untracked quests" came back on after
+-- every reload. Daylight UI turns it on once, then the player's own change stays.
+T.test("aside: untracked quests' icons are hidden once; turned off in Questie, they stay off over a reload", function()
+    local profile
+    local function start(sv)
+        load(function()
+            questie({})
+            if profile then Questie.db.profile = profile end   -- Questie's own saved profile
+            if sv then DaylightUIDB = sv end
+            -- The game's tracker, which Quests switches off as its file loads.
+            ObjectiveTrackerManager = {}
+        end)
+        profile = Questie.db.profile
+        DaylightUI.Fire("QuestMapsChanged")
+    end
+    start()
+    T.eq(profile.hideUntrackedQuestsMapIcons, true, "turned on the first time")
+    -- The player turns it off in Questie's options, then reloads.
+    profile.hideUntrackedQuestsMapIcons = false
+    DaylightUI.Fire("QuestMapsChanged")
+    T.eq(profile.hideUntrackedQuestsMapIcons, false, "a settings change leaves it off")
+    start(DaylightUIDB)
+    T.eq(profile.hideUntrackedQuestsMapIcons, false, "a reload leaves it off")
+    -- A player from before this: it was forced on (noted in questieOff), then turned off.
+    profile.hideUntrackedQuestsMapIcons = false
+    start({ questieOff = { hideUntrackedQuestsMapIcons = true } })
+    T.eq(profile.hideUntrackedQuestsMapIcons, false, "an earlier player's Questie setting stays as it is")
+    -- The whole-log filter hands it back; taking charge again turns it on once more.
+    DaylightUI:Set("Quests", "filter", "log")
+    T.eq(profile.hideUntrackedQuestsMapIcons, false)
+    DaylightUI:Set("Quests", "filter", "zone")
+    T.eq(profile.hideUntrackedQuestsMapIcons, true, "set once again after being handed back")
     DaylightUI.questsOwnTracker = nil
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)

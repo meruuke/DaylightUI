@@ -75,7 +75,7 @@ PageSample.PARTS = {
     -- grows down toward the grip and the health bar keeps its size. Its width
     -- is the frame's. A style's power line is under the frame, so it grows on its own
     -- (linkIf).
-    { label = "Power bar", at = at("power"), keys = { "%s.showPower", "%s.powerHeight", "%s.powerAt", "%s.powerWidth", "%s.powerSlant", "%s.ribbonGap", "%s.regenSweep", "%s.backPower", "%s.backPowerAlpha" },
+    { label = "Power bar", at = at("power"), keys = { "%s.showPower", "%s.powerHeight", "%s.powerAt", "%s.powerWidth", "%s.powerSlant", "%s.ribbonGap", "%s.regenSweep", "%s.regenTicks", "%s.backPower", "%s.backPowerAlpha" },
       size = { w = "%s.width", h = "%s.powerHeight", link = { h = "%s.height" } },
       linkIf = function(f) return not f.powerLine end },
     { label = "Portrait", at = at("portrait"), keys = { "%s.portrait", "%s.portraitShape", "%s.portraitLook", "%s.portraitRing", "%s.portraitDragon", "%s.portraitDragonColor", "%s.portraitScale" } },
@@ -389,7 +389,7 @@ local function addable(s, id, auras)
         return keys, values
     end
     function s.Add(choice)
-        local sub, what = string.match(tostring(choice), "^(%a+):(%a+)$")
+        local sub, what = string.match(tostring(choice), "^(%a+):(.+)$")
         if sub == "text" then
             local key = ns.Texts.Add(ns.Raid.PageFrame(id), what)
             if key then return "Extra text " .. indexOf(ns.TEXT_SLOTS, key) end
@@ -509,6 +509,8 @@ local function refreshSingle(s, width, maxH)
         up = math.max(up, tabUp(f) + top)
         down = math.max(down, bottom)
     end
+    -- The player's draw order, over what the layout set.
+    ns.Layers.ApplyTo(f, s.id)
     -- Its cast bar, when it sits on the frame (withCast): what it reaches past it.
     if s.castDraw then
         local cUp, cDown, cOut = s.castDraw(f, d)
@@ -540,6 +542,7 @@ local function newSingle(id, parent)
     zoomable(s)
     local f = CreateFrame("Button", nil, s.frame)
     UF.Build(f, specOf(id))
+    f.layerPreview = true  -- Layers finds its parts on the preview, not the live frame
     f:EnableMouse(false)   -- display only, the strip's hotspots take the clicks
     s.f = f
     -- The real pet frame's indicator is a different widget. This one is only
@@ -586,7 +589,8 @@ local function refreshParty(s, width, maxH)
     g:LayoutSamples(s.members, s.holder, cfg, text, w, h)
     g:FillSamples(s.members, #s.members, cfg)
     for _, b in ipairs(s.members) do b:SetAlpha(cfg.enabled == false and PageSample.OFF_ALPHA or 1) end
-    local fw, fh = ns.Group.Footprint(cfg, #s.members, g:PreviewRows(cfg), w, h)
+    local fw, fh = ns.Group.Footprint(cfg, #s.members, g:PreviewRows(cfg), w, h,
+        ns.Group.NestCut(cfg, g.opts.spec, s.holder))
     s.holder:SetSize(fw, fh)
     local out, up, down = reach(first)
     local gUp, gDown, gLeft, gRight = PageSample.GroupReach(cfg, first)
@@ -707,7 +711,7 @@ local function refreshRaid(s, width, maxH)
     g:LayoutSamples(s.members, s.holder, line, text, w, h)
     g:FillSamples(s.members, #s.members, cfg)
     for _, b in ipairs(s.members) do b:SetAlpha(d.raid.enabled == false and PageSample.OFF_ALPHA or 1) end
-    local fw, fh = ns.Group.Footprint(line, #s.members, true, w, h)
+    local fw, fh = ns.Group.Footprint(line, #s.members, true, w, h, ns.Group.NestCut(line, g.opts.spec, s.holder))
     s.holder:SetSize(fw, fh)
     local up, down, left, right = PageSample.GroupReach(cfg, first)
     return fit(s.frame, s.holder, fw, fh, left, false, up, down, width, maxH, right, s.Zoom())

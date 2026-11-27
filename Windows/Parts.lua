@@ -22,6 +22,7 @@ Parts.ICON = 18
 Parts.ITEM = 44             -- item tile height
 Parts.ITEM_ICON = 34
 Parts.ITEM_MARK = 16        -- small mark at a tile's right end (the NPC window's coin)
+Parts.QUEST_BANG = "Interface\\ContainerFrame\\UI-Icon-QuestBang"   -- the game's TEXTURE_ITEM_QUEST_BANG
 Parts.GAP = 6
 Parts.WHEEL = 40            -- px per wheel notch
 Parts.SAY = Style.INK.TEXT       -- NPC speech
@@ -59,18 +60,27 @@ function Parts.ItemClick(link)
 end
 
 -- The item compare, the game's way: on with Shift (the COMPAREITEMS modifier)
--- or the "always compare items" setting, off again once neither holds.
-function Parts.Compare(tip)
+-- or the "always compare items" setting, off again once neither holds. link is
+-- the item to compare when the tooltip shows something that isn't the item's
+-- own tooltip (a recipe's result): the game only compares an item tooltip.
+-- always compares with no Shift, as the game's vendor does for what it sells.
+local function wantsCompare(tip, always)
+    if always then return true end
+    if type(TooltipUtil) == "table" and type(TooltipUtil.ShouldDoItemComparison) == "function" then
+        return TooltipUtil.ShouldDoItemComparison(tip) == true
+    end
+    return type(IsModifiedClick) == "function" and IsModifiedClick("COMPAREITEMS") == true
+end
+
+function Parts.Compare(tip, link, always)
     tip = tip or GameTooltip
     if type(tip) ~= "table" then return end
-    local want
-    if type(TooltipUtil) == "table" and type(TooltipUtil.ShouldDoItemComparison) == "function" then
-        want = TooltipUtil.ShouldDoItemComparison(tip)
-    else
-        want = type(IsModifiedClick) == "function" and IsModifiedClick("COMPAREITEMS")
-    end
-    if want then
-        if type(GameTooltip_ShowCompareItem) == "function" then GameTooltip_ShowCompareItem(tip) end
+    if wantsCompare(tip, always) then
+        if link and type(C_TooltipComparison) == "table" and type(C_TooltipComparison.CompareItem) == "function" then
+            C_TooltipComparison.CompareItem({ hyperlink = link }, tip)
+        elseif type(GameTooltip_ShowCompareItem) == "function" then
+            GameTooltip_ShowCompareItem(tip)
+        end
     elseif type(tip.shoppingTooltips) == "table" then
         for _, shop in ipairs(tip.shoppingTooltips) do
             if type(shop) == "table" and shop:IsShown() then shop:Hide() end
@@ -78,16 +88,43 @@ function Parts.Compare(tip)
     end
 end
 
--- Wraps a hover's tooltip so it behaves like the game's own item buttons. The
--- game's tooltip calls its owner's UpdateTooltip every 0.2 s while it's up, so
--- the tooltip is drawn again then, and pressing or letting go of Shift
--- mid-hover shows or hides the compare. draw(b) fills GameTooltip for b.
-function Parts.ItemTip(draw)
-    local function show(b)
-        draw(b)
-        if type(GameTooltip) == "table" and GameTooltip:IsOwned(b) then
-            Parts.Compare(GameTooltip)
-            b.UpdateTooltip = show
+-- Item data the game finished loading. GameTooltip refreshes itself on this
+-- event only when its owner has no UpdateTooltip, so an ItemTip owner redraws
+-- for it instead. Each event bumps the count; an owner redraws when it moved.
+local dataSeen = 0
+DUI.RegisterEvent("TOOLTIP_DATA_UPDATE", function(_, id)
+    local tip = GameTooltip
+    if id ~= nil and type(tip) == "table" and type(tip.HasDataInstanceID) == "function"
+        and not tip:HasDataInstanceID(id) then return end
+    dataSeen = dataSeen + 1
+end)
+
+-- Wraps a hover's tooltip so it behaves like the game's own item buttons:
+-- pressing or letting go of Shift mid-hover shows or hides the compare, and a
+-- tooltip shown before its item loaded fills in once it does. The game's
+-- tooltip calls its owner's UpdateTooltip every 0.2 s; drawing the whole
+-- tooltip again each time made hovering a long list stutter (an item tooltip
+-- with its compare and price lines can take tens of milliseconds), so a
+-- redraw happens only when one of those changed. draw(b) fills GameTooltip
+-- for b; it may return an item link to compare with (see Parts.Compare).
+-- always: compare without Shift too. live: what the tooltip shows changes on
+-- its own (a cooldown counting down), so it is drawn on every tick.
+function Parts.ItemTip(draw, always, live)
+    local show
+    local function update(b)
+        local tip = GameTooltip
+        if not (type(tip) == "table" and tip:IsOwned(b)) then return end
+        if live or b.tipCompare ~= wantsCompare(tip, always) or b.tipData ~= dataSeen then
+            return show(b)
+        end
+    end
+    show = function(b)
+        local link = draw(b)
+        local tip = GameTooltip
+        if type(tip) == "table" and tip:IsOwned(b) then
+            Parts.Compare(tip, type(link) == "string" and link ~= "" and link or nil, always)
+            b.tipCompare, b.tipData = wantsCompare(tip, always), dataSeen
+            b.UpdateTooltip = update
         end
     end
     return show
@@ -135,7 +172,9 @@ function Parts.Hex(c)
     return string.format("|cff%02x%02x%02x", h(c[1]), h(c[2]), h(c[3]))
 end
 
-local function sound(name) if DUI.Sound then DUI.Sound.Play(name) end end
+-- kit: the game's own sound kit for this click when the player picks the game's
+-- sounds (Sound.Play's gameKit; false = the game's button makes none).
+local function sound(name, kit) if DUI.Sound then DUI.Sound.Play(name, kit) end end
 
 -- ---------------------------------------------------------------------
 -- Stack
@@ -510,7 +549,7 @@ local function makeRow(parent)
         if not spec then return end
         local fn = button == "RightButton" and spec.onRightClick or (button ~= "RightButton" and spec.onClick)
         if fn then
-            sound("click")
+            sound("click", spec.sound)
             fn(self)
         end
     end)
@@ -550,7 +589,8 @@ end
 
 -- spec: text, color, icon (file or id), atlas, iconColor (tint for white art),
 -- key ("1"), dim, onClick, onRightClick, onEnter, onLeave, depth (tree level),
--- chevron ("open" or "closed" for tree nodes), id (stable key for Stack:Ease).
+-- chevron ("open" or "closed" for tree nodes), id (stable key for Stack:Ease),
+-- sound (the game's kit for the click under the game's sounds; false = none).
 function Stack:Row(spec)
     local b = take(self, "row", makeRow)
     b.spec = spec
@@ -632,6 +672,9 @@ local function makeLine(parent)
     b.sub:SetPoint("BOTTOMLEFT", b.block, "BOTTOMLEFT", 0, 0)
     b.sub:SetPoint("BOTTOMRIGHT", b.block, "BOTTOMRIGHT", 0, 0)
     b.sub:SetWordWrap(false)
+    -- A second value, on the sub's row (spec.subValue).
+    b.subValue = Style.Text(b.block, Parts.LINE_SUB, "RIGHT")
+    b.subValue:SetPoint("BOTTOMRIGHT", b.block, "BOTTOMRIGHT", 0, 0)
     -- Key hint, same as a Row's.
     b.key = Style.Text(b, Style.SIZE.tiny, "CENTER")
     b.key:SetPoint("CENTER", b, "LEFT", 6 + Parts.KEY / 2, 0)
@@ -675,7 +718,8 @@ local function makeLine(parent)
     return b
 end
 
--- spec: icon (file or id), text, color, sub, subColor, value, valueColor, dim,
+-- spec: icon (file or id), text, color, sub, subColor, value, valueColor, subValue
+-- and subValueColor (right of the sub, with the value moved up to the name), dim,
 -- picked, key (as for a Row), onClick(b), onRightClick(b), tooltip(b), leave(b),
 -- link() for item modifier clicks (Parts.ItemClick), id.
 function Stack:Line(spec)
@@ -692,15 +736,34 @@ function Stack:Line(spec)
     b.edge:ClearAllPoints()
     b.edge:SetPoint("LEFT", b, "LEFT", spec.key ~= nil and 6 + Parts.KEY + 8 or 4, 0)
     local pair = spec.sub ~= nil and spec.sub ~= ""
+    -- With a sub value the value moves up to the name's row and each text ends at the
+    -- value on its own row, so the name doesn't give up the sub value's width too.
+    local stacked = pair and spec.subValue ~= nil and spec.subValue ~= ""
     b.block:ClearAllPoints()
     b.block:SetPoint("LEFT", b.edge, "RIGHT", 10, 0)
-    b.block:SetPoint("RIGHT", b.value, "LEFT", -10, 0)
+    b.value:ClearAllPoints()
+    if stacked then
+        b.block:SetPoint("RIGHT", b, "RIGHT", -8, 0)
+        b.value:SetPoint("TOPRIGHT", b.block, "TOPRIGHT", 0, 0)
+    else
+        b.value:SetPoint("RIGHT", b, "RIGHT", -8, 0)
+        b.block:SetPoint("RIGHT", b.value, "LEFT", -10, 0)
+    end
     b.block:SetHeight(pair and (Parts.TEXT + Parts.LINE_GAP + Parts.LINE_SUB) or Parts.TEXT)
+    b.name:ClearAllPoints()
+    b.name:SetPoint("TOPLEFT", b.block, "TOPLEFT", 0, 0)
+    if stacked then b.name:SetPoint("TOPRIGHT", b.value, "TOPLEFT", -10, 0)
+    else b.name:SetPoint("TOPRIGHT", b.block, "TOPRIGHT", 0, 0) end
+    b.subValue:SetText(stacked and spec.subValue or "")
+    b.subValue:SetShown(stacked)
+    local svc = spec.subValueColor or Style.INK.LABEL
+    b.subValue:SetTextColor(svc[1], svc[2], svc[3])
     -- A list can narrow the sub (Craft's skill-up chance); a reused frame starts
     -- from the block's full width again.
     b.sub:ClearAllPoints()
     b.sub:SetPoint("BOTTOMLEFT", b.block, "BOTTOMLEFT", 0, 0)
-    b.sub:SetPoint("BOTTOMRIGHT", b.block, "BOTTOMRIGHT", 0, 0)
+    if stacked then b.sub:SetPoint("BOTTOMRIGHT", b.subValue, "BOTTOMLEFT", -10, 0)
+    else b.sub:SetPoint("BOTTOMRIGHT", b.block, "BOTTOMRIGHT", 0, 0) end
     local c = spec.color or (dim and Parts.LATER) or Style.INK.VALUE
     b.name:SetText(spec.text or "")
     b.name:SetTextColor(c[1], c[2], c[3])
@@ -822,9 +885,14 @@ local function makeTile(parent)
     b.mark:SetSize(Parts.ITEM_MARK, Parts.ITEM_MARK)
     b.mark:SetPoint("RIGHT", b, "RIGHT", -8, 0)
     b.mark:Hide()
+    -- The game's "starts a quest" mark over the icon (ItemButton's IconQuestTexture).
+    b.quest = b:CreateTexture(nil, "OVERLAY", nil, 2)
+    b.quest:SetAllPoints(b.well)
+    b.quest:SetTexture(TEXTURE_ITEM_QUEST_BANG or Parts.QUEST_BANG)
+    b.quest:Hide()
     b:SetScript("OnEnter", function(self)
         self.bg:SetVertexColor(1, 1, 1, 0.07)
-        if self.spec and self.spec.tooltip then Parts.ItemTip(self.spec.tooltip)(self) end
+        if self.spec and self.spec.tooltip then Parts.ItemTip(self.spec.tooltip, self.spec.compare == "always")(self) end
     end)
     b:SetScript("OnLeave", function(self)
         self.bg:SetVertexColor(1, 1, 1, 0.03)
@@ -862,7 +930,8 @@ function Parts.PaintPick(b, on, pop)
 end
 
 -- Each item: name, texture, count, quality, sub, subColor, nameColor, tint,
--- mark (small texture at the right end), picked, tooltip(b), leave(b), link(),
+-- mark (small texture at the right end), quest (the game's "starts a quest" mark),
+-- picked, tooltip(b), compare ("always": no Shift needed), leave(b), link(),
 -- onClick(b, button), onDouble, onDrag, onReceive.
 function Stack:Items(items)
     local w = self:Width()
@@ -882,6 +951,7 @@ function Stack:Items(items)
         local t = it.tint
         if t then b.icon:SetVertexColor(t[1], t[2], t[3]) else b.icon:SetVertexColor(1, 1, 1) end
         b.count:SetText((it.count or 0) > 1 and tostring(it.count) or "")
+        b.quest:SetShown(it.quest == true)
         Parts.PaintPick(b, it.picked == true)
         -- Text stops short of the mark. The mark fades in, but hides instantly
         -- when the tile is reused for an item without one.
@@ -958,11 +1028,13 @@ function Stack:Why(text)
     return put(self, c, c:GetHeight(), 4)
 end
 
--- Money and experience rewards on one line.
-function Stack:Money(copper, xp)
+-- Money and experience rewards on one line. opts.short: money you don't have
+-- enough of, in red (a quest's required gold).
+function Stack:Money(copper, xp, opts)
     local bits = {}
     if type(copper) == "number" and copper > 0 and DUI.MoneyString then
-        bits[#bits + 1] = Parts.Hex(Style.INK.MONEY) .. DUI.MoneyString(copper) .. "|r"
+        local ink = opts and opts.short and Style.INK.BAD or Style.INK.MONEY
+        bits[#bits + 1] = Parts.Hex(ink) .. DUI.MoneyString(copper) .. "|r"
     end
     if type(xp) == "number" and xp > 0 then
         bits[#bits + 1] = Parts.Hex(Style.INK.VALUE) .. string.format(L["%d experience"], xp) .. "|r"
@@ -1400,6 +1472,20 @@ local function button(foot, i)
     if b then return b end
     b = DUI.Widgets.Button(foot.frame, "", 28)
     b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    -- spec.tip() adds DUI.Tips rows for a hover (what it does, a second action on
+    -- right-click), drawn again on each hover so a cost stays current.
+    b:HookScript("OnEnter", function(self)
+        local spec = self.spec
+        if not (spec and spec.tip and GameTooltip) then return end
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        DUI.Tips.Clear()
+        spec.tip()
+        DUI.Tips.Flush(GameTooltip)
+        GameTooltip:Show()
+    end)
+    b:HookScript("OnLeave", function(self)
+        if GameTooltip and GameTooltip:IsOwned(self) then GameTooltip:Hide() end
+    end)
     b:SetScript("OnClick", function(self, mouse)
         local spec = self.spec
         if not spec or spec.off then return end
@@ -1413,7 +1499,7 @@ local function button(foot, i)
     return b
 end
 
--- list: { { text, primary, tone, off, onClick, onRightClick, key, beside } }, left to right,
+-- list: { { text, primary, tone, off, onClick, onRightClick, tip, key, beside, sound } }, left to right,
 -- following the game's layout: the primary action in the left corner, the rest
 -- packed to the right with the last (Goodbye, Decline) in the right corner.
 -- beside places a button right after the previous one instead.
@@ -1456,6 +1542,7 @@ function Footer:Set(list)
     for i = 1, #list do
         local spec = list[i]
         local b = button(self, i)
+        b.gameSound = spec.sound
         local label = spec.text or ""
         if spec.key then label = label .. "  " .. Parts.Hex({ Style.Pop() }) .. spec.key .. "|r" end
         b.text:SetWidth(0)
@@ -1492,6 +1579,24 @@ function Footer:Set(list)
         else b:SetPoint("RIGHT", self.frame, "RIGHT", 0, 0) end
         b:Show()
         if not b.main and not spec.beside then right = b end
+    end
+end
+
+-- The buttons on show, left to right: the main one sits in the left corner,
+-- the rest keep their order (Footer:Set's layout).
+function Footer:Order()
+    local out = {}
+    for _, b in ipairs(self.buttons) do if b:IsShown() and b.main then out[#out + 1] = b end end
+    for _, b in ipairs(self.buttons) do if b:IsShown() and not b.main then out[#out + 1] = b end end
+    return out
+end
+
+-- The button next to b on one side (-1 left, 1 right), or nil at the end of the
+-- row or when b isn't one of this footer's.
+function Footer:Beside(b, dir)
+    local order = self:Order()
+    for i, x in ipairs(order) do
+        if x == b then return order[i + dir] end
     end
 end
 

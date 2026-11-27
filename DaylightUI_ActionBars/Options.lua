@@ -77,6 +77,7 @@ local function lookGetter(get)
     end
 end
 -- The Cooldown Manager shows keys by its own switch, not the bars'.
+local function costsOff(get) return get("look.costs") ~= true end
 local function keysOff(get)
     if lookFor == "cdm" then return get("cdmKeybinds") ~= true end
     return get("look.keybind") ~= true
@@ -86,6 +87,9 @@ local function perLook(group)
         local field = type(item.key) == "string" and string.match(item.key, "^look%.(.+)$")
         if field then
             item.key = nil
+            -- Still found by its setting's name, so the setup guide's "Change it
+            -- later" and other jumps land on the row.
+            item.alsoKeys = { "look." .. field }
             item.get = function() return lookGet(field) end
             item.set = function(v) lookSet(field, v) end
             item.default = function()
@@ -143,6 +147,41 @@ local EDGE = { off = "None", accent = "Accent color", class = "Class color", cus
 local EDGE_ORDER = { "off", "accent", "class", "custom" }
 -- The micro menu's own look rows do nothing without its Daylight UI style.
 local function microLook(get) return get("skinMenus") ~= true or get("microMenu") ~= "shown" end
+local MICRO_LIT = { accent = "Accent color", class = "Class color", custom = "One color", each = "Each its own" }
+local MICRO_LIT_ORDER = { "accent", "class", "custom", "each" }
+local OPEN_MARK = { border = "Lit border", line = "Line under it", both = "Both" }
+local OPEN_MARK_ORDER = { "border", "line", "both" }
+-- One color row per micro menu icon, shown only when each icon has its own color,
+-- then a button putting them all back. They go in right after the One color row.
+local MICRO_ICON_NAMES = {
+    { "character", "Character" }, { "spellbook", "Spellbook" }, { "talents", "Talents" },
+    { "professions", "Professions" }, { "achievements", "Achievements" }, { "quests", "Quest log" },
+    { "guild", "Guild" }, { "finder", "Group finder" }, { "collections", "Collections" },
+    { "journal", "Adventure guide" }, { "legacy", "Legacy" }, { "housing", "Housing" },
+    { "help", "Help" }, { "shop", "Shop" }, { "menu", "Game menu" },
+}
+local function withMicroColors(items)
+    local function notEach(get) return get("microIconColor") ~= "each" end
+    local rows = {}
+    for _, pair in ipairs(MICRO_ICON_NAMES) do
+        rows[#rows + 1] = { type = "color", key = "microColors." .. pair[1],
+            label = pair[2] .. " micro menu icon color",
+            desc = "This icon's color when Micro menu icon color is Each its own.",
+            hidden = notEach, disabled = microLook }
+    end
+    rows[#rows + 1] = { type = "button", label = "Reset micro menu icon colors", text = "Reset", confirm = true,
+        desc = "Puts every micro menu icon back to its own starting color.",
+        hidden = notEach, disabled = microLook,
+        func = function() ns.Menus.ResetColors() end }
+    local out = {}
+    for _, it in ipairs(items) do
+        out[#out + 1] = it
+        if it.key == "microIconCustom" then
+            for _, r in ipairs(rows) do out[#out + 1] = r end
+        end
+    end
+    return out
+end
 
 -- A text's offset in px from its spot. cdm = the Cooldown Manager has it too.
 local function nudge(field, label, cdm, show)
@@ -154,12 +193,12 @@ end
 local look = {
     { label = "Buttons", tab = "Basics", items = {
         { type = "toggle", key = "hideEmpty", invert = true, label = "Show empty buttons",
-          desc = "Slots with nothing on them show as empty frames. When off, they disappear and show again while you drag a spell or item." },
+          desc = "Slots with nothing on them show as empty frames. When off, they disappear and show again while you drag a spell or item. Not the pet bar: the game hides its empty slots itself." },
         { type = "toggle", key = "readyPing", label = "Ping when ready", disabled = motionOff,
           desc = "A spell's icon pops and lights up once when it comes off a real cooldown (never for the global cooldown). Needs Motion effects (General > Appearance)." },
         { type = "toggle", key = "rankUp", label = "New ranks on your bars",
           desc = "When you learn a new rank of a spell, it takes the place of the rank before it on your bars. A lower rank you keep on purpose, like rank 1 to save mana, stays. Not macros." },
-        { type = "button", label = "Reset bar positions",
+        { type = "button", label = "Reset bar positions", text = "Reset", confirm = true,
           desc = "Puts every bar back in the default arrangement.",
           func = function()
               ns.Bars.ResetPositions()
@@ -234,7 +273,7 @@ local look = {
           disabled = keysOff },
     } }),
     perLook({ label = "Text", items = {
-        DaylightUI.Options.FontRow("media.font", "Button font", "Keybinds, stack counts, macro names and cooldown numbers on every bar, the Cooldown Manager and totems",
+        DaylightUI.Options.FontRow("media.font", "Button font", "Keybinds, stack counts, macro names, spell costs and cooldown numbers on every bar, the Cooldown Manager and totems",
             nil, { cdm = true }),
         { type = "slider", key = "look.countSize", label = "Stack count size", min = 6, max = 20, step = 1, cdm = true,
           desc = "Text size of the count on a button, like charges or how many of an item you carry." },
@@ -267,6 +306,23 @@ local look = {
           values = { always = "Always", nocombat = "Out of combat only", never = "Never" },
           order = { "always", "nocombat", "never" },
           desc = "When hovering a button shows its spell or item tooltip." },
+    } }),
+    perLook({ label = "Spell costs", tab = "Text", items = {
+        { type = "toggle", key = "look.costs", label = "Show spell costs",
+          desc = "Shows how much mana, rage or energy each spell costs, right on its button. Turns red while you don't have enough." },
+        { type = "slider", key = "look.costSize", label = "Spell cost size", min = 6, max = 20, step = 1,
+          desc = "Text size of the cost on each button.", disabled = costsOff },
+        { type = "dropdown", key = "look.costPos", label = "Spell cost position",
+          values = { bottomleft = "Bottom left", topleft = "Top left", bottom = "Bottom" }, order = { "bottomleft", "topleft", "bottom" },
+          desc = "Where on the button its cost shows.", disabled = costsOff },
+        { type = "dropdown", key = "look.costColor", label = "Spell cost color",
+          values = { power = "Power color", custom = "One color" }, order = { "power", "custom" },
+          desc = "Power color shows mana in blue, rage in red and energy in yellow. It turns red either way while you're short.",
+          disabled = costsOff },
+        { type = "color", key = "look.costCustom", label = "Custom spell cost color",
+          desc = "The cost's color when Spell cost color is One color.",
+          hidden = custom("look.costColor"), disabled = costsOff },
+        nudge("costX", "Spell cost X offset", nil, "look.costs"), nudge("costY", "Spell cost Y offset", nil, "look.costs"),
     } }),
     perLook({ label = "Bar background", tab = "Extras", desc = "A panel behind the whole bar.", items = {
         { type = "toggle", key = "look.back", label = "Bar background",
@@ -376,20 +432,48 @@ local look = {
         menuSize("microMenu", "Micro menu size"),
         { type = "toggle", key = "skinMenus", label = "Daylight UI style bag bar and micro menu", reload = true,
           desc = "Gives the micro menu and bag bar the Daylight UI look: square frames in your action button border style." },
-        { type = "dropdown", key = "microIconColor", label = "Micro menu icon color", values = LIT, order = LIT_ORDER,
-          desc = "The color of the micro menu's icons in the Daylight UI style. Accent color runs your accent along the row, gradient and all.",
+    } },
+    { label = "Micro menu look", desc = "How the micro menu's buttons look in the Daylight UI style.", items = withMicroColors({
+        { type = "dropdown", key = "microIconColor", label = "Micro menu icon color", values = MICRO_LIT, order = MICRO_LIT_ORDER,
+          desc = "The color of the micro menu's icons. Accent color runs your accent along the row, gradient and all. Each its own gives every icon a color of its own, which you can change below.",
           disabled = microLook },
         { type = "color", key = "microIconCustom", label = "Custom micro menu icon color",
           desc = "The micro menu's icon color when Micro menu icon color is One color.",
           hidden = custom("microIconColor"), disabled = microLook },
+        { type = "slider", key = "microIconSize", label = "Micro menu icon size", min = 12, max = 26, step = 1, unit = "px",
+          desc = "How big the icons are inside their buttons.",
+          disabled = microLook },
+        { type = "slider", key = "microRestAlpha", label = "Micro menu icon opacity", min = 0.3, max = 1, step = 0.05, unit = "%",
+          desc = "How bright the icons are when the mouse isn't on them. Lower it for a quieter menu that lights up as you point at it.",
+          disabled = microLook },
         { type = "toggle", key = "microBackgrounds", label = "Micro menu button backgrounds",
           desc = "The dark square behind each micro menu icon. When off, the icons sit on their own.",
           disabled = microLook },
-    } },
+        { type = "slider", key = "microGap", label = "Micro menu spacing", min = 0, max = 8, step = 1, unit = "px",
+          desc = "The space around each button's background. Higher leaves more room between them.",
+          disabled = function(get) return microLook(get) or get("microBackgrounds") == false end },
+        { type = "toggle", key = "microHoverGrow", label = "Grow micro menu icons on hover",
+          desc = "The icon under your mouse swells a little and settles back when you move away. Needs Motion effects (General > Appearance).",
+          disabled = function(get) return microLook(get) or motionOff() end },
+        { type = "dropdown", key = "microOpenMark", label = "Micro menu open marker", values = OPEN_MARK, order = OPEN_MARK_ORDER,
+          desc = "How a button shows that its window is open: a lit border, a line under the icon in its own color, or both.",
+          disabled = microLook },
+    }) },
     { label = "Bag bar fade", desc = "When the shown bag bar fades and how far.",
       items = DaylightUI.Fade.Items("bagBarFade.", nil, unless("bagBar", "shown"), "Bag bar") },
     { label = "Micro menu fade", desc = "When the shown micro menu fades and how far.",
       items = DaylightUI.Fade.Items("microMenuFade.", nil, unless("microMenu", "shown"), "Micro menu") },
+    { label = "Controller bars fade", desc = "When the game's controller bars fade and how far, with its controller mode on.",
+      items = (function()
+          -- Off for a mouse player, so General's Fade page leaves it out too.
+          local function noPad() return not DaylightUI.Pad.On() end
+          local items = DaylightUI.Fade.Items("padBarsFade.", nil, noPad, "Controller bars")
+          for _, item in ipairs(items) do
+              item.since = "2.2.4"
+              item.hidden = noPad
+          end
+          return items
+      end)() },
 }
 -- A bar's single Visible row combines its fade choices (bars.<bar>.fade.mode) and its
 -- hiding ones (bars.<bar>.visible; a hidden bar can't be clicked, unlike a faded

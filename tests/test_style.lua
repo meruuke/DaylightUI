@@ -188,7 +188,7 @@ T.test("a value already set on a section stays when its global style goes off", 
 end)
 
 T.test("every section's look is one General's Apply reaches, and starts on the global style", function()
-    local DUI = stub.Load({ buffs = true, skins = true, bags = true, qol = true, chat = true, infopanel = true, quests = true, tooltip = true, auctionhouse = true })
+    local DUI = stub.Load({ buffs = true, skins = true, bags = true, qol = true, chat = true, infopanel = true, quests = true, tooltip = true, procs = true, auctionhouse = true })
     T.truthy(#DUI.DB.LOOKS >= 24, "panels and windows both listed")
     for _, b in ipairs(DUI.DB.LOOKS) do
         local mod = DUI:GetModule(b[1])
@@ -790,6 +790,19 @@ T.test("an angled end carries the band and its inner line on their own lines", f
     T.truthy(band < 0 and line < band and inner < line, "outline, band, line, contents, from the edge in")
 end)
 
+T.test("a piece clipped before the first slant still leaves the shell's ends angled", function()
+    local DUI = stub.Load()
+    local f = CreateFrame("Frame", nil, UIParent)
+    f:SetSize(200, 40)
+    local s = DUI.Style.Shell(f)
+    local piece = f:CreateTexture()
+    piece:SetAllPoints()
+    DUI.Style.Clip(f, piece, "inner")
+    DUI.Style.Slant(f, "both", 10)
+    T.truthy(#(s.bg.__masks or {}) > 0, "the shell's background is cut")
+    T.truthy(#(piece.__masks or {}) > 0, "and the piece too")
+end)
+
 T.test("an angled end masks only what can reach it; a narrow frame keeps every mask", function()
     local DUI = stub.Load()
     local f = CreateFrame("Frame", nil, UIParent)
@@ -861,6 +874,72 @@ T.test("an angled end's layers are strips that stop short of the contents", func
     T.eq(#masks(s.slantFill.right), 0, "no angle, no masks")
 end)
 
+T.test("bar ends: each end's shape from its own two switches, and its glyph", function()
+    local DUI = stub.Load()
+    local S = DUI.Style
+    -- Each of the four shapes, both ends angled.
+    local side, under = S.EndsOf(true, false, true, false)
+    T.eq(side, "both"); T.eq(under, nil, "\\--/ : both ends top out")
+    side, under = S.EndsOf(true, true, true, false)
+    T.eq(under, "left", "/--/ : the left end flipped alone")
+    side, under = S.EndsOf(true, false, true, true)
+    T.eq(under, "right", "\\--\\ : the right end flipped alone")
+    side, under = S.EndsOf(true, true, true, true)
+    T.eq(under, "both", "/--\\")
+    -- A straight end never counts as flipped.
+    side, under = S.EndsOf(false, true, true, false)
+    T.eq(side, "right"); T.eq(under, nil)
+    side, under = S.EndsOf(false, false, false, true)
+    T.eq(side, nil); T.eq(under, nil)
+    -- Glyphs are what the player sees: / on the right is the usual angle.
+    T.eq(S.EndGlyph("right", true, false), "slash")
+    T.eq(S.EndGlyph("right", true, true), "backslash")
+    T.eq(S.EndGlyph("left", true, false), "backslash")
+    T.eq(S.EndGlyph("left", true, true), "slash")
+    T.eq(S.EndGlyph("left", false, true), "straight")
+    for _, e in ipairs({ "left", "right" }) do
+        for _, g in ipairs({ "straight", "slash", "backslash" }) do
+            local on, flip = S.EndFromGlyph(e, g)
+            T.eq(S.EndGlyph(e, on, flip), g, e .. " " .. g .. " round trip")
+        end
+    end
+end)
+
+T.test("bar ends: a hung bar's dropped end starts its line at the frame's bottom corner", function()
+    local DUI = stub.Load()
+    local f = CreateFrame("Frame", nil, UIParent)
+    f:SetSize(200, 40)
+    DUI.Style.Shell(f)
+    DUI.Style.Slant(f, "both", 8, nil, "right")
+    local h = CreateFrame("Frame", nil, UIParent)
+    h:SetSize(200, 20)
+    h:SetPoint("TOPLEFT", f, "BOTTOMLEFT", 0, 0)
+    local s = DUI.Style.Shell(h)
+    -- The line over the frame and the bar together is 60 tall, cut 12 (same slope as 8 over 40).
+    DUI.Style.Slant(h, "both", 12, { frame = f, height = 60, drop = { right = 40 } })
+    local function mask(tex, file)
+        for _, m in ipairs(tex.__masks or {}) do
+            -- A joined bar wears the crisp version of each image.
+            local t = m.__texture or ""
+            if t == DaylightUI.MEDIA .. file or t == DaylightUI.MEDIA .. file:gsub("%.png$", "-sharp.png") then return m end
+        end
+    end
+    -- The right end, under a flipped one: its line runs from 40 down (the frame's
+    -- bottom corner) over the 20 left, so its cut is 4 and it leans top out.
+    local right = mask(s.bg, "mask-slant-r.png")
+    T.truthy(right, "the right end is cut the usual way round: a chevron")
+    local p, rel, rp, x, y = right:GetPoint(1)
+    T.eq(rel, f); T.eq(p, "TOPRIGHT"); T.eq(rp, "TOPRIGHT")
+    T.eq(y, -40, "starts at the frame's bottom")
+    T.eq(right:GetWidth(), 16, "4x a cut of 4")
+    T.eq(right:GetHeight(), 20)
+    -- The left end continues the frame's line from its top, as before.
+    local left = mask(s.bg, "mask-slant-l.png")
+    p, rel, rp, x, y = left:GetPoint(1)
+    T.eq(rel, f); T.eq(y, 0)
+    T.eq(left:GetWidth(), 48); T.eq(left:GetHeight(), 60)
+end)
+
 T.test("a cut of 0 is a straight end, not an angled one with nothing to cut", function()
     local DUI = stub.Load()
     local f = CreateFrame("Frame", nil, UIParent)
@@ -872,6 +951,29 @@ T.test("a cut of 0 is a straight end, not an angled one with nothing to cut", fu
     T.isnil(DUI.Style.GetSlant(f).side)
     T.truthy(s.border.RIGHT:IsShown(), "its edge back")
     T.eq(#(s.bg.__masks or {}), 0, "no mask left on the background")
+end)
+
+T.test("a texture clipped twice on one frame wears each end's mask once, so both ends fit", function()
+    -- A party frame's inner cast bar: its background follows the power fill
+    -- (Style.ClipLike) and is clipped to the frame again. Angling the second
+    -- end wore the first end's mask twice plus the second's: four masks.
+    local DUI = stub.Load()
+    local f = CreateFrame("Frame", nil, UIParent)
+    f:SetSize(200, 40)
+    DUI.Style.Shell(f)
+    local bar = CreateFrame("StatusBar", nil, f)
+    local fill = bar:CreateTexture()
+    local bg = bar:CreateTexture()
+    DUI.Style.Clip(f, fill, "inner")
+    DUI.Style.ClipLike(bg, fill)
+    DUI.Style.Clip(f, bg, "inner")
+    DUI.Style.Slant(f, "right", 10)
+    T.eq(bg:GetNumMaskTextures(), 1, "one end, one mask")
+    DUI.Style.Slant(f, "both", 10)
+    T.eq(bg:GetNumMaskTextures(), 2, "each end's mask once")
+    T.truthy(bg:GetMaskTexture(1) ~= bg:GetMaskTexture(2), "two different masks")
+    DUI.Style.Slant(f, "left", 10)
+    T.eq(bg:GetNumMaskTextures(), 1, "back to one end")
 end)
 
 T.test("an end leaning under: its bottom corner sticks out, so both cuts run parallel", function()
@@ -1134,6 +1236,32 @@ T.test("style: the text outline and shadow are settings", function()
     stub.RunTimers()
     T.eq(fs.__font[3], "THICKOUTLINE")
     T.eq(fs.__shadowColor and fs.__shadowColor[4] or 0, 0, "no shadow")
+end)
+
+T.test("style: SetTextSize leaves a text alone when its size is the same, and still follows a change", function()
+    local DUI = stub.Load()
+    local S = DUI.Style
+    local fs = S.Text(UIParent, 12)
+    -- A nameplate lays out its texts again on every add; the font only changes when its look does.
+    local writes = 0
+    local setFont, setObj = fs.SetFont, fs.SetFontObject
+    fs.SetFont = function(...) writes = writes + 1; return setFont(...) end
+    fs.SetFontObject = function(...) writes = writes + 1; return setObj(...) end
+    S.SetTextSize(fs, 12)
+    S.SetTextSize(fs, 12)
+    T.eq(writes, 0, "same size: no font written")
+    S.SetTextSize(fs, 15)
+    T.truthy(writes > 0, "a new size is written")
+    T.eq(fs.__font[2], 15)
+    DUI:Set("general", "fontScale", 2)
+    stub.RunTimers()
+    T.eq(fs.__font[2], 30, "Text size still follows")
+    writes = 0
+    S.SetTextSize(fs, 15)
+    T.eq(writes, 0, "after a repaint, same size: nothing")
+    DUI:Set("general", "textOutline", "THICKOUTLINE")
+    S.SetTextSize(fs, 15)
+    T.eq(fs.__font[3], "THICKOUTLINE", "a changed outline is put on even before the repaint runs")
 end)
 
 T.test("style: DressText puts our font on someone else's text and keeps it up with the settings", function()

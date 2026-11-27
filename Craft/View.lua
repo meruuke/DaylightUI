@@ -28,13 +28,11 @@ local function keep(recipe)
     return not View.filter or string.find(string.lower(recipe.name), View.filter, 1, true) ~= nil
 end
 
--- Click: Shift links the recipe, like the player's own list. Nothing else here.
+-- Click: only the modified clicks of the player's own list (no tracking of
+-- someone else's recipe: Data.CanTrack says no while viewing).
 local function onClick(b)
     local r = b.lineSpec and b.lineSpec.recipe
-    if not (r and IsModifiedClick and IsModifiedClick("CHATLINK")) then return end
-    local link = ns.Data.RecipeLink(r)
-    local insert = ChatFrameUtil and ChatFrameUtil.InsertLink or ChatEdit_InsertLink
-    if link and type(insert) == "function" then insert(link) end
+    if r then ns.List.ModifiedClick(r) end
 end
 
 function View.Render(keepScroll)
@@ -147,7 +145,7 @@ end
 
 function View.Build()
     if View.frame then return View.frame end
-    local f = Win.New({ name = View.NAME, back = "Professions", w = View.W, h = View.H, portrait = true })
+    local f = Win.New({ name = View.NAME, escape = false, back = "Professions", w = View.W, h = View.H, portrait = true })
     View.frame = f
     f.onClose = function() ns.Window.Close() end
     Win.AddPage(f, "view", { Build = build, pieces = pieces, w = View.W, h = View.H })

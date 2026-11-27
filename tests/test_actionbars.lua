@@ -280,6 +280,27 @@ T.test("action bars: empty slots hide until a drag, or show see-through when ask
     T.eq(empty.back:GetAlpha(), 0)
 end)
 
+-- The game hides an empty pet slot itself (ActionBar.lua UpdateShownButtons: shown
+-- only with an action or while a pet action is dragged), so Show empty buttons can't
+-- reach the pet bar. When the game does show one, it's a drop target and must be seen.
+T.test("pet bar: Show empty buttons is not offered for it; a slot the game shows is always seen", function()
+    local DUI = login()
+    local Skin = stub.actionbars.Skin
+    local empty = Skin.GetParts(_G.PetActionButton2)
+    T.truthy(empty, "the pet buttons are dressed")
+    T.eq(empty.back:GetAlpha(), Skin.EMPTY_ALPHA, "an empty pet slot the game shows (a drag) is see-through, not gone")
+    DUI:Set("ActionBars", "hideEmpty", false)
+    T.eq(empty.back:GetAlpha(), Skin.EMPTY_ALPHA, "the setting changes nothing on the pet bar")
+    local row
+    for _, page in ipairs(stub.actionbars.OPTIONS.pages) do
+        for _, g in ipairs(page.groups) do
+            for _, it in ipairs(g.items) do if it.key == "hideEmpty" then row = it end end
+        end
+    end
+    T.truthy(row, "the row is still there for the action bars")
+    T.truthy(row.desc:find("pet bar", 1, true), "its description says the pet bar isn't covered")
+end)
+
 T.test("action bars: short of power fades like out of range (never blue); a proc colors the backing", function()
     login()
     local Skin = stub.actionbars.Skin
@@ -462,7 +483,8 @@ T.test("action bars: pet and stance bars are skinned; totems move to our player 
     T.truthy(Skin.IsSkinned(_G.StanceButton1)); T.truthy(Skin.IsSkinned(_G.PetActionButton1))
     DaylightUI:Set("ActionBars", "hideEmpty", true)
     T.eq(Skin.GetParts(_G.PetActionButton1).back:GetAlpha(), 1, "a pet ability shows")
-    T.eq(Skin.GetParts(_G.PetActionButton5).back:GetAlpha(), 0, "an empty pet slot hides")
+    T.eq(Skin.GetParts(_G.PetActionButton5).back:GetAlpha(), Skin.EMPTY_ALPHA,
+        "an empty pet slot: the game hides it, and shows it only as a drop target")
     T.eq(TotemFrame:GetParent(), UIParent, "out from under the hidden player frame")
     local _, rel = TotemFrame:GetPoint(1)
     T.eq(rel, _G.DaylightUIFrame_player, "above our player frame")
@@ -1543,6 +1565,32 @@ T.test("action bars: the bag bar and micro menu can be shown, faded, and hidden 
     T.eq(MicroMenuContainer:GetParent(), Hide.parent, "hidden again")
 end)
 
+T.test("action bars: the game's controller crossbar fades like the bars, and only in controller mode", function()
+    local DUI = login()
+    local Fade = DUI.Fade
+    local function settle() Fade.Step(); for _ = 1, 120 do stub.RunOnUpdate(Fade.driver, 1 / 60) end end
+    local bars = CreateFrame("Frame", "GamepadMainActionBarFrame", UIParent)
+    DUI:Set("ActionBars", "padBarsFade.mode", "always")
+    stub.now = (stub.now or 0) + 4
+    settle()
+    T.eq(bars:GetAlpha(), 1, "a mouse player's game keeps it as it is")
+    _G.GamepadMode = { FrameControlsManager = {} }
+    _G.InputUtil = { IsGamepadUIEnabled = function() return true end }
+    stub.now = stub.now + 4
+    settle()
+    T.eq(bars:GetAlpha(), 0, "faded with the controller UI on")
+    DUI:Set("ActionBars", "padBarsFade.mode", "never")
+    settle()
+    T.eq(bars:GetAlpha(), 1, "back with Never")
+    _G.GamepadMode, _G.InputUtil, _G.GamepadMainActionBarFrame = nil, nil, nil
+end)
+
+T.test("action bars: Immersive fades the controller crossbar out of fights", function()
+    local DUI = login()
+    local fade = DUI.Profiles.ReadyData("Immersive Preset").modules.ActionBars.padBarsFade
+    T.eq(fade.mode, "ooc")
+end)
+
 -- The game hands its micro menu to a full-screen window and back to UIParent
 -- (MicroMenuBar_SetFullScreenFrame and MicroMenuBar_ClearFullScreenFrame in
 -- Blizzard_MicroMenu/Mainline/MainMenuBarMicroButtons.lua), which took it out of the
@@ -1928,6 +1976,27 @@ T.test("action bars: the micro icons take a class or picked color, and the tiles
     local r = Style.ClassColor(token)
     T.near(first(QuestLogMicroButton).r, r, 0.001, "class color")
 
+    DUI:Set("ActionBars", "microIconColor", "each")
+    settle()
+    local quest, char = first(QuestLogMicroButton), first(CharacterMicroButton)
+    local want = db.microColors.quests
+    T.near(quest.r, want[1], 0.001, "each: the quest icon its own color")
+    T.near(quest.b, want[3], 0.001)
+    T.truthy(math.abs(quest.b - char.b) > 0.2, "each icon a color of its own")
+    local last = Menus.Parts(QuestLogMicroButton).icon.__gradient[3]
+    T.near(last.g, want[2], 0.001, "one color across the icon, no sweep")
+    DUI:Set("ActionBars", "microColors.quests", { 0.1, 0.2, 0.9 })
+    settle()
+    T.near(first(QuestLogMicroButton).b, 0.9, 0.001, "one icon's color picked")
+    T.near(first(CharacterMicroButton).b, char.b, 0.001, "the others keep theirs")
+    Menus.ResetColors()
+    settle()
+    T.near(first(QuestLogMicroButton).b, want[3], 0.001, "back to the colorful set")
+    T.eq(Menus.Parts(QuestLogMicroButton).icon:GetWidth(), 18, "icon size by default")
+    DUI:Set("ActionBars", "microIconSize", 24)
+    settle()
+    T.eq(Menus.Parts(QuestLogMicroButton).icon:GetWidth(), 24, "icon size picked")
+
     local box = Menus.Parts(QuestLogMicroButton).box
     T.eq(box:GetAlpha(), 1)
     DUI:Set("ActionBars", "microBackgrounds", false)
@@ -1936,6 +2005,75 @@ T.test("action bars: the micro icons take a class or picked color, and the tiles
     DUI:Set("ActionBars", "microBackgrounds", true)
     settle()
     T.eq(box:GetAlpha(), 1, "and back")
+end)
+
+T.test("action bars: the micro tiles take a spacing, a hover grow, an open line and a resting glow", function()
+    local DUI = stub.Load({ actionbars = true, before = function() world(); menuButtons() end })
+    local Menus = stub.actionbars.Menus
+    local db = DUI:GetModule("ActionBars").db
+    local function settle()
+        stub.RunTimers()
+        if DUI.Motion.Driver() then stub.RunOnUpdate(DUI.Motion.Driver(), 1) end
+    end
+    local q = QuestLogMicroButton
+    local parts = Menus.Parts(q)
+
+    -- Spacing: how far in from the button's edge each tile sits.
+    T.eq(db.microGap, 3, "today's inset by default")
+    local _, _, _, x = parts.box:GetPoint(1)
+    T.eq(x, 3)
+    DUI:Set("ActionBars", "microGap", 6)
+    settle()
+    _, _, _, x = parts.box:GetPoint(1)
+    T.eq(x, 6, "the tiles drawn in")
+    local _, _, _, rx, ry = parts.box:GetPoint(2)
+    T.eq(rx, -6); T.eq(ry, 6)
+
+    -- Hover grows the icon a little, and it settles back.
+    T.eq(db.microHoverGrow, true, "on by default")
+    stub.MouseEnter(q)
+    settle()
+    T.truthy(parts.icon:GetWidth() > 18, "grown on hover")
+    stub.MouseLeave(q)
+    settle()
+    T.eq(parts.icon:GetWidth(), 18, "back on leave")
+    DUI:Set("ActionBars", "microHoverGrow", false)
+    stub.MouseEnter(q)
+    settle()
+    T.eq(parts.icon:GetWidth(), 18, "off: stays its size")
+    stub.MouseLeave(q)
+    settle()
+
+    -- An open window: the lit border by default, an underline in the icon's color as a pick.
+    T.eq(db.microOpenMark, "border")
+    q.__state = "PUSHED"
+    Menus.PaintMicro()
+    settle()
+    T.eq(parts.line and parts.line:GetAlpha() or 0, 0, "no line by default")
+    DUI:Set("ActionBars", "microOpenMark", "line")
+    settle()
+    T.eq(parts.line:GetAlpha(), 1, "the line under an open one")
+    T.falsy(parts.lit, "and no lit border")
+    DUI:Set("ActionBars", "microOpenMark", "both")
+    settle()
+    T.eq(parts.line:GetAlpha(), 1)
+    T.truthy(parts.lit, "both: the border lit too")
+    q.__state = nil
+    Menus.PaintMicro()
+    settle()
+    T.eq(parts.line:GetAlpha(), 0, "closed: the line goes")
+
+    -- Icons can rest dimmer and light up when hovered.
+    T.eq(db.microRestAlpha, 1, "full by default")
+    DUI:Set("ActionBars", "microRestAlpha", 0.5)
+    settle()
+    T.near(parts.icon:GetAlpha(), 0.5, 0.001, "dim at rest")
+    stub.MouseEnter(q)
+    settle()
+    T.near(parts.icon:GetAlpha(), 1, 0.001, "full on hover")
+    stub.MouseLeave(q)
+    settle()
+    T.near(parts.icon:GetAlpha(), 0.5, 0.001)
 end)
 
 T.test("action bars: any bar can fade", function()
@@ -2684,5 +2822,98 @@ T.test("new ranks: a learned rank takes the place of the one before it, in rank 
     stub.RunTimers()
     T.eq(stub.slots[1].spellID, 8005, "off: left alone")
     T.truthy(RU, "its part is there")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- Spell costs on the buttons (look.costs): off until switched on, the game's own
+-- cost of the slot's spell, in its power's color, soft red while short of it.
+T.test("action bars: spell costs show on the buttons, red while you're short", function()
+    local DUI = login()
+    local Skin = stub.actionbars.Skin
+    local Style = DUI.Style
+    local b = _G.DaylightUIBar1Button2
+    stub.ActionSlots()     -- spells 2 and 3 in slots 2 and 3
+    stub.SpellReads()      -- the cost read that can be made secret
+    stub.spellCosts = {
+        [2] = { { type = 0, name = "MANA", cost = 275, minCost = 275, requiredAuraID = 0, hasRequiredAura = false } },
+        [3] = { { type = 0, name = "MANA", cost = 1250, minCost = 1250, requiredAuraID = 0, hasRequiredAura = false } },
+    }
+    stub.FireEvent("ACTIONBAR_SLOT_CHANGED", 0); stub.RunTimers()
+    local fs = Skin.GetParts(b).cost
+    T.truthy(not fs or not fs:IsShown() or (fs:GetText() or "") == "", "off by default: nothing on the button")
+
+    DUI:Set("ActionBars", "look.costs", true)
+    stub.RunTimers()
+    fs = Skin.GetParts(b).cost
+    T.truthy(fs and fs:IsShown(), "on: the cost text shows")
+    T.eq(fs:GetText(), "275")
+    T.eq(select(1, fs:GetPoint(1)), "BOTTOMLEFT", "bottom left by default")
+    local r, g, bl = fs:GetTextColor()
+    local pr, pg, pb = Style.PowerColor("MANA")
+    local mr, mg, mb = Style.Lighten(pr, pg, pb, Skin.COST_LIFT)
+    T.near(r, mr, 0.01); T.near(g, mg, 0.01); T.near(bl, mb, 0.01)
+    T.eq(Skin.GetParts(_G.DaylightUIBar1Button3).cost:GetText(), AbbreviateNumbers(1250), "big costs shortened")
+
+    -- Short of mana: soft red, and back when it isn't.
+    stub.slots[2].noMana = true
+    stub.FireEvent("ACTION_USABLE_CHANGED", { { slot = 2, usable = false, noMana = true } })
+    stub.RunTimers(); settle()
+    r, g, bl = fs:GetTextColor()
+    T.near(r, Style.INK.BAD[1], 0.01); T.near(g, Style.INK.BAD[2], 0.01)
+    stub.slots[2].noMana = nil
+    stub.FireEvent("ACTION_USABLE_CHANGED", { { slot = 2, usable = true, noMana = false } })
+    stub.RunTimers(); settle()
+    r = fs:GetTextColor()
+    T.near(r, mr, 0.01, "back to mana blue")
+
+    -- A free spell shows nothing; a new rank's cost comes in on SPELLS_CHANGED.
+    stub.spellCosts[2] = {}
+    stub.FireEvent("SPELLS_CHANGED"); stub.RunTimers()
+    T.eq(fs:GetText() or "", "", "free: blank")
+    stub.spellCosts[2] = { { type = 1, name = "RAGE", cost = 15, minCost = 15, requiredAuraID = 0, hasRequiredAura = false } }
+    stub.FireEvent("SPELLS_CHANGED"); stub.RunTimers(); settle()
+    T.eq(fs:GetText(), "15")
+    r = fs:GetTextColor()
+    pr, pg, pb = Style.PowerColor("RAGE")
+    T.near(r, (Style.Lighten(pr, pg, pb, Skin.COST_LIFT)), 0.01, "rage in its own color")
+
+    -- A cost tied to an aura you don't have (a druid form's) is skipped.
+    stub.spellCosts[2] = {
+        { type = 3, name = "ENERGY", cost = 40, minCost = 40, requiredAuraID = 768, hasRequiredAura = false },
+        { type = 0, name = "MANA", cost = 90, minCost = 90, requiredAuraID = 0, hasRequiredAura = false },
+    }
+    stub.FireEvent("SPELLS_CHANGED"); stub.RunTimers()
+    T.eq(fs:GetText(), "90", "the cost that applies now")
+
+    -- A macro: the spell it casts.
+    stub.slots[2] = { texture = "m", macro = 4 }
+    stub.macroSpells[4] = 3
+    stub.FireEvent("ACTIONBAR_SLOT_CHANGED", 2); stub.RunTimers()
+    T.eq(fs:GetText(), AbbreviateNumbers(1250), "a macro shows its spell's cost")
+
+    -- Spot and nudge, size.
+    DUI:Set("ActionBars", "look.costPos", "topleft")
+    DUI:Set("ActionBars", "look.costX", 2)
+    stub.RunTimers()
+    local p, _, _, x = fs:GetPoint(1)
+    T.eq(p, "TOPLEFT"); T.eq(x, 3 + 2)
+
+    -- A custom color.
+    DUI:Set("ActionBars", "look.costColor", "custom")
+    DUI:Set("ActionBars", "look.costCustom", { 0.1, 0.9, 0.2 })
+    stub.RunTimers(); settle()
+    r, g = fs:GetTextColor()
+    T.near(r, 0.1, 0.01); T.near(g, 0.9, 0.01)
+
+    -- In a fight with every spell read secret: no error, the text still drawn.
+    stub.secretSpellReads = true
+    stub.combat = true
+    stub.FireEvent("SPELLS_CHANGED"); stub.RunTimers()
+    stub.combat, stub.secretSpellReads = nil, nil
+
+    -- Off again: gone.
+    DUI:Set("ActionBars", "look.costs", false)
+    stub.RunTimers()
+    T.falsy(fs:IsShown(), "off: hidden")
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)

@@ -319,7 +319,20 @@ function W.Trace(frame, inset, thick, layer, quiet)
     function tr.Draw(p, gleam)
         tr.p = p
         local w, h = frame:GetWidth(), frame:GetHeight()
-        if type(w) ~= "number" or type(h) ~= "number" then return end
+        -- A frame with secret anchoring (a game button whose window shows a
+        -- secret) answers its size with secret numbers, which can't be measured.
+        -- Draw at the last size that could be read; with none yet, draw nothing.
+        if type(w) ~= "number" or type(h) ~= "number"
+            or (issecretvalue and (issecretvalue(w) or issecretvalue(h))) then
+            w, h = tr.w, tr.h
+            if not w then
+                for _, key in ipairs({ "top", "right", "left", "bottom" }) do tr[key]:Hide() end
+                for _, g in ipairs(tr.gleams) do g:Hide() end
+                return
+            end
+        else
+            tr.w, tr.h = w, h
+        end
         w, h = w - 2 * inset, h - 2 * inset
         if w <= 0 or h <= 0 then return end
         local d = p * (w + h)
@@ -386,6 +399,7 @@ end
 W.MENU_BUTTON_MIN = 110
 function W.MenuButton(parent, text, h)
     local b = W.Button(parent, "", h or 24)
+    b.dropdown = true   -- its menu plays the close sound when let go (W.OpenMenu)
     b.chevron = W.Icon(b, "ui-chevron.png", 10, Style.INK.LABEL)
     b.chevron:SetPoint("RIGHT", b, "RIGHT", -10, 0)
     b.text:ClearAllPoints()
@@ -485,8 +499,9 @@ function W.DressButton(b, text)
     b:SetScript("OnMouseDown", function() b.down = true; b.Paint() end)
     b:SetScript("OnMouseUp", function() b.down = false; b.Paint() end)
     -- PostClick, because callers set OnClick and that would drop a hook. A
-    -- template's own PostClick is kept.
-    local function click() if DUI.Sound then DUI.Sound.Play("click") end end
+    -- template's own PostClick is kept. b.gameSound: the game's own kit for this
+    -- button when the player picks the game's sounds (Sound.Play's gameKit).
+    local function click() if DUI.Sound then DUI.Sound.Play("click", b.gameSound) end end
     if b:GetScript("PostClick") then b:HookScript("PostClick", click) else b:SetScript("PostClick", click) end
     function b.SetActive(on)
         b.active = on
@@ -1509,6 +1524,53 @@ function W.Input(parent, opts)
     return e
 end
 
+-- An amount of money to type: gold, silver and copper boxes in a row, each with
+-- its coin, as the game's own money boxes. c.Copper() reads the total, c.Set(copper)
+-- fills them, c.Focus() starts in the gold box; Tab steps through them.
+-- opts.onEnter and opts.onEscape answer the boxes' Enter and Escape.
+W.COINS = { gold = 64, small = 40, gap = 26, glyph = 20 }
+
+function W.Coins(parent, opts)
+    opts = opts or {}
+    local c = CreateFrame("Frame", nil, parent)
+    local boxes, x = {}, 0
+    local worth = { gold = 10000, silver = 100, copper = 1 }
+    for i, key in ipairs({ "gold", "silver", "copper" }) do
+        local w = key == "gold" and W.COINS.gold or W.COINS.small
+        local e = W.Input(c, { numeric = true, maxLetters = key == "gold" and 6 or 2, justify = "RIGHT" })
+        e:SetSize(w, W.INPUT_H)
+        e:SetPoint("TOPLEFT", c, "TOPLEFT", x, 0)
+        local coin = Style.Text(c, SIZE.small, "LEFT")
+        coin:SetPoint("LEFT", e, "RIGHT", 4, 0)
+        coin:SetText((DUI.MoneyString(worth[key]):gsub("^1", "")))
+        x = x + w + W.COINS.gap
+        c[key], boxes[i] = e, e
+    end
+    for i, e in ipairs(boxes) do
+        e:SetScript("OnTabPressed", function() boxes[i % #boxes + 1]:SetFocus() end)
+        if opts.onEnter then e:SetScript("OnEnterPressed", function() opts.onEnter() end) end
+        if opts.onEscape then e:SetScript("OnEscapePressed", function() opts.onEscape() end) end
+    end
+    c:SetSize(x - W.COINS.gap + W.COINS.glyph, W.INPUT_H)
+    local function n(e) return tonumber(e:GetText()) or 0 end
+    function c.Copper() return n(c.gold) * 10000 + n(c.silver) * 100 + n(c.copper) end
+    function c.Set(copper)
+        copper = math.max(0, math.floor(tonumber(copper) or 0))
+        local g, s, k = math.floor(copper / 10000), math.floor(copper / 100) % 100, copper % 100
+        c.gold:SetText(g > 0 and tostring(g) or "")
+        c.silver:SetText(s > 0 and tostring(s) or "")
+        c.copper:SetText(k > 0 and tostring(k) or "")
+    end
+    function c.Focus()
+        c.gold:SetFocus()
+        c.gold:HighlightText()
+    end
+    function c.Unfocus()
+        for _, e in ipairs(boxes) do e:ClearFocus() end
+    end
+    return c
+end
+
 -- Multi-line text box: scrollable text to select and copy or paste into,
 -- in W.Input's box with our scroll bar. The caller places the area (a
 -- ScrollFrame); the edit box is area.edit.
@@ -1669,7 +1731,8 @@ W.TAB_H = 24
 -- (Kit.Tab) s is a separate table so nothing is written on the game's frame.
 -- text is the tab's font string. opts as W.Tab plus under, which puts the
 -- line right under the text instead of at the tab's bottom. Only a resize
--- hook; the caller drives s.Paint(over) and s.Pick(on, animate). s.off dims it.
+-- hook (none with quiet: the caller then calls s.Fit after a resize); the
+-- caller drives s.Paint(over) and s.Pick(on, animate). s.off dims it.
 function W.TabLook(b, s, text, opts)
     s = s or b
     opts = opts or {}
@@ -1703,7 +1766,8 @@ function W.TabLook(b, s, text, opts)
             s.line:SetWidth(full())
         end
     end
-    b:HookScript("OnSizeChanged", function() if s.picked then s.line:SetWidth(full()) end end)
+    function s.Fit() if s.picked then s.line:SetWidth(full()) end end
+    if not opts.quiet then b:HookScript("OnSizeChanged", s.Fit) end
     return s
 end
 
@@ -2445,6 +2509,11 @@ function W.FormatValue(item, v)
         local t = string.format("%.4f", v):gsub("(%.%d%d%d-)0+$", "%1")
         return t .. "x"
     end
+    if item.unit == "s" then
+        local t = string.format("%.2f", v):gsub("%.?0+$", "")
+        return t .. " s"
+    end
+    if item.unit == "c" then return string.format("%d c", math.floor(v + 0.5)) end
     if (item.step or 1) < 1 then return string.format("%.2f", v) end
     return tostring(math.floor(v + 0.5))
 end
@@ -2694,6 +2763,14 @@ function W.Slider(parent, spec)
     end
     local shownV
     function f.Refresh()
+        local lo, hi = s:GetMinMaxValues()
+        if lo ~= item.min or hi ~= item.max then
+            updating = true
+            s:SetMinMaxValues(item.min, item.max)
+            s:SetValueStep(item.step or 1)
+            updating = false
+            shownV = nil
+        end
         local v = get() or item.min
         local from = shownV
         shownV = v
@@ -2754,12 +2831,16 @@ end
 
 -- An options row's slider: W.Slider bound to the page's setting.
 function W.slider(row, page, item)
-    local f = W.Slider(row, { min = item.min, max = item.max, step = item.step, unit = item.unit, snapTo = item.snapTo, free = item.free,
+    -- The range is read from the item each time, so a range that changes
+    -- after the row is drawn reaches the slider on its next refresh.
+    local RANGE = { min = true, max = true, step = true }
+    local f = W.Slider(row, setmetatable({ unit = item.unit, snapTo = item.snapTo, free = item.free,
         onRelease = item.onRelease,
         get = function() return Options.Get(page, item) end,
         set = function(v) Options.Set(page, item, v) end,
         preview = function(v) return Options.Preview(page, item, v) end,
-        disabled = function() return row.disabled == true end })
+        disabled = function() return row.disabled == true end },
+        { __index = function(_, k) if RANGE[k] then return item[k] end end }))
     row.control = f
     W.Hover(row, f.slider)
     W.Hover(row, f.box)
@@ -2768,15 +2849,60 @@ end
 -- The shared dropdown list: one popup for every dropdown, over a full-screen
 -- catcher that closes it on any click outside.
 local catcher, menu
+-- State while open: the choices and the scroll offset (choices above the
+-- top row).
+local open = {}
+
+-- Let go without a pick (a click beside it, Escape). A dropdown then plays
+-- its close sound, as the game's do; a right-click menu closes quietly, like
+-- the game's context menus.
+local function dismiss()
+    local o = open.watch
+    W.CloseMenu()
+    if type(o) == "table" and o.dropdown and DUI.Sound then DUI.Sound.Play("dismiss") end
+end
 
 local function buildMenu()
     catcher = CreateFrame("Button", nil, UIParent)
     catcher:SetAllPoints(UIParent)
     catcher:SetFrameStrata("FULLSCREEN_DIALOG")
     catcher:RegisterForClicks("AnyUp")
-    catcher:SetScript("OnClick", function() W.CloseMenu() end)
+    catcher:SetScript("OnClick", dismiss)
     catcher:Hide()
+    -- Escape closes the menu first and the window under it stays, as with the
+    -- game's menus. Out of a fight the menu's keys take Escape; in a fight they
+    -- are off, and the game's Escape hides the stand-in instead.
+    DUI.Win.Keys(catcher, function(key)
+        if key ~= "ESCAPE" then return false end
+        dismiss()
+        return true
+    end)
+    catcher.escape = DUI.Motion.EscapeFor(dismiss)
+    -- The game's menus close when what opened them stops being visible (a
+    -- window closing, a row scrolled away). Runs only while a menu is open.
+    catcher:SetScript("OnUpdate", function()
+        local o = open.watch
+        if o and not o:IsVisible() then W.CloseMenu() end
+    end)
     menu = CreateFrame("Frame", nil, catcher)
+    -- A row with a secure action (opts.secure): on a controller, A on it clicks
+    -- a secure button carrying that action, as a row's own click is addon code
+    -- and can't cast. Only while the menu has such rows.
+    menu.padNoDefaults = true
+    menu.padWanted = function() return open.opts ~= nil and open.opts.secure ~= nil end
+    menu.padKeys = { { key = "A",
+        label = function(r) return r and r.text and r.text:GetText() end,
+        secure = function(r)
+            local opts = open.opts
+            if not (opts and opts.secure and type(r) == "table" and r.key ~= nil and r.index) then return nil end
+            if r:GetParent() ~= menu.strip then return nil end
+            return opts.secure(r.key)
+        end,
+        after = function(r)
+            local pick, key = open.onPick, r and r.key
+            W.CloseMenu()
+            if pick then pick(key) end
+        end } }
     DUI.Pad.Popup(menu, function() W.CloseMenu() end)
     menu:SetFrameLevel(catcher:GetFrameLevel() + 5)
     menu:EnableMouse(true)
@@ -2800,9 +2926,6 @@ W.MENU_MAX_ROWS = 12    -- a longer list scrolls with the mouse wheel
 W.MENU_WHEEL = 2        -- rows one notch of the wheel moves
 W.MENU_DROP = 6         -- px a menu drops out of its owner as it opens
 
--- State while open: the choices and the scroll offset (choices above the
--- top row).
-local open = {}
 local drawMenu
 
 -- Row scripts are set once and each fill only updates r.key and r.title, so
@@ -3036,6 +3159,9 @@ end
 --   onRightClick = function(key): a row's right-click.
 --   confirm = { [key] = true }: ask "Click again" first, for deletes.
 --   more = { [key] = true }: the row opens a submenu.
+--   secure = function(key) -> attributes or nil: on a controller, A on that
+--     row runs this secure action (casting a spell on a bag item), then
+--     onPick(key). A mouse click on it only calls onPick.
 local cursorSpot
 function W.OpenMenu(owner, keys, values, current, onPick, width, opts)
     if not menu then
@@ -3050,6 +3176,7 @@ function W.OpenMenu(owner, keys, values, current, onPick, width, opts)
     end
     -- On a controller the mouse isn't where the player looks: open at the owner.
     local padded = owner ~= nil and DUI.Pad and DUI.Pad.On()
+    open.watch = owner   -- the real owner, also for a menu placed at the cursor
     if opts and opts.atCursor and not padded then
         cursorSpot = cursorSpot or CreateFrame("Frame", nil, UIParent)
         local x, y = GetCursorPosition()
@@ -3108,6 +3235,8 @@ function W.OpenMenu(owner, keys, values, current, onPick, width, opts)
     -- already open (a menu of switches), it stays put.
     local fresh = not catcher:IsShown() or W.menuOwner ~= owner
     catcher:Show()
+    DUI.Win.KeysOn(catcher, true)
+    DUI.Motion.EscapeShown(catcher.escape, true)
     if fresh then DUI.Motion.SlideIn(menu, 0, up and -W.MENU_DROP or W.MENU_DROP, DUI.Motion.FAST) end
     W.menuOwner = owner
 end
@@ -3121,7 +3250,12 @@ function W.MenuRow(i)
 end
 
 function W.CloseMenu()
-    if catcher then catcher:Hide() end
+    if catcher then
+        catcher:Hide()
+        DUI.Win.KeysOn(catcher, false)
+        DUI.Motion.EscapeShown(catcher.escape, false)
+    end
+    open.watch = nil
     W.menuOwner = nil
 end
 
@@ -3275,6 +3409,7 @@ end
 
 function W.dropdown(row, page, item)
     local b = CreateFrame("Button", nil, row)
+    b.dropdown = true
     b:SetSize(W.CONTROL_WIDTH, 26)
     b.bg = W.Round(b, "BACKGROUND")
     b.bg:SetAllPoints(b)
@@ -3609,6 +3744,32 @@ W.COMPACT_CONTROL = 118
 local INLINE = { toggle = true, color = true }
 local SIZED = { slider = true, dropdown = true }
 
+-- The reset arrow left of a row's control, shown while the row is off its
+-- default. On click it spins back half a turn and resets the row.
+local function resetArrow(row, page, item, gap)
+    local r = CreateFrame("Button", nil, row)
+    r:SetSize(16, 16)
+    r:SetPoint("RIGHT", row.control, "LEFT", -gap, 0)
+    r.icon = W.Icon(r, "ui-reset.png", 14, C.faint)
+    r.icon:SetPoint("CENTER", r, "CENTER", 0, 0)
+    r:SetScript("OnEnter", function()
+        W.TintDaylight(r.icon)
+        W.Tooltip(r, RESET or L["Reset"], L["Put this back to its default."])
+    end)
+    r:SetScript("OnLeave", function()
+        W.Tint(r.icon, C.faint)
+        W.HideTooltip()
+        row.Leave()
+    end)
+    r:SetScript("OnClick", function()
+        local M = DUI.Motion
+        M.Tween(r.icon, 0, math.pi, M.FAST, function(a) r.icon:SetRotation(a) end,
+            function() r.icon:SetRotation(0) end)
+        Options.ResetItem(page, item)
+    end)
+    return r
+end
+
 function W.CompactRow(parent, page, item, width, opts)
     local all = opts ~= nil and opts.inline == true
     local inline = all or INLINE[item.type] == true
@@ -3634,6 +3795,11 @@ function W.CompactRow(parent, page, item, width, opts)
         c:SetPoint("RIGHT", row, "RIGHT", 0, 0)
         row.label:SetPoint("LEFT", row, "LEFT", 0, 0)
         row.label:SetPoint("RIGHT", c, "LEFT", -8, 0)
+        -- A row with its own reset (item.reset) shows the arrow while it's set.
+        if item.reset then
+            row.reset = resetArrow(row, page, item, 6)
+            row.label:SetPoint("RIGHT", row.reset, "LEFT", -4, 0)
+        end
     else
         row.height = W.COMPACT_STACKED
         row.label:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
@@ -3646,6 +3812,9 @@ function W.CompactRow(parent, page, item, width, opts)
         local disabled = Options.IsDisabled(page, item)
         row.disabled = disabled
         row:SetAlpha(disabled and 0.35 or 1)
+        local first = not row.filled
+        row.filled = true
+        if row.reset then W.EaseShown(row.reset, not disabled and not Options.IsDefault(page, item), first) end
         if c.Refresh then c.Refresh() end
     end
     W.PadRow(row)   -- one D-pad stop, as an options row
@@ -3780,28 +3949,7 @@ function W.Row(card, page, group, item)
     end
     if Options.VALUE[item.type] then
         -- Changed from default: show the reset arrow beside the control.
-        local r = CreateFrame("Button", nil, row)
-        r:SetSize(16, 16)
-        r:SetPoint("RIGHT", row.control, "LEFT", -10, 0)
-        r.icon = W.Icon(r, "ui-reset.png", 14, C.faint)
-        r.icon:SetPoint("CENTER", r, "CENTER", 0, 0)
-        r:SetScript("OnEnter", function()
-            W.TintDaylight(r.icon)
-            W.Tooltip(r, RESET or L["Reset"], L["Put this back to its default."])
-        end)
-        r:SetScript("OnLeave", function()
-            W.Tint(r.icon, C.faint)
-            W.HideTooltip()
-            row.Leave()
-        end)
-        -- On click the arrow spins back half a turn as it fades out.
-        r:SetScript("OnClick", function()
-            local M = DUI.Motion
-            M.Tween(r.icon, 0, math.pi, M.FAST, function(a) r.icon:SetRotation(a) end,
-                function() r.icon:SetRotation(0) end)
-            Options.ResetItem(page, item)
-        end)
-        row.reset = r
+        row.reset = resetArrow(row, page, item, 10)
     end
 
     function row.Refresh()
@@ -4435,12 +4583,18 @@ end
 -- input = { initial, hint, empty, locked }: a text box. onYes gets its trimmed
 --   text and isn't called when it's empty unless `empty`; `locked` keeps the
 --   text as given, selected, for copying.
+-- money = { initial, empty }: gold, silver and copper boxes (W.Coins) instead.
+--   onYes gets the copper and isn't called for none unless `empty`.
+-- owner: the box sits over this region (the money it asks about) instead of
+--   the middle of the screen. width: narrower or wider than W.ASK_W.
 -- preview = { height, show(holder), hide(holder) }: something to look at under
 --   the question (a live sample), full width; show fills the holder each time
 --   the question shows, hide runs when it goes.
 -- reload: Yes reloads the UI. Addon code can't call ReloadUI, so Yes is then a
 --   secure /reload button over the footer's, out of combat only, and onYes runs
 --   first in that click. In combat the question waits for the fight to end.
+-- onClose: Escape and the X run this instead of onNo, for a question whose No
+--   button means more than "not now" (the clash box's Keep both).
 -- onYes and onNo run inside the click, since the game refuses some calls from
 -- a timer. Asked while another question is up, it waits its turn.
 W.ASK_W = 380
@@ -4477,6 +4631,7 @@ local function askLetGo(f)
     f.shownPreview = nil
     f.spec = nil
     f.input:ClearFocus()
+    f.coins.Unfocus()
     askHideReload()
     DUI.Win.KeysOn(f, false)
     DUI.Win.Close(f)
@@ -4491,9 +4646,12 @@ local function askAnswer(yes)
     if not spec then return end
     local value
     if spec.input then value = strtrim(f.input:GetText() or "") end
+    if spec.money then value = f.coins.Copper() end
     askLetGo(f)
     if yes then
-        if not (spec.input and value == "" and not spec.input.empty) and spec.onYes then
+        local none = (spec.input and value == "" and not spec.input.empty)
+            or (spec.money and value == 0 and not spec.money.empty)
+        if not none and spec.onYes then
             DUI.SafeCall(spec.onYes, value)
         end
         -- Pressed without the secure button (a controller, or it couldn't be
@@ -4502,6 +4660,16 @@ local function askAnswer(yes)
     elseif spec.onNo then
         DUI.SafeCall(spec.onNo)
     end
+    if not f.spec then askNext() end
+end
+
+-- Escape or the X: onNo, unless the question has its own onClose.
+local function askClose()
+    local f = askBox
+    local spec = f and f.spec
+    if not (spec and spec.onClose) then return askAnswer(false) end
+    askLetGo(f)
+    DUI.SafeCall(spec.onClose)
     if not f.spec then askNext() end
 end
 
@@ -4545,7 +4713,7 @@ end
 local function askBuild()
     local Win = DUI.Win
     local f = Win.New({ name = "DaylightUIAsk", w = W.ASK_W, h = 160, strata = "DIALOG", compact = true })
-    f.onClose = function() askAnswer(false) end
+    f.onClose = askClose
     -- A question floats over the others: the windows that are open stay where they are, not slide aside for it.
     f.room = false
     f.text = Style.Text(f.host, SIZE.body, "LEFT")
@@ -4558,10 +4726,12 @@ local function askBuild()
     f.input = W.Input(f.host)
     f.input:SetScript("OnEnterPressed", function() askAnswer(true) end)
     f.input:SetScript("OnEscapePressed", function() askAnswer(false) end)
+    f.coins = W.Coins(f.host, { onEnter = function() askAnswer(true) end, onEscape = function() askAnswer(false) end })
+    f.coins:Hide()
     f.foot = Win.Parts.Footer(f.host)
     Win.Drag(f, {})
     Win.Keys(f, function(key)
-        if key == "ESCAPE" then askAnswer(false); return true end
+        if key == "ESCAPE" then askClose(); return true end
         -- Enter can't reload: only a click on the secure button can.
         if (key == "ENTER" or key == "NUMPADENTER") and f.spec and not f.spec.reload then
             return f.foot:Press(1)
@@ -4576,6 +4746,8 @@ askShow = function(spec)
     local f = askBox
     f.spec = spec
     f.title:SetText(spec.title or "Daylight UI")
+    local width = spec.width or W.ASK_W
+    f.text:SetWidth(width - 2 * Win.EDGE)
     f.text:SetText(spec.text or "")
     local textH = f.text:GetStringHeight()
     local h = Win.COMPACT + W.ASK_TOP + (type(textH) == "number" and math.ceil(textH) or SIZE.body) + W.ASK_FOOT
@@ -4606,17 +4778,29 @@ askShow = function(spec)
         if input.locked then f.input.Lock(input.initial or "") end
         h = h + W.ASK_GAP + W.INPUT_H
     end
+    local money = spec.money
+    f.coins:SetShown(money ~= nil)
+    if money then
+        f.coins:ClearAllPoints()
+        f.coins:SetPoint("TOPLEFT", spec.preview and f.preview or f.text, "BOTTOMLEFT", 0, -W.ASK_GAP)
+        f.coins.Set(money.initial)
+        h = h + W.ASK_GAP + W.INPUT_H
+    end
     local list = { { text = spec.yes or YES or L["Yes"], primary = true, onClick = function() askAnswer(true) end } }
     if spec.no ~= false then
         list[2] = { text = spec.no or NO or L["No"], onClick = function() askAnswer(false) end }
     end
     f.foot:Set(list)
     if Win.IsOpen(f) then
-        Win.Feel.Size(f, W.ASK_W, h)
+        Win.Feel.Size(f, width, h)
     else
-        f:SetSize(W.ASK_W, h)
+        f:SetSize(width, h)
         f:ClearAllPoints()
-        f:SetPoint("CENTER", UIParent, "CENTER", 0, 120)
+        if spec.owner then
+            f:SetPoint("BOTTOMRIGHT", spec.owner, "TOPRIGHT", Win.EDGE, Win.EDGE)
+        else
+            f:SetPoint("CENTER", UIParent, "CENTER", 0, 120)
+        end
         f:SetScale(Win.Scale(1))
         Win.Open(f)
         Win.KeysOn(f, true)
@@ -4626,6 +4810,7 @@ askShow = function(spec)
         f.input:SetFocus()
         f.input:HighlightText()
     end
+    if money then f.coins.Focus() end
     if spec.reload then askShowReload(f) else askHideReload() end
 end
 
@@ -4658,6 +4843,11 @@ end
 -- Answers the question showing now, Yes (true) or No (false), as its buttons do.
 function W.Answer(yes)
     if W.Asking() then askAnswer(yes) end
+end
+
+-- Escape or the X on the question showing now.
+function W.CloseAsk()
+    if W.Asking() then askClose() end
 end
 
 -- A reload question can't stay up through a fight: its secure button has to

@@ -38,9 +38,50 @@ local function slantImage(trail, end_, under, sharp)
     if trail then return (sharp and TRAIL_SHARP or TRAIL_MASK)[end_] end
     return (sharp and SLANT_SHARP or SLANT_MASK)[end_]
 end
+-- The mask image for an end's cut (trail: the far side of the line), for
+-- pieces that mask by hand (a heal's wedge under the fill's angled edge).
+function Style.SlantImage(trail, end_, under) return slantImage(trail, end_, under == true, false) end
 -- An end leans under when the slant's under is that end or "both" (a
 -- trapezoid wider at the bottom).
 local function leans(under, end_) return under ~= nil and (under == end_ or under == "both") end
+
+-- Bar ends. Each end of a bar is set on its own: straight, or angled with its
+-- top corner out (the usual way) or flipped, its bottom corner out. Settings
+-- keep two switches per end (angled, flipped). Style.EndsOf turns the four
+-- into Style.Slant's side and under.
+function Style.EndsOf(leftOn, leftFlip, rightOn, rightFlip)
+    leftOn, rightOn = leftOn == true, rightOn == true
+    local side = leftOn and rightOn and "both" or rightOn and "right" or leftOn and "left" or nil
+    local r, l = rightOn and rightFlip == true, leftOn and leftFlip == true
+    return side, r and l and "both" or r and "right" or l and "left" or nil
+end
+
+-- What a player picks for an end: "straight", "slash" (/) or "backslash" (\).
+-- On the right end / is the usual angle, on the left end \ is.
+local USUAL_GLYPH = { right = "slash", left = "backslash" }
+function Style.EndGlyph(end_, on, flip)
+    if on ~= true then return "straight" end
+    local usual = USUAL_GLYPH[end_] or "slash"
+    if flip == true then return usual == "slash" and "backslash" or "slash" end
+    return usual
+end
+
+-- The two switches behind a picked glyph: angled, flipped.
+function Style.EndFromGlyph(end_, glyph)
+    if glyph ~= "slash" and glyph ~= "backslash" then return false, false end
+    return true, glyph ~= (USUAL_GLYPH[end_] or "slash")
+end
+
+-- A slant continuing another frame's line (ref) can start one end's line
+-- lower down: ref.drop (a number, or { left = n, right = n }) is how far below
+-- ref.frame's top that end's line begins, with the same slope. A bar hung
+-- under a flipped end uses it, so its edge leans back from the frame's bottom
+-- corner instead of running on past it.
+local function dropOf(ref, end_)
+    local d = ref and ref.drop
+    if type(d) == "table" then d = d[end_] end
+    return (type(d) == "number" and d > 0) and d or 0
+end
 -- Bar textures: a soft-edged fill over a brushed backing texture.
 Style.BAR = {
     fill = DUI.MEDIA .. "bar-plain.tga",
@@ -286,8 +327,10 @@ function Style.PickFont()
     local client = clientFont()
     Style.FONT = Style.FontFileOf(DUI.DB.General().font)
     if DUI.Widgets then
-        DUI.Widgets.BODY = on and client or DUI.OptionsTheme.BodyFont()
-        DUI.Widgets.TITLE = Style.FONT
+        -- Daylight UI's text picked in a language whose letters the client's fonts lack.
+        local own = DUI.OptionsTheme.LanguageFont()
+        DUI.Widgets.BODY = own or (on and client) or DUI.OptionsTheme.BodyFont()
+        DUI.Widgets.TITLE = own or Style.FONT
     end
 end
 
@@ -604,16 +647,18 @@ end
 -- on debuffs with a dispel type instead (the button's group decides which
 -- debuffs, e.g. the target's ones you can dispel). every puts it on any buff,
 -- for a row whose filter already picked only those (nameplates). Returns the
--- texture, or nil when the client refuses.
+-- texture, or nil when the client refuses. halo: one made by an earlier call,
+-- handed to the client again after the button's ClearDispelTypeTextures.
 Style.AURA_HALO = DUI.MEDIA .. "glow.png"
 Style.AURA_HALO_REACH = 0.5 -- how far it spreads past the icon, as a share of its width
-function Style.AuraHalo(btn, colors, harmful, every)
+function Style.AuraHalo(btn, colors, harmful, every, halo)
     local styles = Enum and Enum.CustomAuraButtonDispelTypeTextureStyle
     local steal = Enum and Enum.CustomAuraButtonDispelTypeStealableFilter
     if not (btn.AddDispelTypeTexture and styles and styles.CustomAsset and steal) then return nil end
-    local halo = btn:CreateTexture(nil, "BACKGROUND", nil, -8)
+    halo = halo or btn:CreateTexture(nil, "BACKGROUND", nil, -8)
     halo:SetTexture(Style.AURA_HALO)
     halo:SetBlendMode("ADD")
+    halo:Show()
     -- A buff without a type (rare on a purgeable one) takes Magic's light.
     local assets, tints = dispelSet(colors, Style.AURA_HALO, nil, "Magic")
     local ok = pcall(btn.AddDispelTypeTexture, btn, halo, {
@@ -1786,8 +1831,10 @@ function Style.LayoutShell(s)
         if ok and type(h) == "number" and not isSecret(h) and h > 0 then H = h end
     end
     local refH = (sl and sl.ref and sl.ref.height) or H
-    local cutTop = cut * math.max(0, refH - H) / refH
     for _, side in ipairs(ENDS) do
+        -- How far in the line already is at this frame's top. A dropped end's
+        -- line (ref.drop) starts lower, at the same slope.
+        local cutTop = cut * math.max(0, refH - dropOf(sl and sl.ref, side) - H) / refH
         local t = side == "left" and sh.LEFT or sh.RIGHT
         -- Below the shared border line or the square top corner's shadow.
         local top = (seamT or joined or angled[side]) and -T or -E
@@ -1949,7 +1996,12 @@ function Style.Slant(frame, side, cut, ref, under)
     if not sl then
         sl = { clips = {} }
         slantOf[frame] = sl
+    end
+    -- A piece clipped (Style.Clip) before the first slant leaves the table made
+    -- already; the shell still needs its own clips then, or its ends stay square.
+    if not sl.shelled then
         local s = shellOf[frame]
+        sl.shelled = s ~= nil
         if s then
             -- Pieces at one end (a side edge, its corners) never reach the other end's
             -- cut, so they skip its mask. A masked texture is the slow kind of drawing
@@ -1995,12 +2047,21 @@ end
 -- stops at, making it a strip between the two (a name, or a function
 -- returning one). only (optional): "left" or "right" for a piece that belongs
 -- to one end, so the other end never masks it (a texture takes at most three
--- masks, and both ends' pairs would be four).
+-- masks, and both ends' pairs would be four). Clipping a texture again on the
+-- same frame moves its clip: the masks are shared per line and end, so a
+-- second clip would put the same mask on it twice.
 function Style.Clip(frame, tex, inset, until_, only)
     local sl = slantOf[frame]
     if not sl then
         sl = { clips = {} }
         slantOf[frame] = sl
+    end
+    for _, had in ipairs(sl.clips) do
+        if had.tex == tex then
+            had.inset, had.until_, had.only = inset, until_, only
+            clipOf[tex] = { frame = frame, clip = had }
+            return
+        end
     end
     local clip = { tex = tex, inset = inset, until_ = until_, only = only }
     sl.clips[#sl.clips + 1] = clip
@@ -2023,14 +2084,9 @@ end
 function Style.ClipLike(over, tex)
     local c = clipOf[tex]
     if not c then return end
-    -- Asked again, it follows the fill's clip as it is now, without a second
-    -- entry (a texture takes at most three masks).
-    local had = clipOf[over]
-    if had and had.frame == c.frame then
-        had.clip.inset, had.clip.until_, had.clip.only = c.clip.inset, c.clip.until_, c.clip.only
-    else
-        Style.Clip(c.frame, over, c.clip.inset, c.clip.until_, c.clip.only)
-    end
+    -- Asked again, it follows the fill's clip as it is now (Style.Clip keeps one
+    -- entry per texture and frame).
+    Style.Clip(c.frame, over, c.clip.inset, c.clip.until_, c.clip.only)
     Style.LayoutSlant(c.frame)
 end
 
@@ -2196,6 +2252,10 @@ function Style.LayoutSlant(frame)
         end
         for _, end_ in ipairs(ENDS) do
             local active = cutsAt(clip, side, roomy, end_)
+            -- A dropped end's line (ref.drop) spans less height at the same slope.
+            local drop = ref and dropOf(ref, end_) or 0
+            local spanH = H - drop
+            local cutE = cut * spanH / H
             -- The far side of a strip, past the deeper line toward the edge. Clamped to
             -- black so nothing shows beyond the mask itself.
             local stop = until_ and maskFor(owner, "stop", until_, end_)
@@ -2209,11 +2269,11 @@ function Style.LayoutSlant(frame)
                 stop:ClearAllPoints()
                 local p = end_ == "right" and "RIGHT" or "LEFT"
                 local q = end_ == "right" and "LEFT" or "RIGHT"
-                local x = end_ == "right" and -(d + cut) or (d + cut)
+                local x = end_ == "right" and -(d + cutE) or (d + cutE)
                 local rel = ref and ref.frame or frame
-                stop:SetPoint(TOP_AT[q], rel, TOP_AT[p], x, 0)
+                stop:SetPoint(TOP_AT[q], rel, TOP_AT[p], x, -drop)
                 if ref then
-                    stop:SetSize(4 * cut, H)
+                    stop:SetSize(4 * cutE, spanH)
                 else
                     stop:SetPoint(BOTTOM_AT[q], frame, BOTTOM_AT[p], x, 0)
                     stop:SetWidth(4 * cut)
@@ -2236,8 +2296,8 @@ function Style.LayoutSlant(frame)
                 local top, bottom = TOP_AT[end_], BOTTOM_AT[end_]
                 local x = end_ == "right" and -d or d
                 if ref then
-                    mask:SetPoint(top, ref.frame, top, x, 0)
-                    mask:SetSize(4 * cut, H)
+                    mask:SetPoint(top, ref.frame, top, x, -drop)
+                    mask:SetSize(4 * cutE, spanH)
                 else
                     mask:SetPoint(top, frame, top, x, 0)
                     mask:SetPoint(bottom, frame, bottom, x, 0)
@@ -2303,6 +2363,7 @@ end
 -- A layer kept inside its bar's rectangle wears one more mask for it
 -- (Style.SameMasks), while it has room for one.
 local insideMask = setmetatable({}, { __mode = "k" }) -- fill -> its rectangle as a mask
+Style.MASK_SOLID = DUI.MEDIA .. "mask-solid.png"
 local insideOn = setmetatable({}, { __mode = "k" })   -- layer -> the rectangle mask it wears
 
 -- An overlay carries the fill's mask while the fill has one.
@@ -2437,8 +2498,11 @@ function Style.SameMasks(tex, fill, inside)
         local m = insideMask[fill]
         if not m then
             m = fill:GetParent():CreateMaskTexture()
-            -- Clamped to black, so nothing shows beyond the mask itself.
-            m:SetTexture(WHITE, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+            -- Clamped to black, so nothing shows beyond the mask itself. A
+            -- large image, not the 8 x 8 square: the client blurs a stretched
+            -- mask's edge by half a texel, and the square's blur showed a line
+            -- of the fill along the top of a dark layer.
+            m:SetTexture(Style.MASK_SOLID, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
             -- The bar's rectangle, not the fill's: an empty fill has no width,
             -- and a light pinned to an empty bar's end showed past it in game.
             -- The fill always reaches the bar's far side, so the cut is the
@@ -3332,9 +3396,11 @@ function Style.Text(parent, size, justify, font)
     return fs
 end
 
+-- Layouts call this on every pass (a nameplate on every add), so a text whose
+-- font, size, outline and shadow already match is left as it is.
 function Style.SetTextSize(fs, size)
     textSize[fs] = size
-    Style.ApplyFont(fs)
+    repaintFont(fs)
 end
 
 -- Removes a shell or FontString from the repaint sets, for pieces the client
@@ -3440,4 +3506,4 @@ DUI.RegisterCommand("debug", function(rest)
             DUI.Print(string.format("  bar level=%d", child:GetFrameLevel()))
         end
     end
-end, DUI.L["/dui debug [frame] - report how a frame's border was drawn"])
+end, function() return DUI.L["/dui debug [frame] - report how a frame's border was drawn"] end)

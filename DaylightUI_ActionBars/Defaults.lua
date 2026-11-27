@@ -53,6 +53,7 @@ ns.DEFAULTS = {
     bagBar = "hidden", microMenu = "hidden", microMenuCorner = false,
     bagBarFade = DaylightUI.Fade.Defaults({ delay = 3 }),
     microMenuFade = DaylightUI.Fade.Defaults({ delay = 3 }),
+    padBarsFade = DaylightUI.Fade.Defaults({ delay = 3 }), -- the game's controller crossbar
     -- The totem timers above the player frame (Totems.lua): shown, and how they fade.
     totemTimers = true,
     totemTimersFade = DaylightUI.Fade.Defaults(),
@@ -70,10 +71,25 @@ ns.DEFAULTS = {
     cdmBarFx = DaylightUI.BarFx.Defaults(),
     skinMenus = true,       -- bag bar and micro menu in the buttons' look (Menus.lua)
     -- The micro menu's icons in that look: "accent" (one sweep along the row),
-    -- "class" or "custom" (microIconCustom), and the dark tiles behind them.
+    -- "class", "custom" (microIconCustom) or "each" (every icon its own color,
+    -- microColors by icon name), and the dark tiles behind them.
     microIconColor = "accent",
     microIconCustom = { 1, 1, 1 },
+    microColors = {
+        character = { 0.60, 0.80, 1.00 }, professions = { 0.90, 0.68, 0.42 },
+        talents = { 0.55, 0.88, 0.55 }, spellbook = { 0.72, 0.62, 0.98 },
+        achievements = { 0.98, 0.82, 0.35 }, legacy = { 0.92, 0.60, 0.90 },
+        quests = { 0.98, 0.88, 0.40 }, housing = { 0.78, 0.86, 0.55 },
+        guild = { 0.45, 0.88, 0.62 }, finder = { 0.45, 0.82, 0.95 },
+        collections = { 0.98, 0.62, 0.70 }, journal = { 0.92, 0.55, 0.45 },
+        help = { 0.50, 0.88, 0.82 }, shop = { 0.98, 0.70, 0.45 }, menu = { 0.90, 0.88, 0.82 },
+    },
     microBackgrounds = true,
+    microIconSize = 18,     -- px
+    microGap = 3,           -- px from the button's edge to its tile
+    microHoverGrow = true,  -- the icon swells a little under the mouse
+    microOpenMark = "border",   -- an open window's button: "border", "line" or "both"
+    microRestAlpha = 1,     -- icon opacity away from the mouse
     cooldowns = true,       -- Cooldown Manager icons in the same look
     cdmKeybinds = false,    -- keybind on every icon (a piece's keyShown overrides it)
     readyPing = true,       -- a button coming off a real cooldown (not the GCD) pops and flashes
@@ -132,6 +148,11 @@ ns.DEFAULTS = {
         -- Text offsets in px from their default spot.
         keybindX = 0, keybindY = 0, countX = 0, countY = 0,
         macroX = 0, macroY = 0, cooldownX = 0, cooldownY = 0,
+        -- Each spell's cost on its button (Skin.UpdateCost): off until switched on.
+        costs = false, costSize = 12, costPos = "bottomleft",
+        costColor = "power",                 -- the power's own color, or "custom"
+        costCustom = { 0.55, 0.7, 1 },
+        costX = 0, costY = 0,
         -- A panel behind the whole bar (Bars.PaintBack).
         -- The border lit while hovered / pressed, in the accent, your class color
         -- or a custom color (hoverBorderColor / pressBorderColor).

@@ -13,7 +13,7 @@ DUI.ADDON_NAME = ADDON_NAME
 DUI.CORE_PARTS = { "DB", "Pixel", "Style", "Tips", "GameFonts", "DamageText", "Motion", "Sound", "Pad", "Media", "Health", "Weapons", "Threat", "Interrupt", "Spots", "Dots", "PrivateAuras", "Taint", "BugReport", "PlateReport", "Gradients", "BarFx", "Movers",
     "GameMovers", "PTRButton", "QuestieAside", "PrettyAside", "OpenMap", "CombatText", "Fade", "FadeUpgrade", "EditMode", "Options", "OptionsTheme", "Widgets", "SampleStrip",
     "OptionsNav", "OptionsResults", "OptionsPanel", "Installer", "InstallerDraft", "InstallerPages", "InstallerCards", "InstallerScreen",
-    "InstallerUI", "InstallerChrome", "InstallerSteps", "InstallerPlugins", "InstallerLooks", "InstallerDuel", "Welcome", "Profiles", "Alts", "Plugins", "APIReport", "Donators", "Notes", "TestBox", "Win", "Tour" }
+    "InstallerUI", "InstallerChrome", "InstallerSteps", "InstallerPlugins", "InstallerLooks", "InstallerDuel", "Welcome", "Clashes", "Profiles", "Alts", "Plugins", "APIReport", "Donators", "Notes", "TestBox", "Win", "Tour" }
 DUI.VERSION = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "dev"
 DUI.MEDIA = "Interface\\AddOns\\DaylightUI\\Media\\"
 
@@ -113,18 +113,6 @@ local PRINT_LABEL =DUI.GradientText("DaylightUI") .. ":"
 
 function DUI.Print(msg)
     DEFAULT_CHAT_FRAME:AddMessage(PRINT_LABEL .. " " .. tostring(msg))
-end
-
--- Another addon replaces the same part of the UI. Say so once so the player
--- knows to turn one of them off. what: "frames", "action bars"...
-local warnedAbout = {}
-
-function DUI.WarnIfLoaded(addon, label, what)
-    if warnedAbout[addon] then return end
-    if C_AddOns and C_AddOns.IsAddOnLoaded and C_AddOns.IsAddOnLoaded(addon) then
-        warnedAbout[addon] = true
-        DUI.Print(string.format(L["%s is also loaded. Both replace the same %s; disable one of them."], label, L[what]))
-    end
 end
 
 -- A unit's name for our frames. With the Last names setting on, a player shows
@@ -698,6 +686,8 @@ local commands, commandOrder = {}, {}
 -- (previews, diagnostics, dev tools). All of them run either way.
 DUI.LISTED_COMMANDS = { [""] = true, unlock = true, test = true, leader = true }
 
+-- help: its line in /dui's list, or a function returning it (looked up when
+-- listed, so a core file's line is in the picked language).
 function DUI.RegisterCommand(name, fn, help)
     commands[name] = { fn = fn, help = help }
     commandOrder[#commandOrder + 1] = name
@@ -712,6 +702,7 @@ local function printHelp(all)
     DUI.Print(L["Commands:"])
     for _, name in ipairs(commandOrder) do
         local help = commands[name].help
+        if type(help) == "function" then help = help() end
         if help and (all or DUI.LISTED_COMMANDS[name]) then DUI.Print("  " .. help) end
     end
     if not all then DUI.Print("  " .. L["/dui all - every command"]) end
@@ -986,13 +977,15 @@ DUI.RegisterCommand("test", function(rest)
     end
     DUI.testRaid = raid
     DUI.SetTestMode(not DUI.testMode)
-end, L["/dui test - preview every frame with sample units (/dui test raid: with a raid of forty)"])
+end, function() return L["/dui test - preview every frame with sample units (/dui test raid: with a raid of forty)"] end)
 
 -- Lifecycle
 
 DUI.RegisterEvent("ADDON_LOADED", function(_, name)
     if name == ADDON_NAME then
         DUI.DB.Init()
+        -- The language picked on Home, before any module file reads its text.
+        DUI.UseLanguage(DUI.DB.Root().language)
         -- Before any module builds its text.
         DUI.Style.PickFont()
     end

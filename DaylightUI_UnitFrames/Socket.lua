@@ -27,6 +27,7 @@ Socket.RING_OUTER = 0.60      -- the line's outside, as a share of its image's h
 Socket.RING_WIDTHS = { thin = 0.918, normal = 0.897, thick = 0.858 }
 Socket.PICTURE = 0.755
 Socket.HAIR = 0.03
+Socket.GAP_PX = 2             -- the black between picture and line never narrower than this, in screen pixels
 Socket.SIZE = 1.2             -- drawn this much bigger than Classic at the same Portrait size
 Socket.TAG_AT = 0.7           -- the level tag's middle, past the ring's middle toward the bar
 Socket.SHADOW_FILL = 0.85     -- the shadow art's solid part, as a share of its half-size
@@ -94,11 +95,14 @@ end
 
 -- The socket's outer edge, built out from the classic radius R: the line, then
 -- the frame's whole border (its inner black line is the gap). A shape's is
--- worked out on its half-side and given back as a radius like R.
-function Socket.Outer(f, R, width, shapeArt)
+-- worked out on its half-side and given back as a radius like R. free says
+-- where it will sit, since the frame may not know yet.
+function Socket.Outer(f, R, width, shapeArt, free)
     local s = shapeArt and ns.UF.SQUARE or 1
     local line = Socket.RingSize(R, width)
-    local T = Pixel.Px(measure(f), Style.BorderPx(f))
+    local m = measure(f)
+    if free ~= nil then m = (free and f.portraitHolder) or f end
+    local T = Pixel.Px(m, Style.BorderPx(f))
     return (line * s + T) / s
 end
 
@@ -300,7 +304,10 @@ function Socket.Layout(f, geo)
 
     -- The picture's shading, both on the frame and on its own.
     if not p.vignette then makeVignette(p) end
-    local open = 2 * geo.opening
+    -- It reaches past the picture into the black gap. Cut at the picture's own
+    -- edge, its soft edge pixels were shaded less than the ones just inside and
+    -- showed as a ring of bright specks round the art.
+    local open = 2 * geo.opening + 2 * Pixel.Px(m, Socket.GAP_PX)
     p.vignette:SetSize(open, open)
     p.vignetteMask:SetTexture(solid, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
     p.vignetteMask:SetSize(open, open)

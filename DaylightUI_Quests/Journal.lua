@@ -26,6 +26,7 @@ Journal.ZONE_ROOM = 11     -- same for a zone line, whose text is 2 larger
 Journal.LEVEL_W = 1.55     -- level column width in text sizes, fits two digits
 Journal.OBJ = 22
 Journal.TOP = 40           -- room for the search line on the list page
+Journal.COUNT_Y = -21      -- the middle of the search line, where the quest count sits
 Journal.FOOT = 52          -- room for the footer on a quest page
 Journal.WARN_Y = 16        -- px the item warning sits above the footer, clear of its rule
 Journal.TIP_GAP = 8        -- px between the panel's edge and a row's tooltip beside it
@@ -98,13 +99,14 @@ function Journal.Read()
     local watched, nWatched = watchedSet()
     local focus = call(api(C_SuperTrack, "GetSuperTrackedQuestID"))
     local out = { groups = {}, watched = nWatched }
-    local byZone, zone = {}, nil
+    local byZone, zone, logRank = {}, nil, {}
     local n = call(api(QL, "GetNumQuestLogEntries"))
     for i = 1, (type(n) == "number" and n or 0) do
         local info = call(api(QL, "GetInfo"), i)
         if type(info) == "table" then
             if info.isHeader then
                 zone = type(info.title) == "string" and info.title or nil
+                if zone and not logRank[zone] then logRank[zone] = i end
             elseif type(info.questID) == "number" and not info.isTask and not info.isHidden then
                 local name = zone or ns.Data.OTHER
                 local q = ns.Data.Quest(info.questID, nil, name, i, info, focus)
@@ -121,6 +123,9 @@ function Journal.Read()
             end
         end
     end
+    -- Zones keep their places while the map refilters the log under them.
+    local seats = ns.Data.Seats(logRank)
+    table.sort(out.groups, function(a, b) return (seats[a.name] or math.huge) < (seats[b.name] or math.huge) end)
     if db.journalHereFirst ~= false then
         local main = ns.Data.Here(function(name) return byZone[name] ~= nil end)
         local here = ns.Data.HereSet(out.groups, main)
@@ -1125,7 +1130,19 @@ function Journal.PadSetup()
         { key = "B", follow = true, label = BACK or L["Back"],
           when = function() return S.page == "quest" end,
           run = function() Journal.ShowList() end },
+        -- The map's own footer turns D-pad left into "World Map" anywhere in its
+        -- quest log, so on the footer row Daylight UI steps left itself until
+        -- the left end (Show on map), where left is the map's again.
+        { key = "LEFT", follow = true,
+          when = function(at) return Journal.PadLeftOf(at) ~= nil end,
+          run = function(at) DUI.Pad.Aim(Journal.PadLeftOf(at)) end },
     }
+end
+
+-- The footer button left of the stop, if the stop is one of the footer's.
+function Journal.PadLeftOf(at)
+    if not (f and S.page == "quest" and type(at) == "table") then return nil end
+    return f.quest.footer:Beside(at, -1)
 end
 
 -- The tracker's click: open the map with the log on this quest's page. The map's
@@ -1251,7 +1268,11 @@ function Journal.QuietList()
     for _, e in ipairs(Journal.LIST_PIN_EVENTS) do pcall(reg.UnregisterCallback, reg, e, qs) end
 end
 
-local function searchBox(page)
+-- The search box runs up to the quest count beside it. Its right side hangs off
+-- the count's left, so a wider font or count pushes the box shorter instead of
+-- running under it. Both sides are placed by their middles, on the count's line.
+Journal.COUNT_GAP = 8
+local function searchBox(page, count)
     local E = DUI.Win.EDGE
     local e = DUI.Widgets.Input(page, { search = true, maxLetters = 60, hint = SEARCH or L["Search"],
         onChange = function(text)
@@ -1260,8 +1281,8 @@ local function searchBox(page)
                 Journal.FillList(false)
             end
         end })
-    e:SetPoint("TOPLEFT", page, "TOPLEFT", E, -8)
-    e:SetPoint("TOPRIGHT", page, "TOPRIGHT", -64, -8)
+    e:SetPoint("LEFT", page, "TOPLEFT", E, Journal.COUNT_Y)
+    e:SetPoint("RIGHT", count, "LEFT", -Journal.COUNT_GAP, 0)
     return e
 end
 
@@ -1289,9 +1310,9 @@ function Journal.Build()
     local Parts = DUI.Win.Parts
     f.list = CreateFrame("Frame", nil, f)
     f.list:SetAllPoints(f)
-    f.list.search = searchBox(f.list)
     f.list.count = Style.Text(f.list, Style.SIZE.small, "RIGHT")
-    f.list.count:SetPoint("RIGHT", f.list, "TOPRIGHT", -DUI.Win.EDGE, -21)
+    f.list.count:SetPoint("RIGHT", f.list, "TOPRIGHT", -DUI.Win.EDGE, Journal.COUNT_Y)
+    f.list.search = searchBox(f.list, f.list.count)
     f.list.stack = Parts.Stack(f.list, { top = Journal.TOP, bottom = 8 })
 
     f.quest = CreateFrame("Frame", nil, f)

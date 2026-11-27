@@ -56,7 +56,6 @@ T.test("quests: with Kaliel's Tracker loaded ours stays off", function()
     local _, ns = load({ quests = {}, loaded = { "!KalielsTracker" } })
     T.eq(ns.Blizzard.Starve(), false)
     T.eq(ObjectiveTrackerManager.AddContainer, QW.originals.AddContainer, "the game's tracker left alone")
-    T.truthy(stub.ChatContains("Kaliel's Tracker"), "said why")
 end)
 
 local function snap(spec)
@@ -85,6 +84,32 @@ T.test("quests data: groups by zone, the zone you're in first", function()
     T.eq(s.groups[2].quests[1].zone, "Westfall")
     T.eq(s.logCount, 3)
     T.eq(s.logMax, 25)
+end)
+
+-- Opening the world map makes the game refilter the quest log for the map's
+-- zone (QuestMapFrame_ResetFilters folds every header not on that map) and the
+-- log's own order can shift with it. The tracker's zones must not swap places.
+T.test("quests data: zones keep their places when the log reorders itself", function()
+    local _, ns = load({ zone = "Un'Goro Crater", quests = {
+        QW.quest(1, "Roll the Bones", { zone = "Un'Goro Crater" }),
+        QW.quest(2, "Wandering Shay", { zone = "Azshara" }),
+        QW.quest(3, "Slime", { zone = "Ironforge" }),
+        QW.quest(4, "Staghelm", { zone = "Stormwind City" }),
+        QW.quest(5, "Tanaris Thing", { zone = "Tanaris" }),
+    } })
+    local function names()
+        local out = {}
+        for _, g in ipairs(ns.Data.Snapshot().groups) do out[#out + 1] = g.name end
+        return table.concat(out, ",")
+    end
+    local before = names()
+    -- The map shows Tanaris: the log now lists Tanaris and Stormwind first.
+    local q = QW.state.quests
+    QW.state.quests = { q[5], q[4], q[1], q[2], q[3] }
+    T.eq(names(), before, "same zone order after the log reshuffled")
+    -- A zone that's new to the log still goes where the log puts it.
+    table.insert(QW.state.quests, 3, QW.quest(6, "Feralas Thing", { zone = "Feralas" }))
+    T.eq(names(), "Un'Goro Crater,Azshara,Ironforge,Stormwind City,Feralas,Tanaris")
 end)
 
 T.test("quests data: a quest the log walk missed asks for its header", function()
@@ -865,6 +890,47 @@ T.test("quests tracker: This zone only, and the width follows the minimap", func
     T.eq(Tr.Width(), 226)
 end)
 
+-- Ticket: with a thick minimap border, "Match the minimap's width" left the
+-- tracker narrower than the minimap's frame: it matched the map picture alone
+-- (its Size), not the box around it with its padding and border. The fake game
+-- lays nothing out, so the panel's right edge is given and the rest follows
+-- the anchors: the list hangs its top-right from the anchor, the box sits
+-- BOX_PAD outside the list.
+T.test("quests tracker: matching the minimap lines its box up with the minimap's frame, border and all", function()
+    local Tr, ns, settle = tracker({ quests = { STEW } }, { infopanel = true, before = QW.panelWorld })
+    local P, IT = stub.infopanel.Panel, stub.infopanel.Tracker
+    function P.panel:GetRight() return 1900 end
+    function P.panel:GetBottom() return 700 end
+    DaylightUI:Set("Quests", "box", true)
+    local pad = Tr.BOX_PAD[1]
+    local function check(what)
+        stub.RunTimers(); settle()
+        T.truthy(P.side ~= "right", "the map is on the panel's right here")
+        local frame = P.mapSize + 2 * P.inset
+        local _, _, _, x = IT.anchor:GetPoint(1)
+        local boxRight, boxW = x + pad, Tr.Width() + 2 * pad
+        T.near(boxRight, 1900, 0.01, what .. ": the box's right edge is the minimap frame's")
+        T.near(boxW, frame, 0.01, what .. ": as wide as the minimap's frame")
+        T.near(Tr.view:GetWidth(), Tr.Width(), 0.01, what .. ": the list took that width")
+    end
+    check("default border")
+    DaylightUI:Set("InfoPanel", "map.frameStyle.global", false)
+    DaylightUI:Set("InfoPanel", "map.frameStyle.borderPx", 8)
+    check("a thick border")
+    DaylightUI:Set("InfoPanel", "map.size", 260)
+    check("a bigger map")
+    -- No box: the list's text lines up with the map picture itself.
+    DaylightUI:Set("Quests", "box", false)
+    stub.RunTimers(); settle()
+    -- The anchor glides to its new spot.
+    local d = DaylightUI.Motion.Driver()
+    for _ = 1, 60 do stub.RunOnUpdate(d, 1 / 60) end
+    local _, _, _, x = IT.anchor:GetPoint(1)
+    T.near(x, 1900 - P.inset, 0.01, "no box: the list's right edge is the map's")
+    T.near(Tr.Width(), P.mapSize, 0.01, "and as wide as the map")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
 -- The classic log files a starting area's quests under its own name (Northshire
 -- Valley), while the game's zone text says Elwynn Forest. The subzone text names
 -- it only in the open valley; in the Abbey it says Northshire Abbey.
@@ -992,7 +1058,7 @@ T.test("quests tracker: Reset puts it under the panel, not where the game's trac
     IT.Apply(DaylightUI:Get("InfoPanel", "tracker"))
     stub.RunTimers()
     local _, _, _, x, y = IT.anchor:GetPoint(1)
-    T.eq(x, 1900 - IT.EDGE, "the anchor (our tracker's home) under the panel")
+    T.near(x, IT.OwnX(1900), 0.01, "the anchor (our tracker's home) under the panel")
     T.eq(y, 700 - P.GAP)
 end)
 
@@ -1359,6 +1425,73 @@ T.test("quests order: switched off, the game's order stays", function()
     T.deq(order(Tr), { 2, 1, 3 }, "on again: what moved meanwhile goes first")
 end)
 
+-- Level across zones, and the zone you're in first: both off by default.
+local LEVELS = { quests = {
+    QW.quest(1, "A", { level = 12, objs = kills(1) }),
+    QW.quest(2, "B", { level = 9, objs = kills(1) }),
+    QW.quest(3, "C", { zone = "Elwynn Forest", level = 5, objs = kills(1) }),
+    QW.quest(4, "D", { zone = "Elwynn Forest", level = 9, objs = kills(1) }),
+    QW.quest(5, "E", { level = 9, objs = kills(1) }) } }
+
+T.test("quests order: the level and zone-first picks leave the defaults alone", function()
+    local Tr = tracker(LEVELS)
+    T.eq(DaylightUI:Get("Quests", "sort"), "recent")
+    T.eq(DaylightUI:Get("Quests", "hereFirst"), false)
+    T.deq(order(Tr), { 1, 2, 5, 3, 4 }, "the game's order, the zone you're in first")
+end)
+
+T.test("quests order: level across zones orders the zones by their lowest quest, ties keep their place", function()
+    local Tr = tracker(LEVELS)
+    DaylightUI:Set("Quests", "sort", "levelAll")
+    stub.RunTimers()
+    T.deq(order(Tr), { 3, 4, 2, 5, 1 }, "Elwynn (5) over Westfall (9), each by level")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("quests order: level across zones with zone names off is one list by level", function()
+    local Tr = tracker(LEVELS)
+    DaylightUI:Set("Quests", "zoneNames", false)
+    DaylightUI:Set("Quests", "sort", "levelAll")
+    stub.RunTimers()
+    T.deq(order(Tr), { 3, 2, 5, 4, 1 }, "levels 5, 9, 9, 9, 12; the 9s keep the list's order")
+    stub.EnterCombat()
+    QW.state.quests[1].level = 1
+    stub.FireEvent("QUEST_LOG_UPDATE"); stub.RunTimers()
+    T.deq(order(Tr), { 3, 2, 5, 4, 1 }, "nothing re-sorts in a fight")
+    stub.LeaveCombat(); stub.RunTimers()
+    T.deq(order(Tr), { 1, 3, 2, 5, 4 })
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("quests order: the zone you're in stays on top over newer progress, and follows you", function()
+    local Tr = tracker(THREE)
+    DaylightUI:Set("Quests", "hereFirst", true)
+    stub.RunTimers()
+    QW.state.quests[3].objs = kills(2)
+    stub.FireEvent("QUEST_LOG_UPDATE"); stub.RunTimers()
+    T.deq(order(Tr), { 1, 2, 3 }, "Elwynn's progress doesn't rise over Westfall while you're in Westfall")
+    QW.state.quests[2].objs = kills(2)
+    stub.FireEvent("QUEST_LOG_UPDATE"); stub.RunTimers()
+    T.deq(order(Tr), { 2, 1, 3 }, "inside the zone, newest progress still goes first")
+    QW.state.zone = "Elwynn Forest"
+    stub.FireEvent("ZONE_CHANGED_NEW_AREA"); stub.RunTimers()
+    T.deq(order(Tr), { 3, 2, 1 }, "walking into Elwynn brings it up over Westfall's newer progress")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("quests order: zone first and level across zones together", function()
+    local Tr = tracker(LEVELS)
+    DaylightUI:Set("Quests", "zoneNames", false)
+    DaylightUI:Set("Quests", "sort", "levelAll")
+    DaylightUI:Set("Quests", "hereFirst", true)
+    stub.RunTimers()
+    T.deq(order(Tr), { 2, 5, 1, 3, 4 }, "Westfall's by level, then Elwynn's")
+    DaylightUI:Set("Quests", "zoneNames", true)
+    stub.RunTimers()
+    T.deq(order(Tr), { 2, 5, 1, 3, 4 }, "with zone names: Westfall's group first")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
 T.test("quests saved data: the old map marks' and quest givers' lists are cleared at login", function()
     tracker({ quests = { STEW } })
     local saved = DaylightUIDB
@@ -1414,6 +1547,36 @@ T.test("quests order: in combat a move that would shift an item quest waits for 
 end)
 
 local ITEM = { link = "|cffffffff|Hitem:5862::::::::|h[Seaforium]|h|r", icon = 1234, charges = 2 }
+
+T.test("quests fight fold: in a fight only the priority quest and item quests stay, all back after", function()
+    local Tr, ns = tracker({ quests = { QW.quest(1, "A", { objs = kills(1) }), QW.quest(2, "B", { objs = kills(1), item = ITEM }),
+                                        QW.quest(3, "C", { objs = kills(1) }), QW.quest(4, "D", { objs = kills(1) }) } })
+    DaylightUI:Set("Quests", "sort", "zone")
+    DaylightUI:Set("Quests", "fightFocus", true)
+    QW.state.focus = 3
+    stub.FireEvent("SUPER_TRACKING_CHANGED"); stub.RunTimers()
+    T.deq(order(Tr), { 1, 2, 3, 4 })
+    stub.secure = true
+    stub.EnterCombat()
+    T.deq(order(Tr), { 2, 3 }, "folds as the fight starts, the item quest moving up with its button")
+    T.eq(Tr.held, false)
+    QW.state.quests[1].objs = kills(2)
+    stub.FireEvent("QUEST_LOG_UPDATE"); stub.RunTimers()
+    T.deq(order(Tr), { 2, 3 }, "stays folded through the fight")
+    QW.state.focus = 4
+    stub.FireEvent("SUPER_TRACKING_CHANGED"); stub.RunTimers()
+    T.deq(order(Tr), { 2, 4 }, "a new priority quest mid-fight shows instead")
+    stub.LeaveCombat(); stub.RunTimers()
+    T.deq(order(Tr), { 1, 2, 3, 4 }, "unfolds after the fight")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("quests fight fold: off by default, the list stays whole in a fight", function()
+    local Tr = tracker({ quests = { QW.quest(1, "A"), QW.quest(2, "B") } })
+    QW.state.focus = 2
+    stub.EnterCombat(); stub.RunTimers()
+    T.deq(order(Tr), { 1, 2 })
+end)
 
 T.test("quests items: one secure button per quest with an item", function()
     local Tr, ns = tracker({ quests = { QW.quest(1, "A", { item = ITEM }), QW.quest(2, "B") } })
@@ -1931,7 +2094,10 @@ T.test("quests clicks: the tooltip lists objectives and the hint", function()
     f:GetScript("OnEnter")(f)
     local text = table.concat(GameTooltip.lines, "\n")
     T.truthy(text:find("Westfall Stew", 1, true))
-    T.truthy(text:find("Goretusk Snout | 3/6", 1, true))
+    local plain = text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    T.truthy(GameTooltip.lines[2]:find("|cff", 1, true), "the level in its difficulty color")
+    T.falsy(GameTooltip.lines[2]:find("·", 1, true), "the zone is not on the level's line")
+    T.truthy(plain:find("3/6 Goretusk Snout", 1, true), "the count follows the text on one line, so a long objective wraps instead of being cut")
     for _, h in ipairs(ns.Clicks.HINTS) do
         local found
         for _, l in ipairs(GameTooltip.lines) do if l:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "") == h then found = true end end
@@ -2016,6 +2182,61 @@ T.test("quests clicks: rowTipKind details puts the quest's story and every rewar
     T.eq(O.CountMatches(O.GetPage("Quests.tracker"), "quest tooltip detail"), 1, "options search finds the setting")
 end)
 
+T.test("quests clicks: the tooltip spaces its heading from the objectives and puts the reward under its heading", function()
+    local Tr = tracker({ quests = { STEW } })
+    local f = Tr.frames["quest:1"]
+    f:GetScript("OnEnter")(f)
+    local lines = GameTooltip.lines
+    local function at(pat) for i, l in ipairs(lines) do if l:find(pat, 1, true) then return i end end end
+    T.eq(lines[at("Stringy") - 1], " ", "a gap between the heading and the first objective")
+    local head = at("Rewards")
+    T.truthy(head and not lines[head]:find(" | ", 1, true), "the heading alone on its line")
+    T.truthy(lines[head + 1], "the reward under it")
+end)
+
+-- The Rich card wraps a row's long left side itself, so there an objective keeps its
+-- two sides and the count its progress color; written count first, the card read the
+-- tracker's tooltip as a game quest (accent counts, bars, the level line as a heading).
+T.test("quests clicks: with the Rich look an objective keeps its count on the right, in its progress color", function()
+    local Tr, ns = tracker({ quests = { STEW } })
+    local API = DaylightUI.API
+    local was = API.TooltipStyle
+    API.TooltipStyle = function() return "rich" end
+    local f = Tr.frames["quest:1"]
+    f:GetScript("OnEnter")(f)
+    API.TooltipStyle = was
+    local plain = table.concat(GameTooltip.lines, "\n"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    T.truthy(plain:find("Goretusk Snout | 3/6", 1, true), "name on the left, count on the right: " .. plain)
+    T.falsy(plain:find("3/6 Goretusk Snout", 1, true), "not written count first")
+end)
+
+T.test("quests clicks: a long achievement criterion is one wrapped line, count first", function()
+    local Tips = DaylightUI.Tips
+    local Tr, ns = tracker({ quests = { STEW } })
+    ns.Clicks.AchievementTip({ title = "Explorer", objs = { { kind = "count", text = "Honor mark of the Arathi Basin", have = 1, need = 3 } } })
+    local plain = table.concat(GameTooltip.lines, "\n"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    T.truthy(plain:find("1/3 Honor mark of the Arathi Basin", 1, true), plain)
+end)
+
+T.test("quests clicks: a dungeon or PvP quest's tooltip carries its tag after the level, in the tag's color", function()
+    local dungeon = QW.quest(3, "Deep Work", { tagID = 81, level = 28, zone = "Gnomeregan", objs = { { text = "Gnome part", have = 0, need = 2, kind = "count" } } })
+    local pvp = QW.quest(4, "Hold the Line", { tagID = 41 })
+    local plain = QW.quest(5, "Plain Job")
+    local Tr = tracker({ quests = { dungeon, pvp, plain } })
+    local function level(key)
+        local f = Tr.frames[key]
+        f:GetScript("OnEnter")(f)
+        for _, l in ipairs(GameTooltip.lines) do if l:find("Level", 1, true) then return l end end
+    end
+    local d = level("quest:3")
+    T.truthy(d:find(" · ", 1, true) and d:find("|cff%x%x%x%x%x%x[^|]+|r$"), "the tag's word in its color, after the level: " .. tostring(d))
+    T.truthy(level("quest:4"):find(" · ", 1, true), "PvP too")
+    T.falsy(level("quest:5"):find(" · ", 1, true), "no tag, nothing after the level")
+    DaylightUI:Set("Quests", "questTags", false)
+    T.falsy(level("quest:3"):find(" · ", 1, true), "the Quest tags switch turns it off here too")
+    DaylightUI:Set("Quests", "questTags", true)
+end)
+
 T.test("quests clicks: the tooltip's words are calm, a hint's click wears the accent; progress reads amber, done reads green", function()
     local done = QW.quest(2, "Done Deal", { objs = { { text = "6/6 Thing", have = 6, need = 6, done = true } } })
     local Tr, ns = tracker({ quests = { STEW, done } })
@@ -2030,17 +2251,26 @@ T.test("quests clicks: the tooltip's words are calm, a hint's click wears the ac
     end
     local Tips = DaylightUI.Tips
     local by = hover("quest:1")
-    local snout = by["Goretusk Snout"]
+    -- An objective is one wrapped line, its count in the progress color.
+    local function objective(key, name)
+        for t, c in pairs(by) do
+            local r, g, b = t:match("^|cff(%x%x)(%x%x)(%x%x)%d+/%d+|r " .. name)
+            if r then return c, { tonumber(r, 16) / 255, tonumber(g, 16) / 255, tonumber(b, 16) / 255 } end
+        end
+    end
+    local snout, count = objective(by, "Goretusk Snout")
+    T.truthy(snout, "the objective's line")
     T.rgb(snout.lc, Tips.TEXT, "the objective's words calm, so rows read apart")
-    T.truthy(snout.rc[1] > snout.rc[3] and snout.rc[2] > snout.rc[3], "3/6 reads amber")
-    T.truthy(snout.rc[1] > Tips.GOOD[1], "not green yet")
+    T.truthy(count[1] > count[3] and count[2] > count[3], "3/6 reads amber")
+    T.truthy(count[1] > Tips.GOOD[1] - 0.01, "not green yet")
     local key, what = ns.Clicks.HINTS[2]:match("^(.-:)(%s.*)$")
     local hint
     for t, c in pairs(by) do if t:find(key, 1, true) and t:find(what, 1, true) then hint = { t, c } end end
     T.truthy(hint and hint[1]:find("|c", 1, true), "a hint's click is colored apart")
     T.rgb(hint[2].lc, Tips.TEXT, "what it does: a calm label")
     by = hover("quest:2")
-    T.rgb(by["Thing"].rc, Tips.GOOD, "6/6 reads green")
+    local _, green = objective(by, "Thing")
+    T.truthy(math.abs(green[1] - Tips.GOOD[1]) < 0.01 and math.abs(green[2] - Tips.GOOD[2]) < 0.01, "6/6 reads green")
 end)
 
 T.test("quests clicks: an achievement opens its window; shift-click stops tracking it", function()
@@ -2101,6 +2331,29 @@ T.test("quests scroll: untracking at the bottom of the list: the rows under it s
     end
     T.eq(ns.Scroll.offset, Tr.contentHeight - 200, "at the new bottom")
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- A quest whose title has slid under the pinned header still shows its lines below
+-- it (cut at the header's edge), or a whole quest's height reads as an empty gap.
+T.test("quests scroll: a quest half under the pinned header keeps the half below it", function()
+    local Tr, ns = tracker({ quests = many(20) })
+    DaylightUI:Set("Quests", "maxHeight", 200)
+    stub.RunTimers()
+    local q = Tr.frames["quest:5"]
+    local y, h = ns.Animate.State(q).y, q:GetHeight()
+    T.truthy(h > 10, "a quest of some height: " .. tostring(h))
+    local inset = Tr.frames["section:quests"]:GetHeight()
+    ns.Scroll.To(y - inset + 4)   -- its top 4 px under the header
+    ns.Tracker.RefreshEdges()
+    T.eq(q:GetAlpha(), 1, "most of it is still in view")
+    local clip = q:GetParent()
+    T.truthy(clip ~= Tr.content and clip.__clips, "the rows sit in a clip, so nothing shows through the header")
+    T.truthy(Tr.frames["section:quests"]:GetParent() == Tr.content, "the header stays outside it")
+    local _, _, _, _, top = clip:GetPoint(1)
+    T.near(-top, ns.Scroll.offset + inset, 1e-6, "the clip starts at the header's bottom")
+    ns.Scroll.To(y + h - inset)   -- now wholly under the header
+    ns.Tracker.RefreshEdges()
+    T.eq(q:GetAlpha(), 0, "gone once nothing of it is left")
 end)
 
 T.test("quests scroll: past the height limit the view stops and the wheel scrolls", function()
@@ -2218,6 +2471,82 @@ T.test("quests controls: they show while the mouse is over the list", function()
     function Tr.view:IsMouseOver() return true end
     Tr.Hovered()
     T.eq(Tr.controls:IsShown(), true)
+end)
+
+T.test("quests controls: a title too long to sit beside the buttons fades while they show", function()
+    local Tr, ns, settle = tracker({ quests = { STEW } })
+    local h = Tr.frames["section:quests"]
+    function Tr.view:IsMouseOver() return true end
+    function h.label:GetStringWidth() return Tr.Width() - 20 end   -- a long word in a small tracker
+    T.falsy(Tr.TitleFits(h), "it would run under the buttons")
+    Tr.Hovered(); stub.RunOnUpdate(DaylightUI.Motion.Driver(), 1)
+    T.eq(h.label:GetAlpha(), 0, "the title makes way, as the count does")
+    function Tr.view:IsMouseOver() return false end
+    function Tr.controls:IsMouseOver() return false end
+    stub.Advance(Tr.CONTROL_LINGER + 1)
+    Tr.Hovered()
+    for _ = 1, 4 do stub.RunOnUpdate(DaylightUI.Motion.Driver(), 1); Tr.Hovered(); stub.RunOnUpdate(DaylightUI.Motion.Driver(), 1) end
+    T.eq(h.label:GetAlpha(), 1, "and comes back when they go")
+end)
+
+T.test("quests controls: a title that fits stays", function()
+    local Tr, ns, settle = tracker({ quests = { STEW } })
+    local h = Tr.frames["section:quests"]
+    function Tr.view:IsMouseOver() return true end
+    T.truthy(Tr.TitleFits(h))
+    Tr.Hovered(); settle()
+    T.eq(h.label:GetAlpha(), 1)
+end)
+
+T.test("quests tracker: a reused header shows its title, whatever its last use left", function()
+    local Tr, ns = tracker({ quests = { STEW } })
+    local h = Tr.frames["section:quests"]
+    h.labelGoal = 0
+    h.label:SetAlpha(0)
+    ns.Rows.Free(h)
+    local again = ns.Rows.Get("header", UIParent)
+    T.isnil(again.labelGoal)
+    T.eq(again.label:GetAlpha(), 1)
+end)
+
+T.test("quests filter row: off by default, the buttons stay and the header is as tall as ever", function()
+    local Tr, ns = tracker({ quests = { STEW } })
+    local h = Tr.frames["section:quests"]
+    T.isnil(h.block.filter)
+    T.isnil(h.filterWords)
+    function Tr.view:IsMouseOver() return true end
+    Tr.Hovered()
+    T.eq(Tr.controls:IsShown(), true)
+end)
+
+T.test("quests filter row: with the option on, words under the line and no buttons", function()
+    local Tr, ns, settle = tracker({ quests = { STEW } })
+    local before = Tr.frames["section:quests"].block.h
+    DaylightUI:Set("Quests", "filterRow", true); settle()
+    local h = Tr.frames["section:quests"]
+    T.eq(h.block.filter, "all")
+    T.eq(h.block.h, before + ns.Layout.FilterH({ sizes = DaylightUI:Get("Quests", "sizes") }), "one row taller, from the text size")
+    local all, zone = h.filterWords[1], h.filterWords[2]
+    T.truthy(all.tab:IsShown() and not all.link:IsShown(), "the one showing is lit (a tab)")
+    T.truthy(zone.link:IsShown() and not zone.tab:IsShown(), "the other is a link")
+    function Tr.view:IsMouseOver() return true end
+    Tr.Hovered()
+    T.eq(Tr.controls:IsShown(), false, "the hover buttons stay away")
+    zone.link:GetScript("OnClick")(zone.link); settle()
+    T.eq(DaylightUI:Get("Quests", "filter"), "zone")
+    h = Tr.frames["section:quests"]
+    T.eq(h.block.filter, "zone")
+    T.truthy(h.filterWords[2].tab:IsShown(), "This zone is the lit one now")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("quests filter row: the row follows the tracker's text size", function()
+    local Tr, ns, settle = tracker({ quests = { STEW } })
+    DaylightUI:Set("Quests", "filterRow", true); settle()
+    local small = Tr.frames["section:quests"].block.h
+    local sizes = DaylightUI:Get("Quests", "sizes")
+    DaylightUI:Set("Quests", "sizes", { header = sizes.header, title = sizes.title, objective = sizes.objective, zone = sizes.zone + 4 }); settle()
+    T.eq(Tr.frames["section:quests"].block.h, small + 4)
 end)
 
 T.test("quests controls: stay on the pinned header while the list scrolls", function()
@@ -3181,4 +3510,145 @@ T.test("review: off then on again mid-fade leaves the tracker showing", function
     T.truthy(DaylightUIQuestTracker:GetAlpha() > 0.5, "visible again: " .. tostring(DaylightUIQuestTracker:GetAlpha()))
     T.falsy(ns.Tracker.going, "not on its way out any more")
     _G.Questie = nil
+end)
+
+-- ---------------------------------------------------------------------
+-- The player's own zone order: drag a zone name, or pick an order from the
+-- Quests header's menu. It wins over every quest order's zone sorting.
+-- ---------------------------------------------------------------------
+
+local ZONES3 = { quests = {
+    QW.quest(1, "Westfall Stew", { zone = "Westfall", level = 12 }),
+    QW.quest(2, "The Night Watch", { zone = "Duskwood", level = 24 }),
+    QW.quest(3, "Blackrock Menace", { zone = "Redridge Mountains", level = 18 }),
+} }
+
+local function zoneNames(blocks)
+    local out = {}
+    for _, b in ipairs(blocks) do if b.kind == "zone" then out[#out + 1] = b.label end end
+    return out
+end
+
+T.test("zone order: the player's order wins over most recent, a zone not in it slots in after its log neighbor", function()
+    local recent = { [2] = 9 }   -- Duskwood progressed last: most recent would put it first
+    local b = lay(ZONES3, { sort = "recent", recent = recent, zoneOrder = { "Redridge Mountains", "Westfall" } })
+    T.deq(zoneNames(b), { "Redridge Mountains", "Westfall", "Duskwood" })
+    b = lay(ZONES3, { sort = "levelAll", zoneOrder = { "Duskwood", "Westfall", "Redridge Mountains" } })
+    T.deq(zoneNames(b), { "Duskwood", "Westfall", "Redridge Mountains" }, "level across zones too")
+end)
+
+-- Drags a zone name by dy screen pixels (up is positive, as the game counts).
+local function dragZone(Tr, ns, name, dy, settle)
+    local f = Tr.frames["zone:" .. name]
+    local s = f:GetEffectiveScale()
+    stub.cursorPos = { 0, 500 * s }
+    T.truthy(f:GetScript("OnDragStart"), "a zone name can be dragged")
+    f:GetScript("OnDragStart")(f, "LeftButton")
+    stub.cursorPos = { 0, (500 + dy) * s }
+    ns.Tracker.ZoneDragMove()
+    settle()
+    return f
+end
+
+T.test("zone order: a zone dragged to the top stays there for this character, open or folded, and the drop isn't a click", function()
+    local Tr, ns, settle = tracker(ZONES3)
+    T.deq(zoneNames(Tr.shown), { "Westfall", "Duskwood", "Redridge Mountains" })
+    local f = dragZone(Tr, ns, "Redridge Mountains", 400, settle)
+    T.deq(zoneNames(Tr.shown), { "Redridge Mountains", "Westfall", "Duskwood" }, "the list follows while dragging")
+    f:GetScript("OnDragStop")(f)
+    click(Tr, "zone:Redridge Mountains")
+    T.isnil(Tr.Folds()["zone:Redridge Mountains"], "letting go isn't a click")
+    settle()
+    T.deq(DaylightUI.DB.Character().questZoneOrder, { "Redridge Mountains", "Westfall", "Duskwood" }, "saved")
+    -- Progress in Duskwood under the default most recent order: the zone stays put.
+    Tr.Recent()[2] = 99
+    Tr.Queue(true); settle()
+    T.deq(zoneNames(Tr.shown), { "Redridge Mountains", "Westfall", "Duskwood" }, "the player's order wins")
+    -- A folded zone drags the same way.
+    stub.Advance(1)
+    click(Tr, "zone:Westfall"); settle()
+    T.truthy(Tr.Folds()["zone:Westfall"])
+    f = dragZone(Tr, ns, "Westfall", -400, settle)
+    f:GetScript("OnDragStop")(f); settle()
+    T.deq(zoneNames(Tr.shown), { "Redridge Mountains", "Duskwood", "Westfall" })
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("zone order: no dragging in a fight (item buttons can't follow)", function()
+    local Tr, ns, settle = tracker(ZONES3)
+    stub.EnterCombat()
+    local f = dragZone(Tr, ns, "Redridge Mountains", 400, settle)
+    f:GetScript("OnDragStop")(f); settle()
+    T.deq(zoneNames(Tr.shown), { "Westfall", "Duskwood", "Redridge Mountains" })
+    T.isnil(DaylightUI.DB.Character().questZoneOrder)
+    stub.LeaveCombat()
+end)
+
+T.test("zone order: a fight starting mid-drag drops the zone where it is", function()
+    local Tr, ns, settle = tracker(ZONES3)
+    local f = dragZone(Tr, ns, "Redridge Mountains", 400, settle)
+    stub.EnterCombat()
+    ns.Tracker.OnEvent("PLAYER_REGEN_DISABLED")
+    T.isnil(ns.Tracker.zoneDrag, "the drag ended")
+    T.deq(DaylightUI.DB.Character().questZoneOrder, { "Redridge Mountains", "Westfall", "Duskwood" })
+    stub.LeaveCombat()
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("zone order: the dragged zone and its quests follow the mouse on a lifted card, the rest dim", function()
+    local Tr, ns, settle = tracker(ZONES3)
+    local zf, qf = Tr.frames["zone:Redridge Mountains"], Tr.frames["quest:3"]
+    local zy, qy = ns.Animate.State(zf).y, ns.Animate.State(qf).y
+    -- 6 px up: not far enough to pass Duskwood, but the rows move with the mouse at once.
+    dragZone(Tr, ns, "Redridge Mountains", 6, settle)
+    T.near(ns.Animate.State(zf).y, zy - 6, 0.01, "the zone name follows the mouse")
+    T.near(ns.Animate.State(qf).y, qy - 6, 0.01, "its quests come along")
+    local card = Tr.dragCard
+    T.truthy(card and card:IsShown(), "a lifted card sits under the dragged zone")
+    for _ = 1, 30 do stub.RunOnUpdate(DaylightUI.Motion.Driver(), 1 / 30) end
+    T.truthy(card:GetAlpha() > 0.9, "the card is in: " .. tostring(card:GetAlpha()))
+    T.truthy(Tr.frames["zone:Westfall"]:GetAlpha() < 0.8, "the other zones dim")
+    T.truthy(zf:GetAlpha() > 0.99, "the dragged one doesn't")
+    T.truthy(zf:GetFrameLevel() > Tr.frames["zone:Westfall"]:GetFrameLevel(), "the dragged rows ride above the others")
+    zf:GetScript("OnDragStop")(zf)
+    settle()
+    for _ = 1, 30 do stub.RunOnUpdate(DaylightUI.Motion.Driver(), 1 / 30) end
+    T.near(ns.Animate.State(zf).y, zy, 0.01, "let go where it was: it settles back into its place")
+    T.near(ns.Animate.State(qf).y, qy, 0.01, "its quests too")
+    T.truthy(Tr.frames["zone:Westfall"]:GetAlpha() > 0.99, "the others are back")
+    T.truthy(card:GetAlpha() < 0.01, "the card is gone")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("zone order: passing other zones while dragging doesn't read the quest log again", function()
+    local Tr, ns, settle = tracker(ZONES3)
+    local reads, was = 0, ns.Data.Snapshot
+    ns.Data.Snapshot = function(...) reads = reads + 1; return was(...) end
+    local f = dragZone(Tr, ns, "Redridge Mountains", 400, settle)
+    ns.Data.Snapshot = was
+    T.deq(zoneNames(Tr.shown), { "Redridge Mountains", "Westfall", "Duskwood" }, "the list still follows")
+    T.eq(reads, 0, "no log reads mid-drag")
+    f:GetScript("OnDragStop")(f); settle()
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("zone order: right-click Quests sorts the zones A to Z, by level, or back to the log's order", function()
+    local Tr, ns, settle = tracker(ZONES3)
+    local got = {}
+    local W = DaylightUI.Widgets
+    local was = W.OpenMenu
+    W.OpenMenu = function(owner, keys, text, current, onPick) got.keys, got.text, got.pick = keys, text, onPick end
+    click(Tr, "section:quests", "RightButton")
+    W.OpenMenu = was
+    T.truthy(got.keys, "a menu opened")
+    T.isnil(Tr.Folds().quests, "a right-click no longer folds the list")
+    for _, k in ipairs(got.keys) do T.truthy(got.text[k], "words for " .. k) end
+    got.pick("zonesAZ"); settle()
+    T.deq(zoneNames(Tr.shown), { "Duskwood", "Redridge Mountains", "Westfall" })
+    got.pick("zonesLevel"); settle()
+    T.deq(zoneNames(Tr.shown), { "Westfall", "Redridge Mountains", "Duskwood" })
+    T.deq(DaylightUI.DB.Character().questZoneOrder, { "Westfall", "Redridge Mountains", "Duskwood" })
+    got.pick("zonesLog"); settle()
+    T.isnil(DaylightUI.DB.Character().questZoneOrder)
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)

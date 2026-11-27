@@ -23,7 +23,11 @@
 --   commodities = { [itemID] = true }   searched as commodities, the rest as items
 --   throttled = true                    IsThrottledMessageSystemReady() false until AHW.Throttle(false)
 --   neverCache = { [itemID] = true }    C_Item.RequestLoadItemDataByID never answers
+--   dropAsks = { [itemID] = n }         the first n RequestLoadItemDataByID of it are let fall, unanswered
+--                                       (guess: Auctionator asks every 0.4 s for items still loading)
 --   missing = { [itemID] = true }       C_Item.DoesItemExistByID false (a deleted item)
+--   staleRows = { [itemID] = true }     its replicate rows keep hasAllInfo false and no link after the
+--                                       item loads (guess: the list is a snapshot taken at the ask)
 --   page = 50                           search rows per page
 --   moreEvents = { "added", "updated" } what a RequestMore*SearchResults answer fires, in
 --                                       order: *_SEARCH_RESULTS_ADDED, *_UPDATED (guess: unknown
@@ -852,6 +856,10 @@ end
 -- ---------------------------------------------------------------------
 
 local function install()
+    -- The house's rows cost no time to read: a frame's slice (ns.Game.SLICE_MS)
+    -- ends on the row count alone, the same however busy the computer is. A
+    -- test of slow rows moves this clock itself.
+    _G.debugprofilestop = function() return 0 end
     -- The client's mail subjects for the house's letters (GlobalStrings).
     _G.AUCTION_EXPIRED_MAIL_SUBJECT = _G.AUCTION_EXPIRED_MAIL_SUBJECT or "Auction expired: %s"
     _G.AUCTION_SOLD_MAIL_SUBJECT = _G.AUCTION_SOLD_MAIL_SUBJECT or "Auction successful: %s"
@@ -903,7 +911,7 @@ local function install()
         local a = type(index) == "number" and st.replicate[index + 1]
         if not a then return end
         if st.replicateBlank and GetTime() < st.replicateAt + st.replicateBlank - EPS then return end
-        local known = cached(a.itemID)
+        local known = cached(a.itemID) and not st.staleRows[a.itemID]
         local owner = a.owner or "Seller"
         return known and nameOf(a.itemID) or nil, known and 134400 or nil, a.count or 0, a.quality or 1, true,
             a.level or 1, "", a.minBid or ((a.buyout or 0) > 0 and a.buyout or 1), 0, a.buyout or 0, a.bid or 0,
@@ -911,6 +919,7 @@ local function install()
     end)
     def("GetReplicateItemLink", function(index)
         local a = type(index) == "number" and S().replicate[index + 1]
+        if a and S().staleRows[a.itemID] then return nil end
         return a and linkOf(a) or nil
     end)
     def("GetReplicateItemTimeLeft", function(index)
@@ -1435,6 +1444,23 @@ local function install()
         local id = idOf(v)
         return id ~= nil and id > 0 and not S().missing[id]
     end
+    -- What the client knows of an item without the server (TSM calls these its
+    -- "preloaded" fields): answered for any item on an auction, cached or not.
+    -- classID: the auction's, else 4 (armor) for a suffixed one, else 0.
+    item.GetItemInfoInstant = function(v)
+        local id = idOf(v)
+        if not id or S().missing[id] then return nil end
+        local function from(a)
+            local class = a.classID or (a.suffix and 4) or 0
+            return id, "", "", "", a.icon or ("tex:" .. id), class, a.subClassID or 0
+        end
+        for _, a in ipairs(S().auctions) do
+            if a.itemID == id then return from(a) end
+        end
+        local k = S().known[id]
+        if k then return from(k) end
+        return nil
+    end
     item.IsItemDataCachedByID = function(v)
         record("IsItemDataCachedByID", v)
         local id = idOf(v)
@@ -1472,6 +1498,12 @@ local function install()
             later(S().itemDelay, function() fire("ITEM_DATA_LOAD_RESULT", id, false) end)
         elseif not cached(id) then
             if S().neverCache[id] or S().loading[id] then return end
+            -- an ask the client lets fall (dropAsks): only asking again loads it
+            local drop = S().dropAsks[id]
+            if drop and drop > 0 then
+                S().dropAsks[id] = drop - 1
+                return
+            end
             S().loading[id] = true
             -- a cold cache (itemSpacing): one load after another, not side by side
             local st, at = S(), GetTime() + S().itemDelay
@@ -1604,7 +1636,7 @@ function AHW.world(spec)
             replicateLate = spec.replicateLate, replicateEarly = spec.replicateEarly, replicateBlank = spec.replicateBlank,
             moreEvents = copy(spec.moreEvents or { "added", "updated" }),
             auctions = {}, commodities = copy(spec.commodities or {}), neverCache = copy(spec.neverCache or {}),
-            missing = copy(spec.missing or {}), uncached = {}, loading = {},
+            dropAsks = copy(spec.dropAsks or {}), missing = copy(spec.missing or {}), staleRows = copy(spec.staleRows or {}), uncached = {}, loading = {},
             replicate = {}, commodity = {}, items = {}, searches = {}, browse = nil, bids = {},
             quoteBump = spec.quoteBump or 0, quoteFails = spec.quoteFails == true,
             quoteSeconds = spec.quoteSeconds or 300,

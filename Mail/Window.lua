@@ -115,6 +115,7 @@ function Mail.Open()
     place(f)
     Mail.ShowTab("inbox")
     Win.Open(f)
+    Win.KeysOn(f, true)
     if Mail.follow then Win.Followers.WriteWidth(Mail.follow) end
 end
 
@@ -127,6 +128,7 @@ local function shut(f)
         owner = owner:GetParent()
     end
     if DUI.Widgets.CloseMenu then DUI.Widgets.CloseMenu() end
+    Win.KeysOn(f, false)
     if Win.IsOpen(f) then Win.Close(f) end
 end
 
@@ -259,7 +261,7 @@ end
 function Mail.Build(mod)
     ns.module = mod
     if Mail.frame then return Mail.frame end
-    local f = Win.New({ name = Mail.NAME, back = "Mailbox", w = Mail.W, h = Mail.H, portrait = true })
+    local f = Win.New({ name = Mail.NAME, escape = false, back = "Mailbox", w = Mail.W, h = Mail.H, portrait = true })
     Mail.frame = f
     f.onClose = Mail.Close
     Mail.spot = Win.Spot(f, function() return ns.module and ns.module.db end, place)
@@ -286,6 +288,7 @@ function Mail.Build(mod)
         { key = "Y", label = CONTEXT_ACTION_LABEL_OPTIONS or L["Options"], run = function(b) ns.Inbox.Options(b or f) end,
           when = function() return picked() ~= nil end },
     }
+    Win.Keys(f, function(key) return ns.Inbox.OnKey(key) end)
     Win.Drag(f, { save = Mail.SaveSpot, reset = Mail.ResetSpot })
     Win.WheelScale(f, function() return ns.Setting("scale") end, function(v) DUI:Set("Mailbox", "scale", v) end)
     Mail.sizer = Win.Resizable(f, { db = function() return ns.module and ns.module.db end,

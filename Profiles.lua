@@ -7,8 +7,9 @@
 -- A profile holds the general settings, every module's settings, frame
 -- positions from unlock mode, and has its own Edit Mode layout (EditMode.lua).
 -- When shared it leaves out what's learned as you play (the buff bar's history
--- and spell names) and window positions tied to one screen (bags, bank,
--- spellbook, inspect window, world map).
+-- and spell names) and window positions tied to one screen (spellbook, inspect
+-- window, world map). The bag, bank and alts windows' spots travel with the
+-- frame positions (WINDOW_SPOTS).
 --
 -- As text it's "!DUI1_" followed by the profile packed by the game itself
 -- (CBOR, compressed, then Base64 via C_EncodingUtil), so reading one back never
@@ -35,6 +36,38 @@ Profiles.SKIP = {
     Inspect = { spot = true },
     Skins = { mapSpot = true, windowSpots = true },
 }
+-- Window spots a module keeps as its own settings ({ x, y, at }: point `at`
+-- of the window, from the screen's bottom left) that a shared profile carries
+-- with the frame positions instead, under the window's unlock mode key. There
+-- they follow the "Frame positions" switch and get fitted to another screen;
+-- an import puts them back into the module's settings.
+Profiles.WINDOW_SPOTS = {
+    Bags = { position = "bags.bag", ["bank.position"] = "bags.bank", ["viewer.position"] = "bags.viewer" },
+}
+
+local function finite(v) return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge end
+
+-- A module's window spot as a frame position: its center and the point it
+-- hangs from, both from the screen's middle.
+local function spotToShared(key, v)
+    if type(v) ~= "table" or not (finite(v[1]) and finite(v[2])) then return nil end
+    local M = DUI.Movers
+    local at = M.ANCHOR_SIGN[v.at] and v.at or "TOPLEFT"
+    local ax, ay = v[1] - UIParent:GetWidth() / 2, v[2] - UIParent:GetHeight() / 2
+    local w, h = M.SizeOf(key)
+    local sg = M.ANCHOR_SIGN[at]
+    return { ax - sg[1] * (w or 0) / 2, ay - sg[2] * (h or 0) / 2, at = at, ax = ax, ay = ay }
+end
+
+-- The other way, for the module's settings.
+local function spotFromShared(v)
+    if type(v) ~= "table" then return nil end
+    local at = DUI.Movers.ANCHOR_SIGN[v.at] and v.at or "TOPLEFT"
+    local ax, ay = v.ax, v.ay
+    if not (finite(ax) and finite(ay)) then ax, ay = v[1], v[2] end
+    if not (finite(ax) and finite(ay)) then return nil end
+    return { ax + UIParent:GetWidth() / 2, ay + UIParent:GetHeight() / 2, at = at }
+end
 
 local function copy(v)
     if type(v) ~= "table" then return v end
@@ -66,6 +99,13 @@ function Profiles.Snapshot(name)
             local m = DUI:GetModule(mod)
             if m and m.defaults then DB.StripDefaults(c, m.defaults) end
             p.modules[mod] = c
+        end
+    end
+    for mod, paths in pairs(Profiles.WINDOW_SPOTS) do
+        local t = src.modules[mod]
+        for path, key in pairs(paths) do
+            local v = type(t) == "table" and spotToShared(key, DB.GetPath(t, path))
+            if v then p.positions[key] = v end
         end
     end
     p.layout = EditMode.Export(name) or src.pendingLayout
@@ -673,6 +713,17 @@ function Profiles.Build(shared, from, keep)
                 for path in pairs(paths) do DB.SetPath(p.modules[mod], path, copy(DB.GetPath(from, path))) end
             end
         end
+        -- Window spots that came with the frame positions go back where the module reads them.
+        for mod, paths in pairs(Profiles.WINDOW_SPOTS) do
+            for path, key in pairs(paths) do
+                local v = spotFromShared(p.positions[key])
+                p.positions[key] = nil
+                if v then
+                    if type(p.modules[mod]) ~= "table" then p.modules[mod] = {} end
+                    DB.SetPath(p.modules[mod], path, v)
+                end
+            end
+        end
     else
         local src = from and DB.Fill(data()[from]) or current
         p = { general = copy(src.general), modules = copy(src.modules), positions = copy(src.positions),
@@ -688,6 +739,8 @@ function Profiles.Build(shared, from, keep)
     p.backs1 = true
     p.tagLetters1 = true   -- a new profile starts on the player's own letters (a copy keeps the pick it copied)
     p.tipStyle1 = true     -- and in Rich tooltips, the default
+    p.procsOff1 = true     -- and with Proc Alerts on, the default
+    p.plateLow1 = true     -- and with nameplates at today's height
     -- A shared or blank profile picks up this client's font now, like a brand
     -- new profile does (DB.lua). A copy keeps the pick of the one it copies.
     if shared and DB.NonLatinClient() and p.general.localFont == nil then p.general.localFont = true end
@@ -742,10 +795,14 @@ function Profiles.Rename(old, new)
     if not new then return false, why end
     if new == old then return true end
     local p = data()[old]
-    -- Its layout is renamed too. If the game won't rename it now, a copy is kept
-    -- to create the new one from.
+    -- Its layout is renamed too. If the game won't rename it now, the old name
+    -- is kept so the layout is taken over the next time it's put in place
+    -- (EditMode.Install), plus a copy in case it's gone by then.
     local ok = EditMode.RenameLayout(old, new)
-    if not ok and not p.pendingLayout then p.pendingLayout = EditMode.Export(old) end
+    if not ok then
+        if not p.pendingLayout then p.pendingLayout = EditMode.Export(old) end
+        if EditMode.Exists(old) and not p.layoutFrom then p.layoutFrom = old end
+    end
     data()[new], data()[old] = p, nil
     reassign(old, new)
     if DB.activeName == old then DB.activeName = new end
@@ -852,6 +909,7 @@ Profiles.PRESETS = {
     ["Immersive Preset"] = {
         ActionBars = {
             microMenuFade = { mode = "always", alpha = 0.2, delay = 2 },
+            padBarsFade = { mode = "ooc", alpha = 0.2, delay = 2 },
             bars = {
                 main = { fade = { mode = "ooc", alpha = 0.2, delay = 2 } },
                 bar2 = { fade = { mode = "ooc", alpha = 0.2, delay = 2 } },
@@ -2104,5 +2162,5 @@ local profilesPage = DUI.Options.RegisterPage({
 PAGE_GROUPS = profilesPage.groups
 DUI.On("PacksChanged", function() profilesPage.groups = profileGroups(PAGE_GROUPS) end)
 
-DUI.RegisterCommand("export", function() Profiles.ShowExport() end, L["/dui export - the profile in use as text to share"])
-DUI.RegisterCommand("import", function() Profiles.ShowImport() end, L["/dui import - add a shared DaylightUI profile"])
+DUI.RegisterCommand("export", function() Profiles.ShowExport() end, function() return L["/dui export - the profile in use as text to share"] end)
+DUI.RegisterCommand("import", function() Profiles.ShowImport() end, function() return L["/dui import - add a shared DaylightUI profile"] end)

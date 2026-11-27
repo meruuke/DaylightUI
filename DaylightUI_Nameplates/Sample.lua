@@ -143,6 +143,7 @@ local DEBUFF, CC, BUFF, MYBUFF = spotKeys("debuff"), spotKeys("cc"), spotKeys("b
 local DEFENSIVE = spotKeys("defensive")
 local SKULL, PERCENT, LEVEL = spotKeys("dotSkull"), spotKeys("percent", true), spotKeys("level", true)
 local THREATPCT = spotKeys("threatPct")
+local MOBTARGET = spotKeys("mobTarget")
 local function nameStill(p) return Plate.NameOnly(p, Plate.Cfg(p)) end
 local NAME_MOVE = { spot = NAME("Pos"), x = NAME("X"), y = NAME("Y"), still = nameStill }
 -- The cast bar's own dot: its center where it sits with no nudge.
@@ -169,7 +170,7 @@ Sample.PARTS = {
                "percentPos", "percentX", "percentY", "friendly.percentPos", "friendly.percentX", "friendly.percentY" },
       move = { spot = PERCENT("Pos"), x = PERCENT("X"), y = PERCENT("Y") } },
     { label = "Level", at = at("level"),
-      keys = { "level", "levelColor", "levelCustom", "levelSize", "media.levelFont", "friendly.level", "levelPos", "levelX", "levelY",
+      keys = { "level", "levelColor", "levelCustom", "levelSize", "media.levelFont", "friendly.level", "friendly.levelColor", "friendly.levelCustom","levelPos", "levelX", "levelY",
                "friendly.levelPos", "friendly.levelX", "friendly.levelY" },
       move = { spot = LEVEL("Pos"), x = LEVEL("X"), y = LEVEL("Y") },
       size = { s = { "levelSize" } } },
@@ -178,6 +179,11 @@ Sample.PARTS = {
                "threatPctPos", "threatPctX", "threatPctY" },
       move = { spot = THREATPCT("Pos"), x = THREATPCT("X"), y = THREATPCT("Y") },
       size = { s = { "threatPctSize" } } },
+    { label = "Enemy's target", at = at("mobTarget"),
+      keys = { "mobTarget", "mobTargetColor", "mobTargetCustom", "mobTargetSize", "media.mobTargetFont",
+               "mobTargetPos", "mobTargetX", "mobTargetY" },
+      move = { spot = MOBTARGET("Pos"), x = MOBTARGET("X"), y = MOBTARGET("Y") },
+      size = { s = { "mobTargetSize" } } },
     { label = "Name", at = at("name"),
       keys = { "nameSize", "nameColor", "factionIcon", "media.nameFont", "lastNames.nameplates", "namePos", "nameX", "nameY",
                "friendly.nameSize", "friendly.nameColor", "friendly.namePlayer", "friendly.nameNpc", "friendly.nameOther", "friendly.partyName", "friendly.partyCustom", "friendly.partyMark", "friendly.namePos", "friendly.nameX", "friendly.nameY" },
@@ -571,16 +577,18 @@ local function refresh(s, width, maxH)
     DUI.Dots.PaintSample(tint and p.dotVeil or nil, skull and p.dotSkull or nil, 100, u.dots or 0, true)
     if not tint then p.dotVeil:Hide() end
     if not skull then p.dotSkull:Hide() end
-    if exec and p.exec.hotTex then
-        local tex, to = p.exec.hotTex, pct / 100 <= exec and 1 or 0
-        if glide and DUI.Motion.On() then
-            DUI.Motion.Tween(tex, tex:GetAlpha(), to, DUI.Motion.FAST, function(v) tex:SetAlpha(v) end)
-        else
-            tex:SetAlpha(to)
+    if exec and p.exec.lights then
+        local to = pct / 100 <= exec and 1 or 0
+        for _, tex in ipairs(p.exec.lights) do
+            if glide and DUI.Motion.On() then
+                DUI.Motion.Tween(tex, tex:GetAlpha(), to, DUI.Motion.FAST, function(v) tex:SetAlpha(v) end)
+            else
+                tex:SetAlpha(to)
+            end
         end
     end
     if p.percent:IsShown() then DUI.Health.WriteSample(p.percent, pc.healthFormat or "percent", pct, value, pc.percentSign ~= false) end
-    if p.level:IsShown() then Plate.PaintLevel(p, u.level, u.classification) end
+    if p.level:IsShown() then Plate.PaintLevel(p, u.level, u.classification, nil, u) end
     Plate.PaintDragon(p, u.classification)
 
     -- Threat shows on its own page, in the state the chips picked.
@@ -597,6 +605,12 @@ local function refresh(s, width, maxH)
         Plate.PaintThreatPct(p.threatPct, c.threatPctColor or "threat", view)
         p.threatPct:SetAlpha(1)
         p.threatPct:Show()
+    end
+    -- The enemy's target: you, as when it's on you.
+    if p.mobTargetOn then
+        p.mobTarget:SetText(DUI.UnitName("player", "nameplates") or "")
+        Plate.PaintMobTarget(p.mobTarget, "player")
+        p.mobTarget:Show()
     end
     p.hover:Hide()
     paintNames(p, pc, u)

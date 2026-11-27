@@ -323,7 +323,14 @@ T.test("rich tooltip: a player's card, banner first", function()
     T.eq(#head.tags, 2)
     T.eq(stub.Text(head.tags[1].text), "MAGE", "spec unknown: the class")
     T.eq(stub.Text(head.right), "60", "the level on the right, as on a creature's card")
-    T.rgb({ head.right:GetTextColor() }, { DaylightUI.Style.ClassTextColor("MAGE") }, "the level in their class color")
+    T.rgb({ head.right:GetTextColor() }, DaylightUI.Style.INK.WARN, "the level by how hard they are for you")
+    -- When the game can't say how hard: their class color.
+    local real = DaylightUI.LevelColor
+    DaylightUI.LevelColor = function() return nil end
+    local text, ink = stub.tooltip.RichWorld.Level("mouseover")
+    DaylightUI.LevelColor = real
+    T.eq(text, "60")
+    T.rgb(ink, { DaylightUI.Style.ClassTextColor("MAGE") }, "no difficulty: the class color")
     T.eq(stub.Text(head.tags[2].text), "NIGHT ELF")
     T.truthy(p.washColor, "the banner's class light")
     local rows = {}
@@ -749,7 +756,7 @@ end
 -- The game filling a tooltip with an item: its lines (each { left, right,
 -- color } or text), its data's own lines (types: line types by index), the
 -- post-calls, then Show.
-local function fillItem(tip, link, list, after, types, guid)
+local function fillItem(tip, link, list, after, types, guid, dataLines)
     tip:SetOwner(UIParent, "ANCHOR_NONE")
     tip.__link = link
     local own = {}
@@ -760,9 +767,11 @@ local function fillItem(tip, link, list, after, types, guid)
         else
             tip:AddLine(t)
         end
-        own[i] = { type = types and types[i] or nil }
+        -- The game's own sell price line is always a SellPrice data line (11).
+        local sell = type(t) == "string" and t:sub(1, 11) == "Sell Price:" and 11 or nil
+        own[i] = { type = types and types[i] or sell }
     end
-    local data = { type = Enum.TooltipDataType.Item, hyperlink = link, lines = own, guid = guid }
+    local data = { type = Enum.TooltipDataType.Item, hyperlink = link, lines = dataLines or own, guid = guid }
     for _, fn in ipairs(post.ALL or {}) do fn(tip, data) end
     for _, fn in ipairs(post[data.type] or {}) do fn(tip, data) end
     if after then after(tip) end
@@ -1218,6 +1227,68 @@ T.test("rich tooltip: a sell price line another addon rewrote keeps its coins", 
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
+-- A player's report with TSM: its "Vendor Buy Price" and "Vendor Sell Price"
+-- rows start with the word the card used to find the game's sell price, so
+-- both went missing from TSM's block and TSM's sell price, in its own
+-- lettered text, took the game's coins' place at the foot.
+T.test("rich tooltip: TSM's vendor price rows stay TSM's, the foot keeps the game's coins", function()
+    local _, Panel = login("rich")
+    items()
+    local W = DaylightUI.Widgets
+    local list = { "Coal", "Crafting Reagent", "Sell Price: 2|A:coin-silver:0:0|a 50|A:coin-copper:0:0|a" }
+    fillItem(GameTooltip, "cloth", list, function(t)
+        t:AddLine("TSM General Info", 1, 0.82, 0)
+        t:AddDoubleLine("  Vendor Buy Price", "5|cffc7c7cfs|r 00|cffeda55fc|r")
+        t:AddDoubleLine("  Vendor Sell Price", "1|cffc7c7cfs|r 25|cffeda55fc|r")
+        t:AddDoubleLine("TSM AuctionDB", "194 auctions", 1, 0.82, 0)
+        t:AddDoubleLine("  Min Buyout", "4|cffc7c7cfs|r 98|cffeda55fc|r")
+    end, { [3] = 11 })
+    local p = Panel.Get(GameTooltip)
+    local rows = kinds(p, "row")
+    local byLabel = {}
+    -- TSM indents its rows; the card keeps that.
+    for _, r in ipairs(rows) do byLabel[(stub.Text(r.label):gsub("^%s+", ""))] = r end
+    T.truthy(byLabel["Vendor Buy Price"], "TSM's buy price row is on the card")
+    T.truthy(byLabel["Vendor Sell Price"], "TSM's sell price row is on the card")
+    T.eq(stub.Text(byLabel["Vendor Sell Price"].value), W.Money(125), "in coins, under TSM's heading")
+    local foot = rows[#rows]
+    T.eq(stub.Text(foot.label), "Vendor")
+    T.eq(stub.Text(foot.value), W.Money(250), "the game's own sell price at the foot, in coins")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- A quest reward's price is added by Daylight UI (the client's data has no
+-- sell price line then): it still goes to the foot, and an addon's row
+-- starting with the same word stays with that addon.
+T.test("rich tooltip: a quest reward's added price goes to the foot, not an addon's Vendor row", function()
+    local _, Panel = login("rich")
+    items()
+    local W = DaylightUI.Widgets
+    local was = { C_Item.GetItemInfo, _G.GetQuestLogChoiceInfo }
+    C_Item.GetItemInfo = function(link, ...)
+        if link == "mahi" then return link, link, 1, 10, 1, "", "", 20, "", 1, 175 end
+        return was[1](link, ...)
+    end
+    _G.GetQuestLogChoiceInfo = function() return "Mahi Kebab", 1, 1, 1, true, 9001 end
+    GameTooltip.infoList = { { getterName = "GetQuestLogItem", getterArgs = { "choice", 1, 99 } } }
+    fillItem(GameTooltip, "mahi", { "Mahi Kebab", "Quest Item" }, function(t)
+        t:AddDoubleLine("Vendor Sell Price", "9|cffc7c7cfs|r")
+    end)
+    GameTooltip.infoList = nil
+    C_Item.GetItemInfo, _G.GetQuestLogChoiceInfo = was[1], was[2]
+    T.eq(GameTooltipTextLeft3:GetText(), "Vendor: " .. W.Money(175), "the price Daylight UI added")
+    local rows = kinds(Panel.Get(GameTooltip), "row")
+    local foot = rows[#rows]
+    T.eq(stub.Text(foot.label), "Vendor")
+    T.eq(stub.Text(foot.value), W.Money(175), "the added price at the foot")
+    local seen = false
+    for _, r in ipairs(rows) do
+        if stub.Text(r.label) == "Vendor Sell Price" then seen = true end
+    end
+    T.truthy(seen, "the addon's row on the card")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
 -- Seen in game: so many rules the card wasted space. A rule only between
 -- the card's parts: its numbers, what it says in words, its foot.
 T.test("rich tooltip: rules only between the card's big parts", function()
@@ -1292,6 +1363,88 @@ T.test("rich tooltip: the card is its own size at once, pinned where the tooltip
     T.eq(p:GetWidth(), p.wantW, "its own width")
     T.eq(p:GetHeight(), p.wantH, "and height, whatever the tooltip's size now")
     tip.SetPadding = orig
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- Seen by a player: with an item and its compares up, the compares jumped
+-- sideways five times a second. A bag slot refills its tooltip every 0.2 s
+-- (ContainerFrameItemButtonMixin:OnUpdate) starting with SetOwner, which hides
+-- a shown tooltip, and the game's OnHide and OnShow clear the padding
+-- (GameTooltip_CalculatePadding, ClearPadding). Modeled here, a guess that
+-- fits the video: the client takes a new padding when it lays the frame out,
+-- so until then the tooltip reads back its old size. The card measured
+-- nothing to fix, the cleared padding won, and for one frame the tooltip was
+-- its bare lines' width with the compares hanging off its moved edge.
+T.test("rich tooltip: a refill that hides and shows the tooltip keeps its size, so its compares stay put", function()
+    local _, Panel = login("rich")
+    items()
+    local layouts = {}
+    local function lagging(tip)
+        local set, pending = tip.SetPadding, nil
+        tip.SetPadding = function(self, r, b, l, t) pending = { r, b, l or 0, t or 0 } end
+        local get = tip.GetPadding
+        tip.GetPadding = function(self)
+            if pending then return unpack(pending) end
+            return get(self)
+        end
+        layouts[#layouts + 1] = function()
+            if pending then set(tip, unpack(pending)) end
+            pending = nil
+        end
+    end
+    local function layout() for _, f in ipairs(layouts) do f() end end
+    local tip, shop = GameTooltip, ShoppingTooltip1
+    lagging(tip)
+    lagging(shop)
+    local function refresh(first)
+        if not first then
+            -- SetOwner on the shown tooltip: it hides, and its compares with it.
+            tip:Hide()
+            shop:Hide()
+        end
+        fillItem(tip, "greaves", GREAVES)
+        compare(shop, CHANGES)
+        update()
+        layout()
+    end
+    refresh(true)
+    stub.Advance(0.02)
+    update()
+    layout()
+    local function size(t) local p = Panel.Get(t); return p.wantW * p:GetScale() end
+    T.near(tip:GetWidth(), size(tip), 0.5, "first show: the tooltip is the card's width")
+    T.near(shop:GetWidth(), size(shop), 0.5, "and the compare's")
+    for i = 1, 3 do
+        stub.Advance(0.2)
+        refresh()
+        T.near(tip:GetWidth(), size(tip), 0.5, "refill " .. i .. ": the tooltip keeps the card's width")
+        T.near(shop:GetWidth(), size(shop), 0.5, "refill " .. i .. ": the compare keeps it too")
+    end
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- A player switched equipment sets and the compares still showed the old
+-- set's items. The game picks what to compare (TooltipComparisonManager);
+-- the card is read from the compare tooltip's own lines on every fill, so a
+-- refill with the newly worn item shows that item, with nothing kept.
+T.test("rich tooltip: after an equipment set switch the compare card shows what is worn now", function()
+    local _, Panel = login("rich")
+    items()
+    fillItem(GameTooltip, "greaves", GREAVES)
+    compare(ShoppingTooltip1, CHANGES)
+    update()
+    local p = Panel.Get(ShoppingTooltip1)
+    T.eq(stub.Text(kinds(p, "header")[1].title), "Tarnished Legplates", "worn before the switch")
+    -- The set switched; the hovered item's 0.2 s refill compares the new one.
+    stub.Advance(0.2)
+    fillItem(GameTooltip, "greaves", GREAVES)
+    local shop = ShoppingTooltip1
+    shop:SetOwner(GameTooltip, "ANCHOR_NONE")
+    shop.CompareHeader:Show()
+    shop.CompareHeader.Label:SetText("Equipped")
+    fillItem(shop, "sword", { { "Runed Blade", nil, { 0, 0.439, 0.867 } }, { "Legs", "Plate" }, "512 Armor" })
+    update()
+    T.eq(stub.Text(kinds(p, "header")[1].title), "Runed Blade", "the newly worn item")
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
@@ -2002,7 +2155,17 @@ T.test("rich tooltip: a mob's card, as the board lays it out", function()
     T.eq(head.icon.art.__portraitUnit, "mouseover", "its face as the icon")
     T.truthy(head.icon.art.__portraitSquare, "square: the card cuts the corner")
     T.eq(stub.Text(head.right), "23", "the level on the right")
-    T.rgb({ head.right:GetTextColor() }, { DaylightUI.Style.ReactionColor(2) }, "the level in its reaction's color")
+    T.rgb({ head.right:GetTextColor() }, DaylightUI.Style.INK.WARN, "the level by how hard it is for you, not its reaction")
+    -- Seen in game: a gray level 12 mob's card showed its level hostile red,
+    -- while its plate showed it gray.
+    stub.units.mouseover.difficulty = 0
+    p = Panel.Get(hoverBoar())
+    T.rgb({ p.items[1].right:GetTextColor() }, DaylightUI.Style.INK.OFF, "a trivial mob's level stays gray")
+    local real = DaylightUI.LevelColor
+    DaylightUI.LevelColor = function() return nil end
+    local _, ink = stub.tooltip.RichWorld.Level("mouseover")
+    DaylightUI.LevelColor = real
+    T.rgb(ink, { DaylightUI.Style.ReactionColor(2) }, "no difficulty and not a player: its reaction")
     T.eq(tagWords(head), "HOSTILE,BEAST,SKINNABLE")
     T.falsy(head.icon and head.icon.edge:IsShown(), "a plain mob's face has no edge")
     T.rgb({ head.tags[1].text:GetTextColor() }, { DaylightUI.Style.ReactionColor(2) }, "hostile in its color")
@@ -2238,6 +2401,29 @@ T.test("rich tooltip: an item's effects sit a little apart from its stats", func
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
+T.test("rich tooltip: food reads in a few words on its card, under the short stats switch", function()
+    local _, Panel = login("rich")
+    items()
+    local FOOD = "Use: Restores 530 health over 24 sec. Must remain seated while eating. If you spend at least 10 seconds eating you will become well fed and gain 5 Stamina and 5% increased experience from kills for 15 min."
+    local function said()
+        local p, out = Panel.Get(GameTooltip), {}
+        for _, t in ipairs(kinds(p, "text")) do
+            out[#out + 1] = (stub.Text(t.fs):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""))
+        end
+        return out
+    end
+    fillItem(GameTooltip, "cloth", { "Smoked Bear Meat", { FOOD, nil, GREEN } })
+    local out = said()
+    T.eq(out[1], "Use: 530 health over 24 sec")
+    T.eq(out[2], "Well Fed: +5 Stamina, +5% XP (15 min)")
+    DaylightUI:Set("Tooltip", "greenStats", false)
+    stub.RunTimers()
+    GameTooltip:Hide()
+    fillItem(GameTooltip, "cloth", { "Smoked Bear Meat", { FOOD, nil, GREEN } })
+    T.eq(said()[1], FOOD, "off: the game's sentence")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
 -- Binding and Unique are tags under the name. Long ones go on a second row
 -- rather than past the card's edge.
 T.test("rich tooltip: an item's binding and Unique tags wrap onto a second row", function()
@@ -2414,6 +2600,27 @@ T.test("rich tooltip: a long item name wraps instead of being cut", function()
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
+-- Seen in game: "Green Hills of Stranglethorn - Pag..." on a narrow card. Two
+-- lines weren't enough for its words, so the second one ended in "...".
+T.test("rich tooltip: a name that needs three lines gets three", function()
+    local _, Panel = login("rich")
+    items()
+    local name = "Green Hills of Stranglethorn Valley Collected Works - Page 6"
+    fillItem(GameTooltip, "greaves", { { name, nil, EPIC }, "742 Armor" })
+    local title = Panel.Get(GameTooltip).items[1].title
+    -- Wrap it word by word at the title's width, as the client does.
+    local room, lines, row = title:GetWidth(), 1, ""
+    for word in name:gmatch("%S+") do
+        local try = row == "" and word or (row .. " " .. word)
+        title:SetText(try)
+        if row ~= "" and title:GetStringWidth() > room then lines, row = lines + 1, word else row = try end
+    end
+    title:SetText(name)
+    T.truthy(lines == 3, "the name needs three lines here: " .. lines)
+    T.eq(title:GetMaxLines(), 3, "all of them")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
 -- Seen in game: an Equip sentence's wrapped lines ran into each other.
 T.test("rich tooltip: a wrapped sentence on the card has room between its lines", function()
     local _, Panel = login("rich")
@@ -2478,6 +2685,65 @@ T.test("rich tooltip: a row's value is never squeezed: it keeps its own width at
     local inner = p.wantW - 2 * stub.tooltip.RichPanel.PAD_X
     T.truthy(long.label:GetWidth() > 0 and long.label:GetWidth() <= inner - long.value:GetStringWidth() - 16,
         "a label too long is shortened, before the value")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- Seen in game on a quest's tooltip: an objective with a long name was cut ("Marca de
+-- honor de la Cuenc...  0 / 3"). It wraps onto another line, the count staying at the edge.
+T.test("rich tooltip: a quest objective's long name wraps instead of being cut", function()
+    local _, Panel = login("rich")
+    fill(99, { "A quest", "Zone", "0/3 " .. string.rep("Honor mark of the Arathi Basin ", 4) })
+    local p = Panel.Get(GameTooltip)
+    local row
+    for _, it in ipairs(kinds(p, "row")) do if stub.Text(it.value) == "0 / 3" then row = it end end
+    T.truthy(row, "the objective is a row with its count")
+    T.truthy(row.label.__wordWrap == true, "its name may wrap")
+    T.truthy(row.label:GetWidth() > 0, "held to the room before the count")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- A quest's tooltip has a gap between its heading and its objectives, and its reward
+-- under a "Rewards" heading in money's own color. The card reads the gap as no section
+-- break, and money isn't read as a yellow description.
+T.test("rich tooltip: a gap between a quest's heading and its objectives is no section, money keeps its color", function()
+    local _, Panel = login("rich")
+    local coins = "5|T" .. "Interface/AddOns/DaylightUI/Media/coin-gold.png:0:0:0:0:64:64:-4:60:0:64|t"
+    fill(99, { "A quest", "Level 29", "The Barrens", " ", "0/3 Honor mark", " ", "Rewards", coins })
+    local p = Panel.Get(GameTooltip)
+    local seq = {}
+    for i = 1, p.count do seq[#seq + 1] = p.items[i].kind end
+    local list = table.concat(seq, ",")
+    T.truthy(list:find("section,row,bar", 1, true), "the zone is the heading right over the objectives: " .. list)
+    T.falsy(list:find("rule,section,rule", 1, true), "no empty section from the gap: " .. list)
+    T.falsy(list:find("section,text,rule,section", 1, true))
+    local money
+    for i = 1, p.count do
+        local it = p.items[i]
+        if it.kind == "text" and it.fs and stub.Text(it.fs):find("coin-gold", 1, true) then money = it end
+    end
+    T.truthy(money, "the reward's line")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- A tooltip line with two sides (an objective and its count, written by Daylight UI's
+-- quest tracker) had its long left side cut. It wraps now, and the row grows with it;
+-- the count keeps its own color at the edge.
+T.test("rich tooltip: a two-sided line's long left side wraps and the row grows, the value keeps its color", function()
+    local _, Panel = login("rich")
+    local long = string.rep("Honor mark of the Arathi Basin ", 4)
+    fill(99, { "A quest", { long, "0/3", 1, 1, 1, 1, 0.3, 0.3 }, { "Short", "1/2", 1, 1, 1, 1, 0.8, 0.2 } })
+    local p = Panel.Get(GameTooltip)
+    local rows = kinds(p, "row")
+    local tall, short
+    for _, it in ipairs(rows) do
+        if stub.Text(it.value) == "0/3" then tall = it elseif stub.Text(it.value) == "1/2" then short = it end
+    end
+    T.truthy(tall and short, "both lines are rows")
+    T.truthy(tall.label.__wordWrap == true, "the long name may wrap")
+    local ty = select(5, tall.label:GetPoint(1))
+    local sy = select(5, short.label:GetPoint(1))
+    T.truthy(ty - sy > 2 * DaylightUI.Style.SIZE.body, "the next row sits under both lines of the wrapped one: " .. tostring(ty - sy))
+    T.rgb({ tall.value:GetTextColor() }, { 1, 0.3, 0.3 }, "the count keeps the line's own color")
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
@@ -3084,7 +3350,7 @@ T.test("other addons: mixed in, or hidden with Daylight UI plugins' lines still 
     local me = DaylightUI.API.For("Notes")
     me.AddTooltipLines("item", function(lines) lines.Row("Fish caught", 12) end)
     items()
-    DaylightUI:Set("Tooltip", "addonLines", "hidden")
+    DaylightUI:Set("Tooltip", "pieces.item.addons", false)
     stub.RunTimers()
     fillItem(GameTooltip, "greaves", GREAVES, function(t) t:AddDoubleLine("AH price", "9") end)
     update()
@@ -3096,11 +3362,19 @@ T.test("other addons: mixed in, or hidden with Daylight UI plugins' lines still 
     end
     T.isnil(labels["AH price"], "another addon's line left out")
     T.eq(labels["Fish caught"], "12", "a plugin's row stays")
-    DaylightUI:Set("Tooltip", "addonLines", "mixed")
+    -- Mixed in: the card's layout puts them with its words, before the foot.
+    DaylightUI:Set("Tooltip", "pieces.item.addons", true)
+    DaylightUI:Set("Tooltip", "layout.item", "numbers,stats|effects,set,facts,quote,addons|made|foot")
     stub.RunTimers()
-    local p2 = withAddon({ "Mailbox", "Your mail." }, function(t) t:AddLine("A note") end)
-    T.eq(#afterRule(p2), 0, "no area of their own")
-    T.eq(stub.Text(p2.items[p2.count].fs), "A note", "right after the card's own lines")
+    fillItem(GameTooltip, "greaves", GREAVES, function(t) t:AddLine("A note") end)
+    update()
+    local p2 = foreignPanel.Get(GameTooltip)
+    T.eq(#afterRule(p2), 1, "no area of their own: only the foot after the last rule")
+    local note
+    for i = 1, p2.count do
+        if p2.items[i].fs and stub.Text(p2.items[i].fs) == "A note" then note = i end
+    end
+    T.truthy(note and p2.items[note - 2].kind ~= "rule", "right after the card's own lines")
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
@@ -3169,6 +3443,46 @@ end)
 
 -- Seen by a player: a recipe's tags showed "Binds when picked up" twice, the
 -- recipe's and the boots' it makes, with no telling which was which.
+-- Seen in game: the game's SellPrice data line draws no text. It is stamped
+-- with the line above it (lineIndex = NumLines before the coins), and its
+-- post-call then adds the coins line. Read as landing on its stamp, the line
+-- above (a ring's last stat, a level requirement) took the sell price's type
+-- and vanished from the card.
+T.test("rich tooltip: the line above the sell price stays on the card", function()
+    local _, Panel = login("rich")
+    items()
+    _G.ITEM_SOULBOUND = "Soulbound"
+    local list = { { "Jaina's Signet Ring", nil, { 0.118, 1, 0 } }, "Soulbound", "Finger", "+3 Strength",
+        "+7 Stamina", "Requires Level 33", "Sell Price: 46|A:coin-silver:0:0|a 30|A:coin-copper:0:0|a" }
+    local data = {
+        { type = 22, leftText = "Jaina's Signet Ring", lineIndex = 1 },
+        { type = 20, leftText = "Soulbound", lineIndex = 2 },
+        { type = 21, leftText = "Finger", lineIndex = 3 },
+        { type = 0, leftText = "+3 Strength", lineIndex = 4 },
+        { type = 0, leftText = "+7 Stamina", lineIndex = 5 },
+        { type = 0, leftText = "Requires Level 33", lineIndex = 6 },
+        { type = 11, price = 4630, lineIndex = 6 },
+    }
+    fillItem(GameTooltip, "greaves", list, nil, nil, nil, data)
+    local p = Panel.Get(GameTooltip)
+    local words = {}
+    for i = 2, p.count do
+        local it = p.items[i]
+        for _, fs in ipairs({ it.fs or false, it.label or false, it.value or false }) do
+            if fs then words[#words + 1] = stub.Text(fs) end
+        end
+    end
+    local all = table.concat(words, "|")
+    T.truthy(all:find("Stamina", 1, true), "the last stat: " .. all)
+    T.truthy(all:find("Requires Level 33", 1, true), "the level requirement: " .. all)
+    T.truthy(all:find("46", 1, true), "the sell price still in the foot: " .. all)
+    local Read = stub.tooltip.RichRead
+    local _, lines = Read.Lines(GameTooltip, { lines = data })
+    T.eq(lines[6].type, 0, "the requirement keeps its own type")
+    T.eq(lines[7].type, 11, "the coins line is the sell price")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
 T.test("rich tooltip: a recipe keeps its own binding in its tags, the crafted item's goes with that item", function()
     local _, Panel = login("rich")
     items()
@@ -3477,3 +3791,120 @@ T.test("other addons: ItemTree's block is a section with its verdict as tags", f
     T.truthy(stub.Text(area[2].fs or area[2].label):find("keep-tags", 1, true), "its own picture kept")
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
+
+-- The game's loot window fills its row's tooltip again every frame (SetOwner,
+-- then SetLootItem), after the tooltip's own update. Other addons add their
+-- lines after the game's and call Show to fit them: those lines were drawn
+-- over the card and never joined it (seen in game on loot and roll tooltips).
+T.test("rich tooltip: lines another addon adds after the show join the card at its Show", function()
+    local _, Panel = login("rich")
+    items()
+    local owner = CreateFrame("Button", nil, UIParent)
+    local function check(what, rows)
+        local bad = {}
+        for i = 1, GameTooltip:NumLines() do
+            for _, side in ipairs({ "Left", "Right" }) do
+                local fs = _G["GameTooltipText" .. side .. i]
+                if fs:GetText() and fs:GetAlpha() ~= 0 then bad[#bad + 1] = side .. i .. ":" .. tostring(fs:GetText()) end
+            end
+        end
+        T.eq(table.concat(bad, ","), "", what .. ": the game's lines muted")
+        T.eq(Panel.Get(GameTooltip).count, rows, what .. ": the card's rows")
+    end
+    local function lootFrame(hide, late)
+        update()
+        if hide and GameTooltip:IsShown() then GameTooltip:Hide() end
+        fillItem(GameTooltip, "legplates", LEGPLATES, function(t) t:AddDoubleLine("AH price", "2s 99c") end)
+        GameTooltip.__owner, GameTooltip.__anchor = owner, "ANCHOR_RIGHT"
+        if late then
+            GameTooltip:AddLine("Quest Drop Rate:")
+            GameTooltip:AddDoubleLine("  ForeverDB (Buzzard):", "14%")
+            GameTooltip:Show()
+        end
+    end
+    lootFrame(false, false)
+    local rows = Panel.Get(GameTooltip).count
+    for _, hide in ipairs({ false, true }) do
+        for k = 1, 3 do
+            lootFrame(hide, true)
+            check((hide and "hidden first, " or "") .. "frame " .. k, rows + 2)
+        end
+    end
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- A hunter pet's tooltip says "Attack Speed 1.49s": a time, not 1 gold 49
+-- silver. Coins never have one or two digits after a decimal mark; a
+-- thousands mark always has three after it.
+T.test("other addons: a time with a decimal stays a time, not coins", function()
+    foreignLogin()
+    local Foreign, W = stub.tooltip.RichForeign, DaylightUI.Widgets
+    T.eq(Foreign.CopperOf("1.49s"), nil, "1.49s is seconds")
+    T.eq(Foreign.CopperOf("2,5s"), nil, "a comma decimal too")
+    T.eq(Foreign.Money("1.49s"), "1.49s")
+    T.eq(Foreign.CopperOf("1,234g 5s"), 12340500, "a thousands mark is still coins")
+    T.eq(Foreign.CopperOf("12g 34s"), 123400)
+    T.eq(Foreign.Words("1.49s"), "1.49s")
+    T.truthy(W)
+end)
+
+-- Volley "fires a volley of ammo ... causing 71 Arcane damage": the card
+-- tagged it Fire, finding "fire" inside "fires".
+T.test("rich spells: the school is a whole word, not part of one", function()
+    login("rich")
+    _G.STRING_SCHOOL_FIRE, _G.STRING_SCHOOL_ARCANE = "Fire", "Arcane"
+    local Spells = stub.tooltip.RichSpells
+    local s = Spells.School("Continuously fires a volley of ammo at the target area, causing 71 Arcane damage to enemy targets within 8 yards every 1 sec for 6 sec.")
+    T.eq(s and s.key, "Arcane")
+    T.eq(Spells.School("Fires a shot that has no school."), nil, "English never reads a school inside a word")
+    local get = _G.GetLocale
+    _G.GetLocale = function() return "deDE" end
+    _G.STRING_SCHOOL_FIRE = "Feuer"
+    local de = Spells.School("Verursacht 50 Feuerschaden.")
+    _G.GetLocale, _G.STRING_SCHOOL_FIRE = get, "Fire"
+    T.eq(de and de.key, "Fire", "German joins the school onto the damage word")
+end)
+
+-- The profession window's result icon fills the tooltip again from its own
+-- OnUpdate every frame (Blizzard_ProfessionsRecipeSchematicForm: OnEnter sets
+-- an OnUpdate that calls SetRecipeResultItem), anchored ANCHOR_RIGHT, so the
+-- card is pinned by its bottom. Auction addons add their lines in the fill
+-- and more after the game's Show, then Show again. Seen in game: their lines
+-- stood over and above the card, never in it.
+T.test("rich tooltip: a profession result refilled every frame keeps auction lines in the card", function()
+    local _, Panel = login("rich")
+    items()
+    local icon = CreateFrame("Button", nil, UIParent)
+    local function check(what, rows)
+        local bad = {}
+        for i = 1, GameTooltip:NumLines() do
+            for _, side in ipairs({ "Left", "Right" }) do
+                local fs = _G["GameTooltipText" .. side .. i]
+                if fs:GetText() and fs:GetAlpha() ~= 0 then bad[#bad + 1] = side .. i .. ":" .. tostring(fs:GetText()) end
+            end
+        end
+        T.eq(table.concat(bad, ","), "", what .. ": the game's lines muted")
+        T.eq(Panel.Get(GameTooltip).count, rows, what .. ": the card's rows")
+        local p = Panel.Get(GameTooltip)
+        T.near(GameTooltip:GetHeight(), p.wantH * p:GetScale(), 0.01, what .. ": fitted to the card")
+    end
+    local function frame(first)
+        if not first then update() end
+        fillItem(GameTooltip, "legplates", LEGPLATES, function(t)
+            t:AddDoubleLine("Auction", "6s 45c")
+        end)
+        GameTooltip.__owner, GameTooltip.__anchor = icon, "ANCHOR_RIGHT"
+        GameTooltip:AddLine("TSM AuctionDB")
+        GameTooltip:AddDoubleLine("  Min Buyout", "6s 45c")
+        GameTooltip:AddDoubleLine("  Region Sale Avg", "3s 14c")
+        GameTooltip:Show()
+    end
+    frame(true)
+    local rows = Panel.Get(GameTooltip).count
+    for k = 1, 3 do
+        frame(false)
+        check("frame " .. k, rows)
+    end
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+

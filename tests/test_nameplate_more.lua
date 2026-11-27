@@ -403,6 +403,55 @@ T.test("nameplates: the execute range as your finisher's icon by the bar, lit on
     end)
 end)
 
+T.test("nameplates: the execute glow and spark light with the band, only in range", function()
+    withExecuteCurves(function(alpha)
+        local NP = login()
+        DaylightUI:Set("Nameplates", "execute", "on")
+        DaylightUI:Set("Nameplates", "executeGlow", true)
+        DaylightUI:Set("Nameplates", "executeSpark", true)
+        DaylightUI:Set("Nameplates", "executeTexture", "stripes")
+        stub.RunTimers()
+        local p = added("nameplate1")
+        local e = p.exec
+        T.truthy(e.glow and e.glow:IsShown(), "the glow is there")
+        T.truthy(e.spark:IsShown(), "the spark is there")
+        T.eq(e.lit:GetTexture(), NP.Plate.EXECUTE_FILES.stripes, "striped band")
+        T.eq(e.lit.__wrap, "REPEAT", "the stripes tile")
+        T.eq(alpha(e.glow), 0, "at 60%: no glow")
+        T.eq(alpha(e.spark), 0, "at 60%: no spark")
+        stub.units.nameplate1.health = stub.Secret(15)
+        stub.FireEvent("UNIT_HEALTH", "nameplate1")
+        T.eq(alpha(e.lit), 1, "at 15%: the band")
+        T.eq(alpha(e.glow), 1, "at 15%: the glow")
+        T.eq(alpha(e.spark), 1, "at 15%: the spark")
+        -- Line only: no band, the extras still light.
+        DaylightUI:Set("Nameplates", "executeStyle", "line")
+        stub.RunTimers()
+        T.eq(e.lights[1], e.glow, "the glow leads with no band")
+        T.eq(alpha(e.spark), 1, "still lit")
+        -- Bar texture: the execute range's own pick.
+        DaylightUI:Set("Nameplates", "executeStyle", "band")
+        DaylightUI:Set("Nameplates", "executeTexture", "bar")
+        DaylightUI:Set("Nameplates", "media.execute", "glass")
+        stub.RunTimers()
+        T.eq(e.lit:GetTexture(), DaylightUI.Media.Fetch("statusbar", "glass"), "its own bar texture")
+        T.falsy(e.lit.__wrap == "REPEAT", "stretched, not tiled")
+        -- The faint band's brightness, up to full.
+        local function bandAlpha() local _, _, _, a = e.band:GetVertexColor(); return a end
+        T.eq(bandAlpha(), 0.1, "faint by default")
+        DaylightUI:Set("Nameplates", "executeRestStrength", 1)
+        stub.RunTimers()
+        T.eq(bandAlpha(), 1, "full when turned all the way up")
+        T.truthy(e.band:IsShown(), "shown out of range too")
+        DaylightUI:Set("Nameplates", "executeGlow", false)
+        DaylightUI:Set("Nameplates", "executeSpark", false)
+        stub.RunTimers()
+        T.falsy(e.glow:IsShown(), "glow off")
+        T.falsy(e.spark:IsShown(), "spark off")
+        T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    end)
+end)
+
 T.test("nameplates: a new finisher rank updates its icon without laying every plate out again", function()
     local NP = login(function() stub.knownSpells = { [20658] = true } end)
     local oldTexture = C_Spell.GetSpellTexture
@@ -583,4 +632,136 @@ T.test("nameplates: the cast bar names who the cast is aimed at, in their class 
     T.eq(select(2, p.cast.text:GetPoint(2)), p.cast.time, "the spell name runs to the time")
     _G.UnitSpellTargetName, _G.UnitSpellTargetClass, _G.C_ClassColor = nil, nil, realColor
     stub.units.nameplate1.cast = nil
+end)
+
+-- Who each mob is after (mobTarget): the name of the plate's unit's target.
+local function mobTargets(unit, who)
+    stub.units[unit .. "target"] = who and stub.units[who] or nil
+    stub.FireEvent("UNIT_TARGET", unit)
+end
+
+T.test("nameplates: the mob's target is off as shipped and changes nothing on a plate", function()
+    local NP = login()
+    T.eq(NP.DEFAULTS.mobTarget, false, "off as shipped")
+    local p = added("nameplate1")
+    mobTargets("nameplate1", "player")
+    T.falsy(p.mobTarget and p.mobTarget:IsShown(), "nothing shows while off")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("nameplates: the mob's target name follows every change, in a fight too", function()
+    local NP = login()
+    stub.units.party1 = { name = "Jaina", class = "MAGE", isPlayer = true, reaction = 5 }
+    stub.units.tankpet = { name = "Wolf", class = "WARRIOR", isPlayer = false, reaction = 5 }
+    DaylightUI:Set("Nameplates", "mobTarget", true)
+    stub.RunTimers()
+    local p = added("nameplate1")
+    local fs = p.mobTarget
+    T.truthy(fs, "made on the plate")
+    -- No target yet: nothing.
+    T.falsy(fs:IsShown(), "no target: hidden")
+    -- On you: your name in your class color.
+    mobTargets("nameplate1", "player")
+    T.truthy(fs:IsShown())
+    T.eq(stub.Plain(fs:GetText()), "Me")
+    local r, g, b = fs:GetTextColor()
+    local cr, cg, cb = DaylightUI.Style.ClassTextColor("WARRIOR")
+    T.near(r, cr, 1e-6, "your class color") ; T.near(g, cg, 1e-6) ; T.near(b, cb, 1e-6)
+    -- Mid-fight it turns on a mage: her name, her color.
+    stub.EnterCombat()
+    mobTargets("nameplate1", "party1")
+    T.eq(stub.Plain(fs:GetText()), "Jaina", "switched mid-fight")
+    r = fs:GetTextColor()
+    T.near(r, (DaylightUI.Style.ClassTextColor("MAGE")), 1e-6, "the mage's color")
+    -- A pet (an NPC, which has a class too): plain white, never a class color.
+    mobTargets("nameplate1", "tankpet")
+    T.eq(stub.Plain(fs:GetText()), "Wolf")
+    r = fs:GetTextColor()
+    T.near(r, DaylightUI.Style.INK.VALUE[1], 1e-6, "an NPC: white")
+    -- It drops its target: hidden again.
+    mobTargets("nameplate1", nil)
+    T.falsy(fs:IsShown(), "no target: hidden")
+    stub.LeaveCombat()
+    -- Other mobs' changes leave this plate alone.
+    mobTargets("nameplate1", "player")
+    local p2 = added("nameplate2")
+    mobTargets("nameplate2", "party1")
+    T.eq(stub.Plain(fs:GetText()), "Me", "another plate's change: this one kept")
+    T.eq(stub.Plain(p2.mobTarget:GetText()), "Jaina")
+    -- The plate goes to another mob: nothing of the last one's target is left.
+    stub.FireEvent("NAME_PLATE_UNIT_REMOVED", "nameplate1")
+    stub.units.nameplate1target = nil
+    added("nameplate1")
+    T.falsy(fs:IsShown(), "a reused plate starts empty")
+    -- Switched off again: hidden at once.
+    mobTargets("nameplate2", "party1")
+    DaylightUI:Set("Nameplates", "mobTarget", false)
+    stub.RunTimers()
+    T.falsy(p2.mobTarget:IsShown(), "off: hidden")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("nameplates: the mob's target in a PvP match, where an enemy's name and class are secret", function()
+    login()
+    stub.units.nameplate1 = { name = "Horde Rogue", hostile = true, reaction = 2, isPlayer = true, class = "ROGUE",
+                              enemy = true, health = 60, maxHealth = 100, pct = 60 }
+    stub.units.foe = { name = "Horde Mage", class = "MAGE", isPlayer = true, reaction = 2, enemy = true, classHidden = true }
+    DaylightUI:Set("Nameplates", "mobTarget", true)
+    stub.RunTimers()
+    local p = added("nameplate1")
+    stub.EnterCombat()
+    stub.SetRestriction("PvPMatch", true)
+    mobTargets("nameplate1", "foe")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    T.eq(stub.Plain(p.mobTarget:GetText()), "Horde Mage", "the secret name written whole")
+    stub.SetRestriction("PvPMatch", false)
+    stub.LeaveCombat()
+end)
+
+-- It's for anyone who wants to see who a mob is on, not only tanks: it sits with
+-- the other texts on Health & Names, with the same color, size and font rows.
+T.test("nameplates: the mob's target lives on Health & Names with its own color, size and font", function()
+    local NP = login()
+    local O = DaylightUI.Options
+    local function card(pageId, label)
+        for _, g in ipairs(O.GetPage(pageId).groups) do
+            if g.label == label then return g end
+        end
+    end
+    T.isnil(card("Nameplates.threat", "Enemy's target"), "no longer on the Threat page")
+    local g = card("Nameplates.bars", "Enemy's target")
+    T.truthy(g, "on Health & Names")
+    local keys = {}
+    for _, it in ipairs(g.items) do if it.key then keys[it.key] = it end end
+    for _, k in ipairs({ "mobTarget", "mobTargetColor", "mobTargetCustom", "mobTargetSize", "media.mobTargetFont",
+                         "mobTargetPos", "mobTargetX", "mobTargetY" }) do
+        T.truthy(keys[k], "a row for " .. k)
+    end
+    -- Defaults keep what shipped: class color, the name's size share, the name's font.
+    T.eq(NP.DEFAULTS.mobTargetColor, "class")
+    T.eq(NP.DEFAULTS.mobTargetSize, 0)
+    T.eq(NP.DEFAULTS.media.mobTargetFont, "general")
+    stub.units.party1 = { name = "Jaina", class = "MAGE", isPlayer = true, reaction = 5 }
+    DaylightUI:Set("Nameplates", "mobTarget", true)
+    stub.RunTimers()
+    local p = added("nameplate1")
+    local fs = p.mobTarget
+    mobTargets("nameplate1", "party1")
+    local base = select(2, fs:GetFont())
+    -- White, accent, one color: each repaints the name it shows now.
+    DaylightUI:Set("Nameplates", "mobTargetColor", "white"); stub.RunTimers()
+    T.near((fs:GetTextColor()), DaylightUI.Style.INK.VALUE[1], 1e-6, "white")
+    DaylightUI:Set("Nameplates", "mobTargetColor", "accent"); stub.RunTimers()
+    T.near((fs:GetTextColor()), (DaylightUI.Style.Pop()), 1e-6, "the accent")
+    DaylightUI:Set("Nameplates", "mobTargetCustom", { 0.1, 0.9, 0.2 })
+    DaylightUI:Set("Nameplates", "mobTargetColor", "custom"); stub.RunTimers()
+    local r, gg = fs:GetTextColor()
+    T.near(r, 0.1, 1e-6, "one color"); T.near(gg, 0.9, 1e-6)
+    -- A new target keeps the picked color.
+    mobTargets("nameplate1", "player")
+    T.near((fs:GetTextColor()), 0.1, 1e-6, "kept on a new target")
+    -- Its own size.
+    DaylightUI:Set("Nameplates", "mobTargetSize", 18); stub.RunTimers()
+    T.truthy(select(2, fs:GetFont()) ~= base, "its own size")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)

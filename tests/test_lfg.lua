@@ -3,6 +3,14 @@ local LW = require("lfgworld")
 
 -- The group finder window.
 
+-- Whisper buttons ask in Daylight UI's own box (Pad.Whisper, no chat module
+-- here) and never open the game's chat box. The questions asked, in order.
+local function whispers()
+    local asked = {}
+    DaylightUI.Widgets.Prompt = function(text) asked[#asked + 1] = text end
+    return asked
+end
+
 local function load(spec)
     stub.Load({ before = LW.world(spec) })
     return stub.lfg
@@ -432,6 +440,73 @@ T.test("lfg: the client refuses a new listing without a playstyle (never sent by
     T.isnil(ns.Data.Entry())
 end)
 
+-- Seen in game: right after List me the server's search can come back without the
+-- listing just made, so Find showed everyone but you until Refresh. Your own listing
+-- is known without asking the server, so it shows at once, once.
+local function mineRows(ns)
+    local out = {}
+    for _, b in ipairs(rows(ns.Browse.page.stack, "group")) do
+        if b.spec.result and b.spec.result.mine then out[#out + 1] = b end
+    end
+    return out
+end
+
+T.test("lfg: a new listing shows on Find even when the game's search missed it", function()
+    local ns = load({ lag = true })
+    open(ns)
+    tab(ns, "list")
+    local L = ns.Listing
+    local acts = rows(L.page.stack, "act")
+    local listed = acts[1].name:GetText()
+    acts[1]:GetScript("OnClick")(acts[1], "LeftButton")
+    L.PickStyle(2)
+    stub.Key(L.Post)
+    frame(20)
+    T.eq(ns.Window.page, "find", "the window went to Find a group")
+    local mine = mineRows(ns)
+    T.eq(#mine, 1, "your listing is on the list without a Refresh")
+    T.truthy(mine[1].spec.text:find(listed, 1, true), "it names the activity you listed")
+    T.truthy(mine[1].spec.sub:find(DaylightUI.UnitName("player"), 1, true), "it names you")
+    T.truthy(mine[1].spec.sub:find("Barrens", 1, true), "and where you are")
+    -- Its card still offers Edit and Unlist.
+    click(mine[1])
+    frame(20)
+    local _, buttons = card(ns.Browse.page.detail)
+    T.eq(table.concat(buttons, ","), "Edit listing,Unlist", "the card offers Edit and Unlist")
+    -- The server catches up: a Refresh brings the real one, never two.
+    LW.state.lag = false
+    tab(ns, "list")
+    stub.Key(L.Post)   -- an update puts it in the server's results
+    frame(20)
+    tab(ns, "find")
+    stub.Key(function() ns.Browse.page.refresh:GetScript("OnClick")(ns.Browse.page.refresh) end)
+    frame(20)
+    T.eq(#mineRows(ns), 1, "one row for your listing after the real one arrives")
+    -- Unlisted: gone at once.
+    stub.Key(L.Unlist)
+    frame(20)
+    T.eq(#mineRows(ns), 0, "no row once you unlist")
+end)
+
+T.test("lfg: a new listing shows on Find even when the game's search never answers", function()
+    local ns = load({ lag = true })
+    open(ns)
+    tab(ns, "list")
+    local L = ns.Listing
+    local acts = rows(L.page.stack, "act")
+    acts[1]:GetScript("OnClick")(acts[1], "LeftButton")
+    L.PickStyle(1)
+    local fire = stub.FireEvent
+    stub.FireEvent = function(e, ...) if e ~= "LFG_LIST_SEARCH_RESULTS_RECEIVED" then return fire(e, ...) end end
+    stub.Key(L.Post)
+    frame(20)
+    stub.FireEvent = fire
+    stub.Advance(ns.Browse.WAIT + 1)
+    frame(5)
+    T.falsy(ns.Browse.searching, "gave up waiting")
+    T.eq(#mineRows(ns), 1, "your listing shows anyway")
+end)
+
 -- After a new listing the game searches only that listing's activities, and an
 -- addon can't search without a click. Find says so, and one click on its button
 -- shows every group of the category. In game it showed "All activities" over only
@@ -519,8 +594,10 @@ T.test("lfg: a click opens the group's card beside the list: Whisper the leader,
     T.eq(lines.Playstyle, "Relaxed")
     T.truthy(lines.Note and lines.Note:find("need dps", 1, true), "the leader's note")
     T.eq(table.concat(buttons, ","), "Whisper", "only a player listed alone can be invited: no Invite here")
+    local asked = whispers()
     d.buttons[1]:GetScript("OnClick")(d.buttons[1])
-    T.eq(LW.Calls("SendTell")[1][1], "Gorrak Stonefist")
+    T.eq(asked[1], "Whisper Gorrak Stonefist", "Daylight UI's own box asks for the words")
+    T.eq(#LW.Calls("SendTell"), 0, "the game's chat box is never opened from here")
     T.truthy(row.pick:IsShown(), "the row is the picked one")
     -- Clicked again: the card closes and the window goes back.
     click(row)
@@ -898,8 +975,10 @@ T.test("lfg: Who asks who's your level and lists them; Whisper the one picked", 
     T.eq(lines.Zone, "Agama'gor")
     T.falsy(lines.Guild, "no guild, no line for it")
     T.eq(table.concat(buttons, ","), "Whisper,Invite")
+    local asked = whispers()
     d.buttons[1]:GetScript("OnClick")(d.buttons[1])
-    T.eq(LW.Calls("SendTell")[1][1], "Daemon Process")
+    T.eq(asked[1], "Whisper Daemon Process")
+    T.eq(#LW.Calls("SendTell"), 0, "the game's chat box is never opened from here")
     list = rows(ns.Who.page.stack, "person")
     click(list[2])
     T.eq(d.frame.title:GetText(), "Lava Flows")
@@ -1208,8 +1287,9 @@ T.test("lfg: on a controller X presses the card's main button on Find a group an
     local x = entry("X")
     T.truthy(x, "X with the card open")
     T.eq(x.label(), "Whisper", "it says what it does")
+    local asked = whispers()
     stub.Key(function() x.run() end)
-    T.eq(LW.Calls("SendTell")[1][1], "Gorrak Stonefist")
+    T.eq(asked[1], "Whisper Gorrak Stonefist")
     -- A player listed alone: Invite is the main button.
     click(rows(ns.Browse.page.stack, "group")[3])
     T.eq(entry("X").label(), "Invite")
@@ -1220,7 +1300,8 @@ T.test("lfg: on a controller X presses the card's main button on Find a group an
     click(rows(ns.Who.page.stack, "person")[1])
     T.eq(entry("X").label(), "Whisper")
     stub.Key(function() entry("X").run() end)
-    T.eq(LW.Calls("SendTell")[2][1], "Daemon Process")
+    T.eq(asked[2], "Whisper Daemon Process")
+    T.eq(#LW.Calls("SendTell"), 0)
     click(rows(ns.Who.page.stack, "person")[1])
     T.isnil(entry("X"), "card closed: X gone")
     tab(ns, "list")
@@ -1261,4 +1342,69 @@ T.test("lfg places: open spots never come to more than the group's size", functi
     r.members = { {}, {}, {} }
     _, open = ns.Data.Places(r)
     T.eq(open.HEALER, 1); T.eq(open.DAMAGER, 1); T.eq(open.TANK, 0)
+end)
+
+-- A ten-player group (Upper Blackrock Spire) of nine: the game's own tooltip names every
+-- member of a group up to ten, so the card and tooltip must too, classes and all.
+local function bigGroup(n, act)
+    local classes = { "WARRIOR", "PRIEST", "ROGUE", "MAGE", "WARLOCK", "HUNTER", "DRUID", "PALADIN", "MAGE", "ROGUE", "PRIEST", "WARRIOR" }
+    local roles = { "TANK", "HEALER" }
+    local members = {}
+    for i = 1, n do
+        members[i] = { name = "Raider" .. i, classFilename = classes[(i - 1) % #classes + 1], level = 60,
+            assignedRole = roles[i] or "DAMAGER", areaName = i == 1 and "Burning Steppes" or nil }
+    end
+    return { { id = 40, activityIDs = { act }, age = 60, comment = "class run", generalPlaystyle = 2, members = members } }
+end
+
+T.test("lfg: a ten-player group shows every member by name, on the card and the tooltip", function()
+    local ns = load({ results = bigGroup(9, 801), level = 60 })
+    open(ns)
+    tab(ns, "find")
+    local row = rows(ns.Browse.page.stack, "group")[1]
+    T.truthy(row, "the group is listed")
+    local tip = recordTips()
+    row:GetScript("OnEnter")(row)
+    local text = table.concat(tip.lines, "\n")
+    for i = 1, 9 do T.truthy(text:find("Raider" .. i, 1, true), "tooltip names Raider" .. i .. ": " .. text) end
+    T.truthy(text:find("Warlock", 1, true), "with each class: " .. text)
+    click(row)
+    local lines = card(ns.Browse.page.detail)
+    local group = lines["In the group"] or ""
+    for i = 1, 9 do T.truthy(group:find("Raider" .. i, 1, true), "card names Raider" .. i .. ": " .. group) end
+end)
+
+T.test("lfg: a raid too big to name shows how many of each class are in", function()
+    local ns = load({ results = bigGroup(12, 900), level = 60 })
+    open(ns)
+    tab(ns, "find")
+    stub.Key(function() ns.Browse.PickCat(114) end)
+    frame(20)
+    local row = rows(ns.Browse.page.stack, "group")[1]
+    T.truthy(row, "the raid is listed")
+    local tip = recordTips()
+    row:GetScript("OnEnter")(row)
+    local text = table.concat(tip.lines, "\n")
+    T.truthy(text:find("12 / 40", 1, true), "how many of how many: " .. text)
+    T.truthy(text:find("Warrior", 1, true) and text:find("Mage", 1, true) and text:find("Paladin", 1, true), "the classes: " .. text)
+    click(row)
+    local lines = card(ns.Browse.page.detail)
+    local all = {}
+    for k, v in pairs(lines) do all[#all + 1] = tostring(k) .. "=" .. tostring(v) end
+    all = table.concat(all, "\n")
+    T.truthy(all:find("Mage", 1, true) and all:find("Paladin", 1, true), "the card has the classes: " .. all)
+end)
+
+T.test("lfg: a full ten-player group with a long note still names everyone on the card", function()
+    local res = bigGroup(10, 801)
+    res[1].comment = "LFM good old fast class run, nothing reserved on the Hand of Ragnaros, need key, bring health pots and fire resist, summons at the stone"
+    res[1].isDelisted = true
+    local ns = load({ results = res, level = 60 })
+    open(ns)
+    tab(ns, "find")
+    click(rows(ns.Browse.page.stack, "group")[1])
+    local lines = card(ns.Browse.page.detail)
+    local group = lines["In the group"] or ""
+    for i = 1, 10 do T.truthy(group:find("Raider" .. i, 1, true), "card names Raider" .. i .. ": " .. group) end
+    T.truthy(lines.Note, "the note too")
 end)

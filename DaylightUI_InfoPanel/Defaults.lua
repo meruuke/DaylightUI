@@ -30,12 +30,14 @@ ns.DEFAULTS = {
           orientation = "horizontal",   -- horizontal | vertical (only when detached)
           ownFade = false,      -- false: fades with the panel; true: uses the fade below
           shell = { own = false, borderPx = 4, cornerPx = 6, shadowPx = 4 },   -- its own border (Panel.Look)
+          barFx = DaylightUI.BarFx.Defaults(),   -- bar animation (the core's BarFx.lua)
           fade = DaylightUI.Fade.Defaults() },
     -- Standalone reputation bar for the watched faction. Uses the XP bar's
     -- texture and font.
     rep = { enabled = false, width = 207, height = 11, showName = true, showText = false, showPercent = true,
             textSize = 9, gradient = true, tipSide = "auto", orientation = "horizontal",
-            shell = { own = false, borderPx = 4, cornerPx = 6, shadowPx = 4 } },
+            shell = { own = false, borderPx = 4, cornerPx = 6, shadowPx = 4 },
+            barFx = DaylightUI.BarFx.Defaults() },
     meter = { enabled = true, width = 207, rowHeight = 22, mode = "damage", session = "current",
               inGroup = false, inCombat = false, inInstance = false, onJoin = "nothing", onInstance = "ask",
               detached = false, height = 196,
@@ -51,6 +53,8 @@ ns.DEFAULTS = {
               -- own row in view.
               rank = false, icons = "class", showTotal = true, showRate = true, showShare = true, showMe = true,
               rowGap = 1, angled = true,   -- angled: the fill's leading edge cut at an angle
+              -- angledLeft: the bars' left end cut too; flipLeft/flipRight: that end leans the other way.
+              angledLeft = false, flipLeft = false, flipRight = false,
               -- header is "always" or "hover" (only on mouseover).
               header = "always", headerTotal = false,
               numbers = "short",   -- short (12.3K) | full (12,345), used everywhere amounts show
@@ -95,7 +99,8 @@ ns.DEFAULTS = {
     -- the panel's.
     -- drawerOrder: the addon drawer's buttons in the order the player dragged them.
     -- shape: "square" or "round" (a rotating map is always round).
-    map = { enabled = true, size = 226, shape = "square", buttons = true, drawer = true, drawerOrder = {}, meterSide = "auto",
+    -- noBox: a round map stands on its own, without the square box round it.
+    map = { enabled = true, size = 226, shape = "square", noBox = false, buttons = true, drawer = true, drawerOrder = {}, meterSide = "auto",
              frameStyle = DaylightUI.Style.LookDefaults(),
              clock = { enabled = true, twentyFour = true, seconds = false, useServer = false, textSize = 11, color = ink(INK.VALUE) },
              fps = { enabled = false, textSize = 11, color = ink(INK.VALUE) },      -- next to the clock
@@ -119,6 +124,10 @@ ns.DEFAULTS = {
     databar = { enabled = false, widthPct = 60, height = 24, textSize = 12, icons = true, labels = false, line = true,
                 -- No border by default: on a strip this thin the top accent line is enough.
                 frameStyle = DaylightUI.Style.LookDefaults({ borderAlpha = 0, heavyBorder = false }), angled = true,
+                -- Each end on its own: angled is the left end, angledRight the right one
+                -- (a core step split the old one switch, DB.SplitBarEnds); flipLeft and
+                -- flipRight lean that end the other way, its bottom corner out.
+                angledRight = true, flipLeft = false, flipRight = false,
                 left1 = "location", left2 = "coords", left3 = "xp", left4 = "durability",
                 center = "time", numberColor = "accent", numberCustom = ink(INK.VALUE),
                 right1 = "bags", right2 = "social", right3 = "gold", right4 = "system",

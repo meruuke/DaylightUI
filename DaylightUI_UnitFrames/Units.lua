@@ -15,15 +15,15 @@ ns.SPECS = {
       portrait = true, range = true, threat = true, threatTag = true, dots = true, arrive = true, styled = true,
       level = 30,   -- so the target of target beside it draws fully under its ring (its parts reach its own +15)
       default = { "BOTTOM", nil, "BOTTOM", 200, 240 } },
-    { unit = "targettarget", label = "Target of Target", compact = true, power = true, slant = "left", poll = 0.1, range = true,
+    { unit = "targettarget", label = "Target of Target", compact = true, power = true, slant = "left", poll = 0.1, range = true, portrait = true,
       default = { "LEFT", "DaylightUIFrame_target", "RIGHT", 48, 0 } },
-    { unit = "pet", label = "Pet", compact = true, power = true, slant = "right", tab = true,
+    { unit = "pet", label = "Pet", compact = true, power = true, slant = "right", tab = true, portrait = true,
       default = { "TOPLEFT", "DaylightUIFrame_player", "BOTTOMLEFT", 30, -36 } },
     { unit = "focus", label = "Focus", power = true, slant = "right", tab = true, marker = true, portrait = true,
       range = true, threat = true, styled = true,
       default = { "LEFT", nil, "LEFT", 300, 0 } },
     -- Who your focus is targeting (the game's own focus frame has this too).
-    { unit = "focustarget", label = "Focus Target", compact = true, power = true, slant = "right", poll = 0.1, range = true,
+    { unit = "focustarget", label = "Focus Target", compact = true, power = true, slant = "right", poll = 0.1, range = true, portrait = true,
       default = { "LEFT", "DaylightUIFrame_focus", "RIGHT", 48, 0 } },
 }
 
@@ -40,7 +40,7 @@ end
 ns.COPY_FRAMES = { "player", "target", "focus", "targettarget", "focustarget", "pet", "party", "partyTarget", "raid", "raid20", "raid40", "arena" }
 ns.COPY_KEEP = { enabled = true, showInParty = true, fade = true, follow = true, own = true,
                  direction = true, perLine = true, groupSpacing = true, sortBy = true, groups = true,
-                 hideSelf = true, showSolo = true, growUp = true, growLeft = true, ownSpot = true, strata = true }
+                 hideSelf = true, showSolo = true, growUp = true, growLeft = true, growCenter = true, ownSpot = true, strata = true }
 
 local function deepCopy(v)
     if type(v) ~= "table" then return v end
@@ -250,6 +250,19 @@ function ns.TargetAuraRoom(db)
     return lift, pips, pips
 end
 
+-- Parts that fade with frame f without being its pieces (f.fadeKids): aura
+-- rows, since the game's containers don't pass alpha on, and cast bars.
+function ns.FadeWith(f, ...)
+    f.fadeKids = f.fadeKids or {}
+    for i = 1, select("#", ...) do
+        local part = select(i, ...)
+        if part and part.fadeOf ~= f then
+            part.fadeOf = f
+            f.fadeKids[#f.fadeKids + 1] = part
+        end
+    end
+end
+
 -- The player frame's own buffs and debuffs (settings playerAuras, off by
 -- default). The client's containers are created the first time a row is turned
 -- on, so players who leave them off pay nothing. Rows sit exactly where the
@@ -260,7 +273,10 @@ function ns.PlacePlayerAuras(db)
     if not (a and f) then return end
     if not ns.playerAuras and (a.debuffs or a.buffs) then
         ns.playerAuras = Auras.Create(f, "right", "player", a)
-        if ns.playerAuras then ns.RefitOnTab(f, function() return ns.playerAuras end) end
+        if ns.playerAuras then
+            ns.RefitOnTab(f, function() return ns.playerAuras end)
+            ns.FadeWith(f, ns.playerAuras.debuffs, ns.playerAuras.buffs)
+        end
     end
     local set = ns.playerAuras
     if not set then return end
@@ -285,7 +301,10 @@ function ns.PlaceFocusAuras(db)
     if not (a and f) then return end
     if not ns.focusAuras and (a.debuffs or a.buffs) then
         ns.focusAuras = Auras.Create(f, "right", "focus", a)
-        if ns.focusAuras then ns.RefitOnTab(f, function() return ns.focusAuras end) end
+        if ns.focusAuras then
+            ns.RefitOnTab(f, function() return ns.focusAuras end)
+            ns.FadeWith(f, ns.focusAuras.debuffs, ns.focusAuras.buffs)
+        end
     end
     local set = ns.focusAuras
     if not set then return end
@@ -302,7 +321,10 @@ function ns.PlacePetAuras(db)
     if not (a and f) then return end
     if not ns.petAuras and (a.debuffs or a.buffs) then
         ns.petAuras = Auras.Create(f, "right", "pet", a)
-        if ns.petAuras then ns.RefitOnTab(f, function() return ns.petAuras end) end
+        if ns.petAuras then
+            ns.RefitOnTab(f, function() return ns.petAuras end)
+            ns.FadeWith(f, ns.petAuras.debuffs, ns.petAuras.buffs)
+        end
     end
     local set = ns.petAuras
     if not set then return end
@@ -451,6 +473,8 @@ function ns.Refresh(mod, path, hold)
         ns.DruidBars.Layout(db.player.druidBars)
         Blizzard.Apply(db)
         DUI.Movers.ApplyAll()
+        -- Last, over what each part's own layout set: the player's draw order.
+        ns.Layers.Apply()
         if ns.Test then ns.Test.Reapply() end
         if pendingFx then
             pendingFx = false
@@ -534,7 +558,10 @@ end
 -- stays the same, empty or not).
 local function occupant(unit)
     local f = ns.frames[unit]
-    if f then DUI.APIReport.Occupant("unit", f, unit) end
+    if not f then return end
+    -- A hit or heal still playing on the bar was the last occupant's.
+    if f.health then DUI.BarFx.ClearReaction(f.health) end
+    DUI.APIReport.Occupant("unit", f, unit)
 end
 
 local function registerEvents()
@@ -789,6 +816,10 @@ ns.FADE_FULL_HEALTH = { player = true, pet = true }
 -- and go with their unit.
 ns.FLOAT = { target = false, targettarget = false, focus = false, focustarget = false, partyTarget = false }
 
+-- Frames that only exist while you have a target, so the fade's Show with a
+-- target would just mean always shown.
+ns.WITH_TARGET = { target = true, targettarget = true }
+
 -- Health is secret, so whether it's full is left to the game at paint time
 -- (UF.FullHealthAlpha). A change counts as activity instead: the frame comes
 -- back and fades again a delay after the last change (a heal back to full).
@@ -929,6 +960,10 @@ function ns.Build(mod)
                 list[#list + 1] = UF.CreatePortraitHolder(f)
                 local m = PORTRAIT_MOVERS[spec.unit]
                 DUI.Movers.Register(f.portraitHolder, UF.PORTRAIT_FREE[spec.unit], m[1], m[2])
+                -- The click over it follows the holder wherever it's put.
+                DUI.On("MoverApplied", function(key)
+                    if key == UF.PORTRAIT_FREE[spec.unit] then UF.PlacePortraitClick(f) end
+                end)
             end
             -- The pieces fade by the frame's own rules (its full health or mana wait).
             for i = 2, #list do list[i].fadeOf = f end
@@ -947,6 +982,7 @@ function ns.Build(mod)
         ns.focusCastbarFree.near = focus
         ns.focusCastbarFree.under, ns.focusCastbarFree.hangAt = focus, "slide"
         ns.focusCastbarFree.moverKey = "unitframes.focusCastbar"
+        ns.FadeWith(focus, ns.focusCastbar, ns.focusCastbarFree)
         DUI.Movers.Register(ns.focusCastbarFree, "unitframes.focusCastbar", "Focus Cast Bar",
             { "TOP", "DaylightUIFrame_focus", "BOTTOM", 0, -40 })
         -- Or a bar of its own, when it's detached.
@@ -965,6 +1001,11 @@ function ns.Build(mod)
         ns.playerCastbar.near = ns.frames.player
         ns.playerCastbar.moverKey = "unitframes.playerCastbar"
         DUI.Movers.Register(ns.playerCastbar, "unitframes.playerCastbar", "Player Cast Bar", { "BOTTOM", nil, "BOTTOM", 0, 180 })
+        -- Its own fade. The key stays out of the unit frames' hushes, so a craft
+        -- at a campfire still shows its cast.
+        local castList = { ns.playerCastbar }
+        DUI.Fade.Register{ key = "PlayerCastbar", scope = "UnitFrames", path = "playerCastbar.fade", page = "UnitFrames.player",
+            frames = function() return castList end, paint = CB.PaintFade, float = false }
         -- The swing timers hang under the cast bar unless detached.
         ns.swing = ns.Swing.Create()
         if ns.swing then
@@ -976,8 +1017,9 @@ function ns.Build(mod)
                 DUI.Movers.Register(ns.swing.pods[o[1]], ns.Swing.MOVERS[o[1]], o[2], { "BOTTOM", nil, "BOTTOM", 0, o[3] })
                 DUI.Movers.Suspend(ns.Swing.MOVERS[o[1]], true)
             end
-            -- No fade setting of its own, so it only leaves with the unit
-            -- frames when they are hushed (sitting at a campfire).
+            -- Its own fade, and it leaves with the unit frames when they are
+            -- hushed (sitting at a campfire). No "Only when something changes":
+            -- its visibility setting already shows it only while you swing.
             local swing = ns.swing
             local parts = { swing, swing.pods.main, swing.pods.off, swing.pods.ranged }
             DUI.Fade.Register{ key = "UnitFrames.swing", scope = "UnitFrames", path = "swing.fade", page = "UnitFrames.swing",
@@ -1013,6 +1055,8 @@ function ns.Build(mod)
         end
         ns.PartyTargets.RegisterFade()
         ns.auras = Auras.Create(ns.frames.target, "left", nil, mod.db.targetAuras)
+        ns.FadeWith(ns.frames.target, ns.auras and ns.auras.debuffs, ns.auras and ns.auras.buffs,
+                    ns.targetCastbar, ns.targetCastbarFree)
         ns.combo = ns.Combo.Create(ns.frames.target)
         if ns.combo then
             -- Its row on its own, when used (fades with the target frame).
@@ -1026,6 +1070,7 @@ function ns.Build(mod)
         ns.RefitOnTab(ns.frames.target, function() return ns.auras end)
         registerEvents()
         ns.ClickCast.Start()
+        ns.Layers.Hook()
         ns.Refresh(mod)
     end, "unitframes:build")
 end

@@ -771,16 +771,16 @@ T.test("chat: a speech bubble is drawn by a frame of Daylight UI's own, the game
     stub.SetBubbles({ b1, b2 })
     -- The client refuses text on a font string with no font yet.
     stub.FontRule = true
-    local errs = 0
+    local errs, last = 0, nil
     local onError = DaylightUI.SafeCall
     DaylightUI.SafeCall = function(fn, ...)
-        local ok = pcall(fn, ...)
-        if not ok then errs = errs + 1 end
+        local ok, e = pcall(fn, ...)
+        if not ok then errs, last = errs + 1, e end
     end
     stub.FireEvent("CHAT_MSG_SAY")
     stub.RunTimers()
     DaylightUI.SafeCall, stub.FontRule = onError, nil
-    T.eq(errs, 0, "no error drawing a new bubble")
+    T.eq(errs, 0, "no error drawing a new bubble: " .. tostring(last))
     local mine = Bubbles.OverlayOf(b1)
     T.truthy(mine, "drawn")
     T.eq(mine:GetParent(), UIParent, "on UIParent, outside the world layer")
@@ -794,6 +794,123 @@ T.test("chat: a speech bubble is drawn by a frame of Daylight UI's own, the game
     T.isnil(DaylightUI.Style.GetShell(art), "nothing built on the game's frame")
     T.eq(select(2, mine:GetPoint(1)), art, "follows the balloon")
     T.isnil(Bubbles.OverlayOf(b2), "forbidden (an instance): left alone")
+end)
+
+T.test("chat: a speech bubble has square corners with the bottom-right one cut, an accent band and a tail", function()
+    login()
+    local Style = DaylightUI.Style
+    local Bubbles = stub.chatModule.Bubbles
+    local outer = makeBubble("Anyone for Deadmines?")
+    stub.SetBubbles({ outer })
+    Bubbles.DressAll()
+    local mine = Bubbles.OverlayOf(outer)
+    T.truthy(Style.GetCut(mine) > 0, "the corner cut")
+    T.isnil(Style.GetSlant(mine), "no angled ends")
+    T.truthy(mine.band and mine.band:IsShown(), "an accent band along the bottom")
+    T.eq(select(1, mine.band:GetPoint(1)), "BOTTOMLEFT", "at the bottom")
+    T.truthy(mine.band:GetNumMaskTextures() > 0, "the band cut with the corner")
+    T.truthy(mine.tail and mine.tail:IsShown(), "a tail")
+    T.eq(select(3, mine.tail:GetPoint(1)), "BOTTOMLEFT", "hung under the bubble")
+end)
+
+-- The tail's tip is where the tail's left edge meets the bubble's bottom.
+local function tailTip(mine)
+    local _, rel, relPoint, x = mine.tail:GetPoint(1)
+    assert(rel == mine and relPoint == "BOTTOMLEFT")
+    return x
+end
+
+T.test("chat: a long bubble's tail still points at the speaker, where the game's own tail is", function()
+    login()
+    local Bubbles = stub.chatModule.Bubbles
+    -- A whole sentence, wide enough to wrap: the old tail sat a sixth of the
+    -- way along and slid far left of the speaker's head.
+    local long = string.rep("i made the jump hugeeeee ", 6)
+    local outer, art = makeBubble(long)
+    art.__center = { 500, 300 }
+    -- The game's tail sits under the speaker, here 10 px left of the balloon's middle.
+    art.Tail = art:CreateTexture()
+    art.Tail.__center = { 490, 270 }
+    stub.SetBubbles({ outer })
+    Bubbles.DressAll()
+    local mine = Bubbles.OverlayOf(outer)
+    local w = mine:GetWidth()
+    T.truthy(w > 200, "a wide bubble: " .. tostring(w))
+    T.near(tailTip(mine), w / 2 - 10, 1, "the tip under the game's tail")
+    -- A few words: the tip still follows the game's tail.
+    local outer2, art2 = makeBubble("i made the jump")
+    art2.__center = { 500, 300 }
+    art2.Tail = art2:CreateTexture()
+    art2.Tail.__center = { 500, 270 }
+    stub.SetBubbles({ outer2 })
+    Bubbles.DressAll()
+    local small = Bubbles.OverlayOf(outer2)
+    T.near(tailTip(small), small:GetWidth() / 2, 1, "short: under the middle")
+    -- No game tail to read (or a secret one): the balloon sits centered over
+    -- the speaker, so the tip goes to the middle.
+    local outer3 = makeBubble(long)
+    stub.SetBubbles({ outer3 })
+    Bubbles.DressAll()
+    local plain = Bubbles.OverlayOf(outer3)
+    T.near(tailTip(plain), plain:GetWidth() / 2, 1, "no game tail: the middle")
+end)
+
+T.test("chat: a bubble's line can wear its speaker's class; the tail stays dark with colored edges", function()
+    login()
+    local Style = DaylightUI.Style
+    local Bubbles = stub.chatModule.Bubbles
+    stub.units.party1 = { name = "Jaina", class = "MAGE", guid = "Player-1-0000JAIN", isPlayer = true }
+    DaylightUI:Set("Chat", "bubbleColor", "class")
+    local said = makeBubble("Anyone for Deadmines?")
+    local npc = makeBubble("You no take candle!")
+    local locked = makeBubble("Hush now")
+    stub.SetBubbles({ said, npc, locked })
+    stub.FireEvent("CHAT_MSG_SAY", "Anyone for Deadmines?", "Jaina", "", "", "", "", 0, 0, "", 0, 1, "Player-1-0000JAIN")
+    stub.FireEvent("CHAT_MSG_MONSTER_SAY", "You no take candle!", "Kobold", "", "", "", "", 0, 0, "", 0, 2, "Creature-0-1")
+    -- Chat lockdown: the line and its sender come as secrets.
+    stub.FireEvent("CHAT_MSG_SAY", stub.Secret("Hush now"), "Jaina", "", "", "", "", 0, 0, "", 0, 3, stub.Secret("Player-1-0000JAIN"))
+    stub.RunTimers()
+    local mine, theirs, hushed = Bubbles.OverlayOf(said), Bubbles.OverlayOf(npc), Bubbles.OverlayOf(locked)
+    local lo, hi = DaylightUI.Gradients.RGB("MAGE")
+    local g = mine.band.__gradient
+    T.truthy(g, "a gradient line")
+    T.near(g[3].r, hi[1], 0.01, "the mage pair's light end")
+    T.isnil(theirs.class, "an NPC has no class")
+    T.isnil(hushed.class, "a secret line teaches nothing")
+    local accentHi = select(2, Style.AccentPair())
+    if accentHi then T.near(theirs.band.__gradient[3].r, accentHi[1], 0.01, "the NPC keeps the accent") end
+    -- The tail: the bubble's dark, with the line's color only on its edges.
+    local bg = Style.BACKGROUND
+    T.near(select(1, mine.tail.tex:GetVertexColor()), bg[1], 0.01, "the tail is dark")
+    T.truthy(mine.tail.side:IsShown() and mine.tail.slope:IsShown(), "edged")
+    local t = Bubbles.TAIL_AT
+    T.near(mine.tail.side.__color[1], lo[1] + (hi[1] - lo[1]) * t, 0.2, "its edges in the mage colors")
+    DaylightUI:Set("Chat", "bubbleColor", "accent")
+end)
+
+T.test("chat: the bubble options take the accent line away, square the corner and thin the background", function()
+    login()
+    local Style = DaylightUI.Style
+    local Bubbles = stub.chatModule.Bubbles
+    local outer = makeBubble("Anyone for Deadmines?")
+    stub.SetBubbles({ outer })
+    Bubbles.DressAll()
+    local mine = Bubbles.OverlayOf(outer)
+    local h = mine:GetHeight()
+    DaylightUI:Set("Chat", "bubbleBand", 0)
+    DaylightUI:Set("Chat", "bubbleCut", false)
+    DaylightUI:Set("Chat", "bubbleAlpha", 0.5)
+    stub.RunTimers()
+    T.falsy(mine.band:IsShown(), "no accent line")
+    T.truthy(mine:GetHeight() < h, "the bubble shrinks by the line")
+    T.eq(Style.GetCut(mine), 0, "four square corners")
+    T.eq(Style.GetShell(mine).opts.bgAlpha, 0.5, "the background as set")
+    T.truthy(mine.tail:IsShown(), "the tail stays")
+    DaylightUI:Set("Chat", "bubbleBand", 6)
+    DaylightUI:Set("Chat", "bubbleCut", true)
+    stub.RunTimers()
+    T.truthy(mine.band:IsShown(), "the line back")
+    T.truthy(Style.GetCut(mine) > 0, "cut again")
 end)
 
 T.test("chat: a zero unbounded width falls back to the measured speech line", function()
@@ -2266,6 +2383,13 @@ T.test("chat: the input box's outline eases into the channel's color", function(
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
+-- The game announces a typing box's focus change through EventRegistry
+-- (ChatFrameEditBox.lua, from the box's own focus scripts).
+local function announce(event, eb)
+    local cb = callbacks["ChatFrame.OnEditBox" .. event]
+    if cb then cb(eb) end
+end
+
 T.test("chat: the typing box eases in out of a fight and snaps in one", function()
     login()
     local Chat = stub.chatModule.Chat
@@ -2274,6 +2398,7 @@ T.test("chat: the typing box eases in out of a fight and snaps in one", function
     function eb:HasFocus() return focused end
     Chat.Step(1)
     focused = true
+    announce("FocusGained", eb)
     Chat.Step(DaylightUI.Motion.FAST / 2)
     T.truthy(eb:GetAlpha() > 0 and eb:GetAlpha() < 1, "on its way in: " .. eb:GetAlpha())
     T.truthy(eb:IsMouseEnabled(), "typing at once")
@@ -2281,9 +2406,46 @@ T.test("chat: the typing box eases in out of a fight and snaps in one", function
     Chat.Step(1)
     Chat.fight = true
     focused = true
+    announce("FocusGained", eb)
     Chat.Step(0.01)
     T.eq(eb:GetAlpha(), 1, "in a fight: at once")
     Chat.fight = nil
+end)
+
+-- Idle chat used to look at every typing box every frame (HasFocus, alpha, outline
+-- color), about 14 boxes, 60+ times a second. The game says when a box's focus
+-- changes, so the boxes are only looked at around those changes and while typing.
+T.test("chat: idle typing boxes aren't looked at every frame, a focus change shows the box at once", function()
+    login()
+    local Chat = stub.chatModule.Chat
+    local eb = ChatFrame1EditBox
+    local focused, looks = false, 0
+    function eb:HasFocus() looks = looks + 1; return focused end
+    for _ = 1, 30 do Chat.Step(1 / 60) end   -- settle whatever login left
+    looks = 0
+    for _ = 1, 60 do Chat.Step(1 / 60) end   -- one idle second
+    T.truthy(looks <= 1 / Chat.WATCH + 1, "an idle second: a few looks, not one a frame (" .. looks .. ")")
+    -- Enter: the game focuses the box and says so; the very next frame shows it.
+    focused = true
+    announce("FocusGained", eb)
+    Chat.Step(1 / 60)
+    T.truthy(eb:GetAlpha() > 0, "typing: on its way in the next frame")
+    T.truthy(eb:IsMouseEnabled(), "and takes clicks at once")
+    looks = 0
+    for _ = 1, 10 do Chat.Step(1 / 60) end
+    T.truthy(looks >= 10, "while typing it's followed every frame (a channel switch recolors it)")
+    T.eq(eb:GetAlpha(), 1)
+    -- Sent: focus lost is announced first, then the game sets the idle box to 0.35.
+    focused = false
+    announce("FocusLost", eb)
+    eb:SetAlpha(0.35)
+    for _ = 1, 30 do Chat.Step(1 / 60) end
+    T.eq(eb:GetAlpha(), 0, "the game's 0.35 is taken back down")
+    T.falsy(eb:IsMouseEnabled(), "clicks go through to the tabs again")
+    -- A box whose focus reads secret and no announcement: caught by the slow look.
+    focused = true
+    for _ = 1, math.ceil(Chat.WATCH * 60) + 2 do Chat.Step(1 / 60) end
+    T.truthy(eb:GetAlpha() > 0, "missed edge: seen within one watch")
 end)
 
 -- A whisper in a dungeon fight caused hundreds of errors. The game's box took the
@@ -2811,9 +2973,34 @@ T.test("chat daylight: a link click is the game's own, for the main window", fun
     local _, box = daylight()
     local got
     _G.SetItemRef = function(link, text, button, frame) got = { link, text, button, frame } end
-    box:GetScript("OnHyperlinkClick")(box, "player:Bob", "[Bob]", "LeftButton")
-    T.eq(got and got[1], "player:Bob")
+    box:GetScript("OnHyperlinkClick")(box, "item:2589", "[Linen Cloth]", "LeftButton")
+    T.eq(got and got[1], "item:2589")
     T.eq(got[4], DEFAULT_CHAT_FRAME, "as if clicked in the main window")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- A click that misses the twins lands on the box itself (a line the twins skip,
+-- such as one whose text read secret). Run from there, the game's name menu
+-- carries Daylight UI's taint and its Guild Invite is blocked ("the game
+-- blocked Invite()", a player's report), as Copy Character Name was. So a name
+-- or channel clicked on the box itself never reaches the game's click: the
+-- twins are laid again, and the next click is the game's own.
+T.test("chat daylight: a name or channel clicked on the box itself never runs the game's click from Daylight UI", function()
+    local _, box = daylight()
+    local CH = stub.chatModule
+    local calls, synced = 0, 0
+    _G.SetItemRef = function() calls = calls + 1 end
+    local sync = CH.Links.Sync
+    CH.Links.Sync = function(...) synced = synced + 1; return sync(...) end
+    for _, link in ipairs({ "player:Robb-Realm:77:GUILD", "BNplayer:Kira:3:78:BN_WHISPER",
+                            "playerCommunity:Robb:1", "channel:CHANNEL:2" }) do
+        for _, button in ipairs({ "LeftButton", "RightButton" }) do
+            box:GetScript("OnHyperlinkClick")(box, link, "[x]", button)
+        end
+    end
+    CH.Links.Sync = sync
+    T.eq(calls, 0, "the game's click never ran from the box's own script")
+    T.truthy(synced >= 1, "the twins were laid again for the next click")
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
@@ -3575,6 +3762,111 @@ T.test("chat: say, guild, party and the rest can have their own short tags", fun
     _G.CHAT_SAY_GET, _G.CHAT_WHISPER_INFORM_GET = fmt.say, fmt.inform
 end)
 
+T.test("chat: leader tags use native titles only on non-Latin clients", function()
+    login()
+    local Tags = stub.chatModule.Tags
+    local savedLetters = DaylightUI:Get("Chat", "tagLetters")
+    local savedOwn = {}
+    for kind, text in pairs(Tags.own) do savedOwn[kind] = text end
+    local lines = { party = "|Hchannel:PARTY|h[Party]|h Ann: hi", raid = "|Hchannel:RAID|h[Raid]|h Ann: hi",
+                    instance = "|Hchannel:INSTANCE_CHAT|h[Instance]|h Ann: hi" }
+    local events = { "CHAT_MSG_PARTY_LEADER", "CHAT_MSG_RAID_LEADER", "CHAT_MSG_INSTANCE_CHAT_LEADER" }
+    local kinds = { "party", "raid", "instance" }
+    local get = function(kind, event) return Tags.Shorten(lines[kind], event) end
+    local standard = { party = "PL", raid = "RL", instance = "IL" }
+    local saved, names = {}, { "CHAT_MSG_SAY", "CHAT_MSG_YELL", "WHISPER", "CHAT_MSG_PARTY", "CHAT_MSG_PARTY_LEADER",
+        "CHAT_MSG_RAID", "CHAT_MSG_RAID_LEADER", "CHAT_MSG_GUILD", "CHAT_MSG_OFFICER", "CHAT_MSG_INSTANCE_CHAT",
+        "CHAT_MSG_INSTANCE_CHAT_LEADER", "INSTANCE_CHAT", "INSTANCE_CHAT_LEADER", "CHAT_MSG_RAID_WARNING",
+        "CHAT_WHISPER_INFORM_GET", "CHAT_SAY_GET" }
+    for _, name in ipairs(names) do saved[name] = _G[name] end
+
+    local function restore()
+        for _, name in ipairs(names) do _G[name] = saved[name] end
+        Tags.own = {}
+        for kind, text in pairs(savedOwn) do Tags.own[kind] = text end
+        DaylightUI:Set("Chat", "tagLetters", savedLetters or "native")
+        stub.RunTimers()
+        Tags.ResetDefaults()
+    end
+
+    local ok, err = pcall(function()
+        local function set(t) for name, value in pairs(t) do _G[name] = value end; Tags.ResetDefaults() end
+        local function expected(kind) return "|h[" .. standard[kind] .. "]|h" end
+
+        -- The existing English letters and a custom ASCII parent stay exactly as before.
+        for i, kind in ipairs(kinds) do T.truthy(get(kind, events[i]):find(expected(kind), 1, true), "standard leader tag") end
+        Tags.SetOwn("party", "Grp")
+        T.truthy(get("party", events[1]):find("|h[GrpL]|h", 1, true), "a custom ASCII parent still takes L")
+        Tags.SetOwn("party", "")
+        Tags.ResetDefaults()
+
+        -- Latin words in native mode are still shortened to the same English letters.
+        Tags.Apply({ shortTags = true, tagLetters = "native" })
+        set({ CHAT_MSG_SAY = "Decir", CHAT_MSG_YELL = "Gritar", WHISPER = "Susurrar", CHAT_MSG_PARTY = "Grupo",
+            CHAT_MSG_PARTY_LEADER = "Lider de grupo", CHAT_MSG_RAID = "Banda", CHAT_MSG_GUILD = "Hermandad",
+            CHAT_MSG_OFFICER = "Oficial", CHAT_MSG_INSTANCE_CHAT = "Estancia", CHAT_MSG_RAID_WARNING = "Aviso de la banda",
+            CHAT_WHISPER_INFORM_GET = "A %s: ", CHAT_SAY_GET = "%s dice: " })
+        T.eq(Tags.Default("party"), "G", "Hermandad takes H, so Grupo takes G")
+        T.truthy(get("party", events[1]):find("|h[GL]|h", 1, true), "Latin native words still take L")
+        restore()
+
+        -- Non-Latin game words give the title after the parent word: never the parent alone.
+        set({ CHAT_MSG_PARTY = "小队", CHAT_MSG_PARTY_LEADER = "小队队长",
+              CHAT_MSG_RAID = "团队", CHAT_MSG_RAID_LEADER = "团队领袖",
+              CHAT_MSG_INSTANCE_CHAT = "副本", CHAT_MSG_INSTANCE_CHAT_LEADER = "副本向导" })
+        T.truthy(get("party", events[1]):find("|h[队长]|h", 1, true), "Chinese party leader")
+        T.truthy(get("raid", events[2]):find("|h[领袖]|h", 1, true), "Chinese raid leader")
+        T.truthy(get("instance", events[3]):find("|h[向导]|h", 1, true), "Chinese instance leader")
+
+        -- Leader tags are cached until ResetDefaults().
+        _G.CHAT_MSG_PARTY_LEADER = "小队团长"
+        T.truthy(get("party", events[1]):find("|h[队长]|h", 1, true), "cached leader tag stays until ResetDefaults")
+        Tags.ResetDefaults()
+        T.truthy(get("party", events[1]):find("|h[团长]|h", 1, true), "ResetDefaults clears cached leader tags")
+
+        -- Traditional Chinese uses the same rule.
+        set({ CHAT_MSG_PARTY = "隊伍", CHAT_MSG_PARTY_LEADER = "隊伍隊長" })
+        T.truthy(get("party", events[1]):find("|h[隊長]|h", 1, true), "Traditional Chinese party leader")
+
+        -- A non-Latin custom parent is not a Latin override, so the localized title still wins.
+        set({ CHAT_MSG_PARTY = "小队", CHAT_MSG_PARTY_LEADER = "小队队长" })
+        Tags.SetOwn("party", "队")
+        Tags.ResetDefaults()
+        T.truthy(get("party", events[1]):find("|h[队长]|h", 1, true), "a non-Latin custom parent keeps the native title")
+        Tags.SetOwn("party", "Grp")
+        Tags.ResetDefaults()
+        T.truthy(get("party", events[1]):find("|h[GrpL]|h", 1, true), "a custom ASCII parent on a non-Latin client still takes L")
+        Tags.SetOwn("party", "")
+        Tags.ResetDefaults()
+        restore()
+
+        -- A leader word that does not start with the parent word must not be truncated.
+        set({ CHAT_MSG_PARTY = "Группа", CHAT_MSG_PARTY_LEADER = "Лидер группы" })
+        T.truthy(get("party", events[1]):find("|h[ГL]|h", 1, true), "a non-prefix leader falls back to L")
+
+        -- Two leaders with the same extracted title neither uses it.
+        set({ CHAT_MSG_PARTY = "파티", CHAT_MSG_PARTY_LEADER = "파티장", CHAT_MSG_RAID = "공격대",
+            CHAT_MSG_RAID_LEADER = "공격대장" })
+        T.truthy(get("party", events[1]):find("|h[파L]|h", 1, true), "a duplicate party title falls back to L")
+        T.truthy(get("raid", events[2]):find("|h[공L]|h", 1, true), "a duplicate raid title falls back to L")
+
+        -- The instance fallback globals work when the CHAT_MSG constants are absent.
+        set({ CHAT_MSG_INSTANCE_CHAT = nil, CHAT_MSG_INSTANCE_CHAT_LEADER = nil,
+            INSTANCE_CHAT = "副本", INSTANCE_CHAT_LEADER = "副本向导" })
+        T.truthy(get("instance", events[3]):find("|h[向导]|h", 1, true), "instance leader fallback globals")
+        restore()
+
+        -- Back to English letters restores the original tags.
+        Tags.Apply({ shortTags = true, tagLetters = "english" })
+        for i, kind in ipairs(kinds) do T.truthy(get(kind, events[i]):find(expected(kind), 1, true), "English letters again") end
+        T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    end)
+
+    restore()
+    if not ok then error(err, 0) end
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
 T.test("chat daylight: a tab's Show window renames it from the box up top", function()
     local Box = daylight()
     local Tabs, Filter = stub.chatModule.Tabs, stub.chatModule.Filter
@@ -4216,32 +4508,60 @@ T.test("chat daylight: the channel list's TradeLocal is Trade (Local), one row, 
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
-T.test("chat daylight: Battle.net whispers have their own switch; a tab with whispers keeps them, only once", function()
-    local Box = daylight()
+-- A player missed their Battle.net friend's whispers on a tab with Whispers on,
+-- and kept seeing them on one with Whispers off: Battle.net whispers had a switch
+-- of their own. One Whispers switch covers both now.
+T.test("chat daylight: one Whispers switch covers Battle.net whispers too; saved tabs keep whispers if either was on", function()
+    local Box, box = daylight(function()
+        ChatTypeInfo.WHISPER = { id = 7, r = 1, g = 0.5, b = 1 }
+        ChatTypeInfo.BN_WHISPER = { id = 9, r = 0, g = 1, b = 1 }
+    end)
     local CH = stub.chatModule
     local Kinds = CH.Kinds
-    T.eq(select(2, Kinds.Of(nil, "CHAT_MSG_BN_WHISPER")), "bnet")
-    T.eq(select(2, Kinds.Of(nil, "CHAT_MSG_BN_WHISPER_INFORM")), "bnet")
-    T.eq(select(2, Kinds.Of(nil, "CHAT_MSG_WHISPER")), "whisper")
     DaylightUI:Set("Chat", "tabs", {
+        { name = "Both", kinds = { whisper = true, bnet = false }, v = 8 },
+        { name = "Bnet only", kinds = { bnet = true }, v = 8 },
+        { name = "All, whispers off", all = true, kinds = { whisper = false }, v = 8 },
+        { name = "All, both off", all = true, kinds = { whisper = false, bnet = false }, v = 8 },
         { name = "Old", kinds = { whisper = true }, v = 2 },
         { name = "None", kinds = { party = true }, v = 2 },
+        { name = "Old all", all = true, v = 2 },
     })
     stub.RunTimers()
-    T.truthy(Box.Tabs()[1].kinds.bnet, "whispers brought Battle.net whispers along")
-    T.falsy(Box.Tabs()[2].kinds.bnet, "nothing it didn't show")
-    T.falsy(Box.Tabs()[2].kinds.instance, "an older split isn't run again: instance off stays off")
-    CH.Tabs.SetKind(1, "bnet", false)
-    stub.RunTimers()
-    T.falsy(Box.Tabs()[1].kinds.bnet, "off stays off")
-    T.truthy(Box.Tabs()[1].kinds.whisper, "whispers stay")
-    CH.Filter.Open(1)
-    local row
-    for _, b in ipairs(CH.Filter.Rows()) do
-        if b.kind == "bnet" then row = b end
+    local tabs = Box.Tabs()
+    T.eq(tabs[1].kinds.whisper, true, "on and off: on")
+    T.eq(tabs[2].kinds.whisper, true, "only Battle.net on: whispers on")
+    T.isnil(tabs[3].kinds.whisper, "an everything tab with Battle.net still on shows whispers")
+    T.eq(tabs[4].kinds.whisper, false, "both off: off")
+    T.eq(tabs[5].kinds.whisper, true, "a tab saved long ago keeps its whispers")
+    T.falsy(tabs[6].kinds.whisper, "nothing it didn't show")
+    T.falsy(tabs[6].kinds.instance, "an older split isn't run again: instance off stays off")
+    T.isnil(tabs[7].kinds and tabs[7].kinds.whisper, "an old everything tab shows them all")
+    for i, tab in ipairs(tabs) do
+        T.isnil(tab.kinds and tab.kinds.bnet, "no Battle.net switch left on tab " .. i)
+        T.eq(tab.v, Kinds.VERSION)
     end
-    T.truthy(row, "the Show window has its row")
-    T.eq(CH.Filter.TypeOf("bnet"), "BN_WHISPER", "in its own color")
+    T.truthy(Kinds.Shows(tabs[1], "bnet"), "Whispers on: Battle.net whispers show")
+    T.falsy(Kinds.Shows(tabs[4], "bnet"), "Whispers off: they don't")
+    -- A Battle.net whisper lands where Whispers is on, and only there.
+    DaylightUI:Set("Chat", "tabs", {
+        { name = "Gen", all = true, kinds = { whisper = false }, v = Kinds.VERSION },
+        { name = "G/I", kinds = { whisper = true, say = true }, v = Kinds.VERSION },
+    })
+    stub.RunTimers()
+    Box.Pick(1)
+    ChatFrame1:AddMessage("[Kira]: hey", 0, 1, 1, 9, nil, nil, "CHAT_MSG_BN_WHISPER", { "hey", "Kira", n = 14 })
+    T.eq(#boxTexts(box), 0, "not on the tab with Whispers off")
+    Box.Pick(2)
+    T.eq(table.concat(boxTexts(box), "|"), "[Kira]: hey", "on the tab with Whispers on")
+    CH.Filter.Open(2)
+    local whisperRow, bnetRow
+    for _, b in ipairs(CH.Filter.Rows()) do
+        if b.kind == "whisper" then whisperRow = b end
+        if b.kind == "bnet" then bnetRow = b end
+    end
+    T.truthy(whisperRow, "the Whispers switch")
+    T.falsy(bnetRow, "no Battle.net whispers row")
     CH.Filter.Close()
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
@@ -4491,6 +4811,85 @@ T.test("chat whispers: shown in their window only, or the chat only", function()
     whisper("hi", "Lephoque")
     T.falsy(DaylightUIChatTiles:IsShown(), "no tiles")
     T.truthy(CH.Talk.Get("w:Lephoque"), "still kept for the hub")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- A Whisper button in Daylight UI's own windows (friends, group finder) opens the
+-- card with that person. Opening the game's chat box from addon code left it
+-- tainted, and a later reply to a hidden name errored every time it opened.
+T.test("chat whispers: a Whisper button elsewhere opens the card with that person, never the game's box", function()
+    local sent, opened = {}, {}
+    daylight(function()
+        _G.C_ChatInfo = _G.C_ChatInfo or {}
+        _G.C_ChatInfo.SendChatMessage = function(text, kind, _, to) sent[#sent + 1] = { text, kind, to } end
+        _G.BNSendWhisper = function(id, text) sent[#sent + 1] = { text, "BN", id } end
+    end)
+    local CH = stub.chatModule
+    for _, k in ipairs({ "OpenChat", "SendTell", "SendBNetTell" }) do
+        _G.ChatFrameUtil[k] = function() opened[#opened + 1] = k end
+    end
+    DaylightUI.Pad.Whisper({ name = "Arthas" })
+    T.eq(#opened, 0, "the game's chat box stays shut")
+    T.truthy(CH.Convo.Showing("w:Arthas"), "the card opens with Arthas")
+    local t = CH.Convo.Thread()
+    T.truthy(t.input:HasFocus(), "ready to type")
+    t.input:SetText("lfg?")
+    t.input:GetScript("OnEnterPressed")(t.input)
+    T.deq(sent[#sent], { "lfg?", "WHISPER", "Arthas" }, "sent to Arthas")
+    -- A Battle.net friend: their own conversation, by account.
+    DaylightUI.Pad.Whisper({ bn = 7, name = "Jaina" })
+    T.truthy(CH.Convo.Showing("bn:7"), "a Battle.net friend's card")
+    t.input:SetText("hey")
+    t.input:GetScript("OnEnterPressed")(t.input)
+    T.deq(sent[#sent], { "hey", "BN", 7 })
+    -- Someone already talking to you: the conversation you have, lines and all.
+    whisper("hi", "Lephoque")
+    DaylightUI.Pad.Whisper({ name = "Lephoque" })
+    T.truthy(CH.Convo.Showing("w:Lephoque"), "the conversation you already have")
+    T.eq(#CH.Talk.Get("w:Lephoque").msgs, 1, "with its line")
+    -- No card with whispers kept in the chat only: Daylight UI's small box asks.
+    CH.Convo.Close()
+    DaylightUI:Set("Chat", "whispersIn", "chat")
+    stub.RunTimers()
+    local W = DaylightUI.Widgets
+    local prompt, asked = W.Prompt, nil
+    W.Prompt = function(text) asked = text end
+    DaylightUI.Pad.Whisper({ name = "Thrall" })
+    W.Prompt = prompt
+    T.truthy(asked and asked:find("Thrall", 1, true), "the small box asks instead")
+    T.falsy(CH.Convo.Showing("w:Thrall"))
+    T.eq(#opened, 0, "still never the game's box")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- Only a Whisper action means "I want to write to them". Opening a conversation to
+-- read it (a tile, the preview, Pop out from the hub) leaves the keyboard on spells.
+T.test("chat whispers: only a Whisper button types; a tile, the preview or Pop out just opens", function()
+    daylight()
+    local CH = stub.chatModule
+    whisper("hi", "Lephoque")
+    local t
+    local function typing() t = CH.Convo.Thread(); return t and t.input:HasFocus() end
+    CH.Convo.Toggle("w:Lephoque")                          -- a tile's click
+    T.truthy(CH.Convo.Showing("w:Lephoque"))
+    T.falsy(typing(), "a tile opens the card without typing")
+    CH.Convo.Close()
+    stub.RunTimers()
+    CH.Convo.Open("w:Lephoque")                            -- the preview's click
+    T.falsy(typing(), "the preview opens it without typing")
+    CH.Convo.Close()
+    stub.RunTimers()
+    CH.Hub.Open("w:Lephoque")
+    CH.Thread.LINKS.pop.click({ c = "w:Lephoque" })        -- Pop out
+    T.truthy(CH.Convo.Showing("w:Lephoque"))
+    T.falsy(typing(), "Pop out opens it without typing")
+    -- Already open, then Whisper from the friends list: it types now.
+    DaylightUI.Pad.Whisper({ name = "Lephoque" })
+    T.truthy(typing(), "a Whisper button types to them")
+    CH.Convo.Close()
+    stub.RunTimers()
+    DaylightUI.Pad.Whisper({ name = "Arthas" })
+    T.truthy(typing(), "and from a closed card")
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
@@ -5550,7 +5949,8 @@ T.test("chat daylight: a Shift-clicked name's /who answer shows on the tab you'r
     _G.IsModifiedClick, _G.SetItemRef = function(what) return what == "CHATLINK" end, function() end
     systemLine("Dave has come online.")
     T.eq(#boxTexts(box), 0, "a system line alone stays out of Trade")
-    box:GetScript("OnHyperlinkClick")(box, "player:Bob:7:CHANNEL:2", "[Bob]", "LeftButton")
+    -- The click lands on the name's twin, whose hook tells the box a /who was asked.
+    stub.chatModule.Links.NameClicked("player:Bob:7:CHANNEL:2")
     systemLine("[Bob]: Level 12 Human Mage")
     T.truthy(string.find(boxTexts(box)[1] or "", "Level 12", 1, true), "the answer shows")
     stub.Advance(Box.ANSWER + 0.1)
@@ -6276,7 +6676,7 @@ T.test("chat daylight: a tab's right-click menu opens its switches under Channel
     T.eq(seen and seen.show, "Channels")
 end)
 
-T.test("chat on a controller: Classic whatever the setting, the game's chat buttons named over the typing box", function()
+T.test("chat on a controller: Classic whatever the setting, one hint bar: the game's own under the typing box", function()
     local Box = daylight()
     local Chat = stub.chatModule.Chat
     T.truthy(Box.On(), "the Daylight box, mouse and keyboard")
@@ -6290,17 +6690,21 @@ T.test("chat on a controller: Classic whatever the setting, the game's chat butt
     local eb, focused = ChatFrame1EditBox, true
     local had = eb.HasFocus
     eb.HasFocus = function() return focused end   -- the fake game's boxes never hold focus
+    -- The game's chat footer (FloatingChatFrameMixin:CreateFooter): its legend is a
+    -- child of the chat frame, hung under the edit box, shown on FocusGamepad, which
+    -- every focus of the box brings (ChatFrameEditBoxMixin:OnEditFocusGained).
+    local legend = CreateFrame("Frame", nil, ChatFrame1)
+    legend:SetPoint("TOPLEFT", eb, "BOTTOMLEFT")
+    legend:SetSize(300, 30)
     Chat.Input(0.016)
-    local host = Chat.padHost
-    T.eq(DaylightUI.Pad.taken, host, "typing: its hints show")
-    local said = {}
-    for _, row in ipairs(DaylightUI.Pad.HintList(host)) do said[#said + 1] = row[2] end
-    T.truthy(table.concat(said, "|"):find(ACTION_LABEL_SEND or "Send", 1, true))
-    T.truthy(DaylightUI.Pad.hints:IsShown())
+    T.truthy(legend:IsVisible() and legend:GetEffectiveAlpha() > 0, "the game's own bar shows under the box")
+    T.eq(DaylightUI.Pad.taken, nil, "Daylight UI draws no second bar")
+    T.falsy(DaylightUI.Pad.hints and DaylightUI.Pad.hints:IsShown(), "no Daylight UI hint bar over the box")
     for _, k in ipairs({ "PAD1", "PAD3", "PAD4", "PADLSHOULDER" }) do T.eq(stub.overrides[k], nil, k .. " stays the game's") end
     focused = false
     Chat.Input(0.016)
-    T.eq(DaylightUI.Pad.taken, nil, "done typing: given back")
+    legend:Hide()
+    T.eq(DaylightUI.Pad.taken, nil, "done typing: nothing held")
     eb.HasFocus = had
     _G.GamepadMode, _G.InputUtil = nil, nil
     DaylightUI.Fire("PadChanged")

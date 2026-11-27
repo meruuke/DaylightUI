@@ -1,7 +1,6 @@
 -- Russian (ruRU). English text is the key (Locales/Locales.lua).
 local _, DUI = ...
-if DUI.LOCALE ~= "ruRU" then return end
-local L = DUI.L
+DUI.AddLanguage("ruRU", function(L)
 
 -- Machine draft below this line: not yet checked by a native speaker.
 L["A crown on the party leader's frame. It rides with the name tab or portrait until you pick a spot for it."] = "Корона на рамке лидера группы. Следует за вкладкой имени или портретом, пока вы не выберете ему место."
@@ -213,7 +212,6 @@ L["%s found, showing %d: narrow the search"] = "Найдено: %s, показа
 L["%s hidden."] = "%s: скрыто."
 L["%s honorable kills, and counting."] = "Почетных побед: %s, и это не предел."
 L["%s honorable kills. The other faction remembers you."] = "Почетных побед: %s. Другая фракция вас помнит."
-L["%s is also loaded. Both replace the same %s; disable one of them."] = "%s тоже загружен. Оба заменяют одно и то же (%s): отключите один из них."
 L["%s is also on. Both change your %s."] = "%s тоже включен. Оба меняют то же самое: %s."
 L["%s is guarding your spot."] = "%s охраняет ваше место."
 L["%s is made again from %s, with your picks."] = "%s создан заново из %s с вашим выбором."
@@ -248,6 +246,7 @@ L["%s spent at level %d so far."] = "Потрачено %s на уровне %d.
 L["%s to spend"] = "Можно потратить: %s"
 L["%s was made for an older DaylightUI and is off: look for an update of it."] = "%s создан для старой версии DaylightUI и отключен: поищите его обновление."
 L["Its name in the AddOns list should read \"%s %s\": every plugin\'s does."] = "В списке модификаций его название должно быть «%s %s»: так называется каждый плагин."
+L["Its .toc should say \"## Category: %s\" and \"## Group: %s\", so it sits under the plugins' heading in the AddOns list."] = "В его .toc должно быть «## Category: %s» и «## Group: %s», чтобы в списке модификаций он стоял под заголовком плагинов."
 L["%s wonders where you went."] = "%s гадает, куда вы пропали."
 L["%s x%d"] = "%s x%d"
 L["%s · Level %d"] = "%s · Уровень %d"
@@ -1472,6 +1471,8 @@ L["Focus cast bar"] = "Индикатор заклинаний фокуса"
 L["Focus cast bar text size"] = "Размер текста индикатора заклинаний фокуса"
 L["Fold it"] = "Свернуть"
 L["Fold ready quests"] = "Сворачивать готовые задания"
+L["Filter under the title"] = "Фильтр под заголовком"
+L["Shows All and This zone as words under the Quests title, always there, instead of buttons on its line that appear when you hover the list. The tracker grows by one line."] = "Показывает «Все» и «Эта зона» словами под заголовком заданий, всегда, вместо кнопок на его строке, которые появляются при наведении на список. Список становится на одну строку выше."
 L["Fold Quests"] = "Свернуть задания"
 L["Fade Toggle"] = "Переключить затухание"
 L["Fold this quest"] = "Свернуть это задание"
@@ -4960,3 +4961,12 @@ L["The data bar has no border on the global style: on a strip this thin the acce
 L["The color of every chat panel's border. The border still lights up in your accent color while you drag a corner to size the chat."] = "Цвет рамки каждой панели чата. Рамка по-прежнему подсвечивается цветом акцента, пока вы тянете угол, чтобы изменить размер чата."
 L["Every chat panel: the main one, the second one and a chat window pulled out on its own. On the global style the Classic chat keeps a thin line."] = "Каждая панель чата: основная, вторая и отдельно вынесенное окно чата. В общем стиле классический чат сохраняет тонкую линию."
 L["Gives the second chat panel its own background opacity, set in the row below. When off, it's as see-through as the main chat panel. Shown while the chat's Use Daylight UI global style is off."] = "Даёт второй панели чата свою непрозрачность фона, задаётся в строке ниже. Если выключено, она так же прозрачна, как основная. Видно, пока у чата выключен «Общий стиль Daylight UI»."
+
+-- Mailbox: what happened to an auction house letter's item (machine draft, not yet checked by a native speaker;
+-- Canceled, Expired and Outbid follow the game's own words where it has one that fits).
+L["Sold"] = "Продано"
+L["Expired"] = "Время истекло"
+L["Canceled"] = "Отменено"
+L["Won"] = "Выиграно"
+L["Outbid"] = "Перекуплено"
+end)

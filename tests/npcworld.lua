@@ -249,7 +249,22 @@ local function installTrainer()
     end
     _G.GetTrainerTradeskillRankValues = function()
         if not TR().rank then return nil end
-        return TR().rank, TR().maxRank or 75, 0
+        return TR().rank, TR().maxRank or 75, TR().modifier or 0
+    end
+    -- Another spell a service needs first: its `needs` ("Frostbolt Rank 3"), met
+    -- once that one is known (Blizzard_TrainerUI.lua's ability requirements).
+    _G.GetTrainerServiceNumAbilityReq = function(i)
+        local s = trainerList()[i]
+        return s and s.needs and 1 or 0
+    end
+    _G.GetTrainerServiceAbilityReq = function(i, n)
+        local s = trainerList()[i]
+        if not (s and s.needs and n == 1) then return nil end
+        local met = false
+        for _, t in ipairs(TR().services) do
+            if t.name .. " " .. (t.sub or "") == s.needs and t.kind == "used" then met = true end
+        end
+        return s.needs, met
     end
     _G.GetTrainerServiceTypeFilter = function(kind) return TR().filter[kind] == true end
     _G.SetTrainerServiceTypeFilter = function(kind, on)
@@ -291,7 +306,7 @@ end
 function NW.Trainer(spec)
     spec = spec or {}
     S().trainer = { services = spec.services or NW.Spells(), rank = spec.rank, maxRank = spec.maxRank,
-        type = spec.type, open = true, filter = S().trainer.filter }
+        modifier = spec.modifier, type = spec.type, open = true, filter = S().trainer.filter }
     if stub.units and stub.units.player then stub.units.player.level = spec.level or 20 end
     local f = trainerFrame()
     ShowUIPanel(f)
@@ -336,12 +351,48 @@ local function installMerchant()
             local it = M().items[i]
             if not it then return nil end
             return { name = it.name, texture = it.texture or 134400, price = it.price or 0, stackCount = it.stack or 1,
-                numAvailable = it.available or -1, isPurchasable = true, isUsable = it.usable ~= false, hasExtendedCost = it.extended == true }
+                numAvailable = it.available or -1, isPurchasable = it.purchasable ~= false, isUsable = it.usable ~= false,
+                hasExtendedCost = it.extended == true, isQuestStartItem = it.quest == true, currencyID = it.currencyID }
         end,
         GetNumJunkItems = function() return M().junk end,
-        IsSellAllJunkEnabled = function() return true end,
+        IsSellAllJunkEnabled = function() return M().sellAllJunk ~= false end,
         SellAllJunkItems = function() record("SellAllJunkItems") end,
     }
+    -- A currency sold in a container shows the container's name, icon and amount
+    -- (the game's CurrencyContainerUtil, from the merchant item's `container`).
+    _G.CurrencyContainerUtil = { GetCurrencyContainerInfo = function(id, amount, name, texture)
+        for _, it in ipairs(M().items) do
+            if it.currencyID == id and it.container then
+                return it.container.name, it.container.texture, it.container.amount
+            end
+        end
+        return name, texture, amount
+    end }
+    -- The bags, for junk: NW.Merchant's `bags` = { [bag] = { { quality, sell, count } } },
+    -- `skip` = { [bag] = true } for a bag set to "Ignore" Sell Junk (the game's flag).
+    _G.Enum.BagSlotFlags = _G.Enum.BagSlotFlags or { DisableAutoSort = 1, ClassEquipment = 2, ExcludeJunkSell = 64 }
+    local function bagItem(bag, slot) return ((M().bags or {})[bag] or {})[slot] end
+    _G.C_Container = {
+        GetContainerNumSlots = function(bag) return #((M().bags or {})[bag] or {}) end,
+        GetContainerNumFreeSlots = function() return 16 end,
+        GetContainerItemInfo = function(bag, slot)
+            local it = bagItem(bag, slot)
+            if not it then return nil end
+            return { quality = it.quality or 0, itemID = 7000 + bag * 100 + slot, stackCount = it.count or 1,
+                hyperlink = "|Hitem:" .. (7000 + bag * 100 + slot) .. "|h[Junk]|h" }
+        end,
+        GetBackpackSellJunkDisabled = function() return (M().skip or {})[0] == true end,
+        GetBagSlotFlag = function(bag, flag)
+            return flag == Enum.BagSlotFlags.ExcludeJunkSell and (M().skip or {})[bag] == true
+        end,
+    }
+    -- The game's repair cursor (MerchantRepairItemButton_OnClick) and guild repairs.
+    _G.ShowRepairCursor = function() record("ShowRepairCursor"); S().repairMode = true end
+    _G.HideRepairCursor = function() record("HideRepairCursor"); S().repairMode = false end
+    _G.InRepairMode = function() return S().repairMode == true end
+    _G.CanGuildBankRepair = function() return M().guild ~= nil end
+    _G.GetGuildBankWithdrawMoney = function() return M().guild and M().guild.allowance or 0 end
+    _G.GetGuildBankMoney = function() return M().guild and M().guild.money or 0 end
     _G.GetMerchantItemLink = function(i) local it = M().items[i]; return it and ("|Hitem:" .. i .. "|h[" .. it.name .. "]|h") end
     _G.GetMerchantItemCostItem = function(i, n)
         local c = (M().items[i].costs or {})[n]
@@ -356,7 +407,7 @@ local function installMerchant()
     _G.BuybackItem = function(i) record("BuybackItem", i) end
     _G.CanMerchantRepair = function() return M().canRepair ~= false end
     _G.GetRepairAllCost = function() return M().repair or 0, (M().repair or 0) > 0 end
-    _G.RepairAllItems = function() record("RepairAllItems") end
+    _G.RepairAllItems = function(guild) record("RepairAllItems", guild) end
     _G.CloseMerchant = function()
         record("CloseMerchant")
         C_Timer.After(0, function() stub.FireEvent("MERCHANT_CLOSED") end)
@@ -374,7 +425,8 @@ end
 function NW.Merchant(spec)
     spec = spec or {}
     S().merchant = { items = spec.items or NW.Goods(), junk = spec.junk or 0, repair = spec.repair or 0,
-        buyback = spec.buyback or {}, canRepair = spec.canRepair }
+        buyback = spec.buyback or {}, canRepair = spec.canRepair, bags = spec.bags, skip = spec.skip,
+        guild = spec.guild, sellAllJunk = spec.sellAllJunk }
     stub.FireEvent("MERCHANT_SHOW")
 end
 
@@ -482,6 +534,8 @@ local function installQuest()
     _G.GetQuestItemInfo = function(kind, i)
         local it = (list(kind) or {})[i]
         if not it then return end
+        -- `loading`: the game knows the slot but not the item yet (no name).
+        if it.loading then return nil, it.texture or 134400, it.count or 1, nil, nil, it.itemID or i end
         return it.name, it.texture or 134400, it.count or 1, it.quality or 1, it.usable ~= false, it.itemID or i
     end
     _G.GetQuestItemLink = function(kind, i)
@@ -504,6 +558,74 @@ local function installQuest()
                 return s.name, s.link, 2, nil, s.useLevel
             end
         end
+        -- A gray item in the bags (C_Container above): its vendor price.
+        if type(key) == "string" then
+            local id = tonumber(key:match("Hitem:(%d+)"))
+            local m = S().merchant
+            if id and id >= 7000 and m and m.bags then
+                local bag, slot = math.floor((id - 7000) / 100), (id - 7000) % 100
+                local it = (m.bags[bag] or {})[slot]
+                if it then return "Junk", key, it.quality or 0, nil, nil, nil, nil, nil, nil, nil, it.sell or 0 end
+            end
+        end
+    end
+    -- The rest of what QuestInfo.lua and QuestFrame.lua read from an offer: spell
+    -- rewards (a quest's `spells`: { spellID, name, texture, type, known, hide }),
+    -- a title, skill points { name, icon, points }, honor, the suggested group size,
+    -- a "learn this spell" objective (`criteria` = { spellID, name, texture }),
+    -- required currencies (`requiredCurrencies`: { name, count, currencyID }) and
+    -- the offer's "hide the required items" flag (`hideRequired`).
+    Enum.QuestCompleteSpellType = { LegacyBehavior = 0, Follower = 1, Tradeskill = 2, Ability = 3, Aura = 4, Spell = 5,
+        Unlock = 6, Companion = 7, QuestlineUnlock = 8, QuestlineReward = 9, QuestlineUnlockPart = 10, PossibleReward = 11 }
+    Enum.SpellBookSpellBank = Enum.SpellBookSpellBank or { Player = 0, Pet = 1 }
+    local function spellOf(id)
+        for _, s in ipairs(Q().spells or {}) do if s.spellID == id then return s end end
+    end
+    _G.C_QuestInfoSystem.GetQuestRewardSpells = function(id)
+        local q = Q()
+        if not q or q.questID ~= id then return {} end
+        local out = {}
+        for i, s in ipairs(q.spells or {}) do out[i] = s.spellID end
+        return out
+    end
+    _G.C_QuestInfoSystem.GetQuestRewardSpellInfo = function(id, spellID)
+        local s = Q().questID == id and spellOf(spellID)
+        if not s then return nil end
+        return { texture = s.texture or 136116, name = s.name, isTradeskill = false, isSpellLearned = s.type == 5,
+            hideSpellLearnText = s.hide == true, isBoostSpell = false, genericUnlock = false, type = s.type or 0 }
+    end
+    _G.C_SpellBook = _G.C_SpellBook or {}
+    _G.C_SpellBook.IsSpellInSpellBook = function(spellID)
+        local s = spellOf(spellID)
+        return s ~= nil and s.known == true
+    end
+    _G.C_Spell = _G.C_Spell or {}
+    _G.C_Spell.GetSpellLink = function(id) return "|Hspell:" .. id .. "|h[" .. tostring(id) .. "]|h" end
+    _G.GetRewardTitle = function() return Q().rewardTitle end
+    _G.GetRewardSkillPoints = function()
+        local s = Q().skill
+        if s then return s.name, s.icon, s.points end
+    end
+    _G.GetRewardHonor = function() return Q().honor or 0 end
+    _G.GetSuggestedGroupSize = function() return Q().group or 0 end
+    _G.GetCriteriaSpell = function()
+        local c = Q().criteria
+        if c then return c.spellID, c.name, c.texture or 136116, false end
+    end
+    _G.GetNumQuestCurrencies = function() return #(Q().requiredCurrencies or {}) end
+    _G.C_QuestOffer = _G.C_QuestOffer or {}
+    _G.C_QuestOffer.GetQuestRequiredCurrencyInfo = function(i)
+        local c = (Q().requiredCurrencies or {})[i]
+        if c then return { texture = c.texture or 133784, name = c.name, currencyID = c.currencyID or 2000 + i, quality = 1, requiredAmount = c.count or 1 } end
+    end
+    _G.C_QuestOffer.GetHideRequiredItems = function() return Q().hideRequired == true end
+    -- The game's quest icons (Blizzard_FrameXMLUtil QuestUtils.lua GetQuestIconOffer): a
+    -- repeatable quest wears the blue "!", a plain one the gold.
+    _G.QuestUtil = _G.QuestUtil or {}
+    _G.QuestUtil.GetQuestIconOfferForQuestID = function(_, isLegendary, frequency, isRepeatable)
+        if isLegendary then return "legendaryavailablequesticon", true end
+        if isRepeatable then return "Interface/GossipFrame/DailyActiveQuestIcon", false end
+        return "Interface/GossipFrame/AvailableQuestIcon", false
     end
     _G.GetRewardMoney = function() return Q().money or 0 end
     _G.GetRewardXP = function() return Q().xp or 0 end
@@ -516,7 +638,7 @@ local function installQuest()
     _G.GetAvailableTitle = function(i) return S().greeting.available[i].title end
     _G.GetAvailableQuestInfo = function(i)
         local q = S().greeting.available[i]
-        return q.isTrivial == true, q.frequency, q.repeatable, q.isLegendary, q.questID
+        return q.isTrivial == true, q.frequency, q.repeatable, q.isLegendary, q.questID, q.isImportant, q.isMeta, q.questInfoID
     end
     _G.SelectAvailableQuest = function(i) record("SelectAvailableQuestIndex", i) end
     _G.SelectActiveQuest = function(i)
@@ -556,6 +678,9 @@ function NW.Npc(spec)
     spec = spec or {}
     local units = { player = { name = "Daylight", class = "WARRIOR", level = 60, isPlayer = true } }
     units.npc = { name = spec.name or "William Pestle", reaction = spec.reaction or 5, guid = spec.guid or "Creature-0-1-2-3-253-0" }
+    -- The quest window's unit: the NPC you talk to, unless spec.questnpc says who
+    -- else gives the quest (a party member sharing one), or false for none.
+    if spec.questnpc ~= false then units.questnpc = spec.questnpc or units.npc end
     stub.SetUnits(units)
 end
 

@@ -7,8 +7,18 @@ local _, ns = ...
 
 ns.Game = ns.Game or {}
 ns.Game.SLICE = 250      -- most replicate rows handled in one frame
+ns.Game.SLICE_MS = 6     -- and at most this many milliseconds of them
+
+-- A frame's reading stops at whichever comes first, SLICE rows or SLICE_MS.
+-- Rows cost very different amounts (an item the game must load, a big house),
+-- so a row count alone let one frame take 50 to 100 ms and the game stutter.
+function ns.Game.Deadline()
+    return debugprofilestop() + ns.Game.SLICE_MS
+end
+function ns.Game.Late(deadline)
+    return debugprofilestop() >= deadline
+end
 ns.Game.ITEM_WAIT = 10   -- seconds to wait for the game to know an item (a full scan: of no item arriving)
-ns.Game.ITEM_WAIT_MAX = 120   -- seconds a full scan waits for items at most, however steadily they arrive
 
 -- Now, in seconds: the server's clock when the game has one (prices seen on
 -- different PCs line up), else the computer's. Every price row is stamped with it.
@@ -101,6 +111,50 @@ local function plainNumber(v)
     return type(v) == "number" and v or nil
 end
 
+-- The AH's random suffix numbers on Forever.
+Items.SUFFIX_FIRST, Items.SUFFIX_LAST = 14296, 14473
+
+-- Without this, a suffix was only paired once that very item showed up at the
+-- AH or in the bags, so a green just dropped had no price. The game's tooltip
+-- for an item key carries the suffix's bonus in its link, so every suffix can
+-- be paired at once from any item that rolls them. Done once a session, the
+-- first time a link's suffix isn't paired. If the game's answer for a pair
+-- already known disagrees, nothing is learned: a wrong pair shows one
+-- suffix's price on another.
+local taught = false
+local function teach(itemID)
+    if taught then return end
+    local get = C_TooltipInfo and C_TooltipInfo.GetItemKey
+    if type(get) ~= "function" then return end
+    taught = true
+    local level = select(4, C_Item and C_Item.GetItemInfo and C_Item.GetItemInfo(itemID))
+    level = plainNumber(level) or 0
+    local paired = ns.DB.Table("suffixBonus")
+    local bonusFor = {}
+    for bonus, suffix in pairs(paired) do bonusFor[suffix] = bonus end
+    local found = {}
+    for suffix = Items.SUFFIX_FIRST, Items.SUFFIX_LAST do
+        local data = get(itemID, level, suffix)
+        local link = type(data) == "table" and data.hyperlink
+        local bonus = type(link) == "string" and not (issecretvalue and issecretvalue(link)) and bonusOf(link)
+        if bonus then
+            local known = paired[bonus]
+            if known ~= nil and known ~= suffix then return end
+            if bonusFor[suffix] ~= nil and bonusFor[suffix] ~= bonus then return end
+            if found[bonus] then return end   -- two suffixes, one bonus: not a real answer
+            found[bonus] = suffix
+        end
+    end
+    local any = false
+    for bonus, suffix in pairs(found) do
+        if paired[bonus] == nil then
+            paired[bonus] = suffix
+            any = true
+        end
+    end
+    if any then tell() end
+end
+
 -- The price key of an item link, item ID or price key, and its plain
 -- itemID key: "2589", "2589" for plain items; "7429:-15", "7429" for a link
 -- with a random suffix (classic "of the Monkey" gear: the link's 7th field
@@ -125,6 +179,10 @@ function Items.Key(linkOrID)
             elseif id then
                 local bonus = bonusOf(linkOrID)
                 suffix = bonus and ns.DB.Table("suffixBonus")[bonus]
+                if bonus and not suffix and not taught then
+                    teach(id)
+                    suffix = ns.DB.Table("suffixBonus")[bonus]
+                end
                 if not suffix then
                     -- Words after the item's name are a suffix not paired yet.
                     -- A bonus on an item whose name the game hasn't loaded may

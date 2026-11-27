@@ -61,12 +61,64 @@ end
 
 -- Under the panel, where the tracker's corner goes: in UIParent units from the screen's bottom-left. nil until the
 -- panel has a place.
+-- With the meter below the map, also under the meter windows docked there.
+-- Daylight UI's own tracker follows the meter as it slides; the game's is
+-- placed by its layout until a reload, so it keeps room for the whole meter.
 local function underPanel()
-    local panel = ns.Panel.panel
+    local P = ns.Panel
+    local panel = P.panel
     if not (panel and panel:GetRight() and panel:GetBottom()) then return nil end
     local s = panel:GetEffectiveScale() / UIParent:GetEffectiveScale()
-    return panel:GetRight() * s, panel:GetBottom() * s - ns.Panel.GAP
+    local bottom = panel:GetBottom() * s - P.GAP
+    local MF = ns.MeterFrame
+    if Tracker.Replaced() then
+        bottom = bottom - (MF.chain or MF.DockedHeight(true))
+    else
+        bottom = bottom - P.RoomBelow() * s - MF.DockedHeight(false)
+    end
+    return panel:GetRight() * s, bottom
 end
+
+-- The minimap's frame (the box with its padding and border) and the map
+-- picture inside it, as left and right edges in UIParent units: boxLeft,
+-- boxRight, mapLeft, mapRight. nil while no map shows or the panel has no place.
+-- A frameless round map has no box: both are the map. Worked out from the
+-- panel's edges, the way Panel.Layout places the map in it.
+function Tracker.MapSpan()
+    local P = ns.Panel
+    local panel, area = P.panel, P.mapArea
+    if not (panel and area and area:IsShown() and type(P.mapSize) == "number" and type(P.inset) == "number") then return nil end
+    local s = panel:GetEffectiveScale() / UIParent:GetEffectiveScale()
+    local inset, map = P.inset * s, P.mapSize * s
+    local mapLeft
+    if P.side == "right" or P.side == "below" or P.side == "above" then
+        local l = panel:GetLeft()
+        if not l then return nil end
+        mapLeft = l * s + inset
+    else
+        local r = panel:GetRight()
+        if not r then return nil end
+        mapLeft = r * s - inset - map
+    end
+    local mapRight = mapLeft + map
+    local pad = P.bare and 0 or inset
+    return mapLeft - pad, mapRight + pad, mapLeft, mapRight
+end
+DUI.MinimapSpan = Tracker.MapSpan
+
+-- Where Daylight UI's own tracker hangs its top-right corner under the panel.
+-- Matching the minimap's width, its edge sits on the minimap's (the tracker
+-- says how far its own edge is from that corner); else Tracker.EDGE in from
+-- the panel's corner.
+local function ownX(x)
+    local fit = DUI.QuestTrackerFit and DUI.QuestTrackerFit()
+    if fit then
+        local _, boxRight, _, mapRight = Tracker.MapSpan()
+        if boxRight then return (fit.box and boxRight or mapRight) - fit.pad end
+    end
+    return x - Tracker.EDGE
+end
+Tracker.OwnX = ownX
 
 -- Where that corner goes: the handle's top-right corner where it was moved
 -- to, else under the panel.
@@ -117,12 +169,13 @@ local function followOwn(pos, room)
     local x, y = underPanel()
     if not x then return end
     -- The spot that hangs the tracker's top-right at the anchor.
-    local cx = x - Tracker.EDGE - h:GetWidth() / 2 - UIParent:GetWidth() / 2
+    local ax = ownX(x)
+    local cx = ax - h:GetWidth() / 2 - UIParent:GetWidth() / 2
     local cy = y - h:GetHeight() / 2 - UIParent:GetHeight() / 2
     if not follows(Tracker.OWN_MOVER, saved, cx, cy) then return end
     local right = UIParent:GetWidth() / 2 + saved[1] + h:GetWidth() / 2
     local top = UIParent:GetHeight() / 2 + saved[2] + h:GetHeight() / 2
-    local atX = math.abs(right - x) < 1 or math.abs(right - (x - Tracker.EDGE)) < 1
+    local atX = math.abs(right - x) < 1 or math.abs(right - (x - Tracker.EDGE)) < 1 or math.abs(right - ax) < 1
     if atX and math.abs(top - y) <= room + 1 then
         pos[Tracker.OWN_MOVER] = nil
         if DUI.Movers.Get(Tracker.OWN_MOVER) then DUI.Movers.Apply(Tracker.OWN_MOVER) end
@@ -143,7 +196,46 @@ function Tracker.FollowStrip()
     end
 end
 
-function Tracker.PlaceAnchor()
+-- Daylight UI's own tracker hangs from the anchor, so moving it moves the list.
+-- Its quest item buttons can't follow in a fight, so nothing here moves it
+-- then: a glide under way stops and the rest waits for the fight's end.
+Tracker.GLIDE = "infopanel:trackerAnchor"
+local function setAnchor(x, y)
+    anchor.x, anchor.y = x, y
+    anchor:ClearAllPoints()
+    anchor:SetPoint("TOPRIGHT", UIParent, "BOTTOMLEFT", x, y)
+end
+
+local function glideAnchor(x, y, glide)
+    if anchor.goalX == x and anchor.goalY == y and (glide or (anchor.x == x and anchor.y == y)) then return end
+    anchor.goalX, anchor.goalY = x, y
+    local fx, fy = anchor.x, anchor.y
+    if not (glide and fx and fy) or (fx == x and fy == y) then
+        DUI.Motion.Tween(Tracker.GLIDE, 0, 0, 0)
+        if fx ~= x or fy ~= y then setAnchor(x, y) end
+        return
+    end
+    DUI.Motion.Tween(Tracker.GLIDE, 0, 1, DUI.Motion.NORMAL, function(t)
+        if InCombatLockdown() then
+            DUI.Motion.Tween(Tracker.GLIDE, 0, 0, 0)
+            anchor.goalX, anchor.goalY = nil, nil
+            DUI.AfterCombat(Tracker.PlaceAnchor, "tracker:anchor")
+            return
+        end
+        setAnchor(fx + (x - fx) * t, fy + (y - fy) * t)
+    end)
+end
+
+-- Each step of the meter's slide or of the docked windows coming and going:
+-- the list keeps right under them, out of a fight.
+function Tracker.Follow()
+    if not Tracker.Replaced() or anchor.x == nil or InCombatLockdown() then return end
+    Tracker.PlaceAnchor(true)
+end
+
+-- follow: placed at once, keeping step with the panel; else a move of Daylight
+-- UI's own tracker glides there.
+function Tracker.PlaceAnchor(follow)
     if not anchor then return end
     Tracker.FollowStrip()
     local cx, cy = corner()
@@ -160,13 +252,21 @@ function Tracker.PlaceAnchor()
     end
     local x, y = cx - Tracker.EDGE, cy
     local first = anchor.x == nil
-    local changed = anchor.x ~= x or anchor.y ~= y
-    if changed then
-        anchor.x, anchor.y = x, y
-        anchor:ClearAllPoints()
-        anchor:SetPoint("TOPRIGHT", UIParent, "BOTTOMLEFT", x, y)
+    if Tracker.Replaced() then
+        if not moved() then x = ownX(cx) end
+        glideAnchor(x, y, follow ~= true and not first and DUI.Movers.unlocked ~= true)
+        -- The minimap's frame changed size (its Size, border or padding): the
+        -- tracker matching it takes the new width.
+        local _, br, _, mr = Tracker.MapSpan()
+        local key = br and (br .. ":" .. mr) or ""
+        if key ~= Tracker.spanKey then
+            Tracker.spanKey = key
+            DUI.Fire("MinimapSpanChanged")
+        end
+        return
     end
-    if Tracker.Replaced() then return end
+    local changed = anchor.x ~= x or anchor.y ~= y
+    if changed then setAnchor(x, y) end
     -- The layout gets this spot as plain screen offsets. It's rewritten when
     -- unlock mode ends after a move or reset, and a reload applies it. The panel
     -- moving or resizing later is no request to move the tracker, so that
@@ -251,6 +351,10 @@ function Tracker.Build(mod)
     for _, e in ipairs({ "PLAYER_ENTERING_WORLD", "DISPLAY_SIZE_CHANGED", "UI_SCALE_CHANGED" }) do
         DUI.RegisterEvent(e, placeSoon)
     end
+    -- Daylight UI's own tracker lines its box or its list up with the minimap.
+    DUI.On("SettingChanged", function(scope, path)
+        if scope == "Quests" and (path == "box" or path == "matchMap") then placeSoon() end
+    end)
     if Tracker.Replaced() then return end
     local list, none = {}, {}   -- (kept: the fade asks often)
     DUI.Fade.Register{ key = "InfoPanel.tracker", scope = "InfoPanel", path = "tracker.fade", page = "InfoPanel.tracker",

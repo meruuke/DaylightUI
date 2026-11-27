@@ -53,8 +53,12 @@ local OWN_EVENTS = { CraftShown = true, CraftHidden = true, CraftProfessionChang
     MeterFightStarted = true, MeterFightEnded = true, MeterReset = true,
     -- The Cooldown Manager's (1.7): spellID, piece key.
     CooldownReady = true, CooldownStarted = true,
+    -- 1.14: spellID, piece key (CooldownProc adds true or false).
+    CooldownUsable = true, CooldownProc = true, CooldownBuffUp = true, CooldownBuffDown = true,
     -- The tooltips' look switched (1.12): "rich" or "simple".
-    TooltipStyleChanged = true }
+    TooltipStyleChanged = true,
+    -- Proc Alerts' (1.16): key, stacks (ProcHidden: key).
+    ProcShown = true, ProcRenewed = true, ProcHidden = true }
 
 local lists = {} -- event -> array of listeners { fn, owner, event, dead }
 local counts = {} -- event -> listeners still alive
@@ -145,6 +149,10 @@ function API.Off(handle)
     end
     if type(handle) == "table" and handle.painter == true then
         if stopPainterRef then stopPainterRef(handle) end
+        return
+    end
+    if type(handle) == "table" and (handle.cooldownWatch == true or handle.procWatch == true) then
+        for _, h in ipairs(handle.handles) do API.Off(h) end
         return
     end
     if type(handle) ~= "table" or handle.dead or not handle.event or not handle.fn then return end
@@ -776,12 +784,78 @@ function API.GetCooldownPiece(spellID)
     if not (Rows and type(spellID) == "number") then return nil end
     return Rows.PieceOf(spellID)
 end
--- What a piece shows: { key, spellID, shape ("icon" | "bar"), drawnBy }.
+-- What a piece shows: { key, spellID, shape ("icon" | "bar"), drawnBy, chain }.
 function API.CooldownPieceInfo(frame)
     local Rows = cdmRows()
     local info = Rows and type(frame) == "table" and Rows.pieceInfo[frame]
     if not info then return nil end
-    return { key = info.key, spellID = info.spellID, shape = info.shape, drawnBy = info.drawnBy }
+    return { key = info.key, spellID = info.spellID, shape = info.shape, drawnBy = info.drawnBy,
+        chain = info.chain }
+end
+
+-- What a shown piece reads now (1.14), by its frame, a spell id (any rank) or its
+-- key: a fresh table, every answer plain, nil where the game won't say.
+function API.CooldownState(what)
+    local Rows = cdmRows()
+    if not Rows then return nil end
+    local f = what
+    if type(what) ~= "table" then
+        if type(what) ~= "number" and type(what) ~= "string" then return nil end
+        f = Rows.PieceOf(what)
+    end
+    return f and Rows.StateOf(f) or nil
+end
+
+-- Opens the Cooldown Manager's layout editor (1.14). False in a fight or with it off.
+function API.OpenCooldownEditor()
+    local Rows = cdmRows()
+    local ns = Rows and barsNs()
+    if not (ns and ns.CdmEditor) or InCombatLockdown() then return false end
+    return ns.CdmEditor.Open() == true
+end
+
+-- Proc Alerts (1.16): the procs this character watches, what's up now, and a
+-- flare to show for a moment. Nil or false while the module is off.
+local function procsNs()
+    local mod = DUI:GetModule("Procs")
+    local ns = mod and mod.enabled and mod.ns
+    if not (ns and ns.Data and ns.Flares and ns.Alerts) then return nil end
+    if DUI:Get("Procs", "enabled") == false then return nil end
+    return ns
+end
+
+function API.ProcAlerts()
+    local ns = procsNs()
+    if not ns then return nil end
+    local out = {}
+    for _, p in ipairs(ns.Data.Mine()) do
+        out[#out + 1] = { key = p.key, name = ns.Data.Name(p), spellID = p.spell, itemID = p.item,
+            design = ns.Alerts.Get(p.key, "design"), enabled = ns.Alerts.Get(p.key, "enabled") ~= false,
+            -- A buff-only proc is shown by the client itself, so Daylight UI
+            -- never sees when it comes: no state and no events for it.
+            drawnBy = p.mode == "aura" and "game" or "daylight" }
+    end
+    return out
+end
+
+-- A flare that's up: { key, stacks, left, dur, test }. Nil when it isn't.
+function API.ProcState(key)
+    local ns = procsNs()
+    local f = ns and str(key) and ns.Flares.live[key]
+    if not f then return nil end
+    local info = f.info or {}
+    return { key = key, stacks = info.stacks, dur = info.dur, test = f.test ~= nil and f.test ~= false,
+        left = f.endsAt and math.max(0, f.endsAt - GetTime()) or nil }
+end
+
+-- Shows a proc's flare for seconds (10 by default), as the options' Show
+-- button does: no sound and no events, so it never counts as a real proc.
+function API.TestProcAlert(key, seconds)
+    local ns = procsNs()
+    if not (ns and str(key) and ns.Data.BY[key] and ns.Flares.holder) then return false end
+    if seconds ~= nil and not (type(seconds) == "number" and seconds > 0) then return false end
+    ns.Flares.Test(key, seconds)
+    return true
 end
 
 -- Daylight UI's big frames by a fixed name (1.7), for a plugin to dock to or
@@ -793,6 +867,8 @@ local NAMED = {
     afk = "DaylightUIAfkScreen", npc = "DaylightUINpc",
     -- 1.13: the loot roll cards' holder.
     rolls = "DaylightUIRollStack",
+    -- 1.16: the area round the character the proc flares hang in.
+    procs = "DaylightUIProcs",
 }
 API.FRAME_NAMES = {}
 for k in pairs(NAMED) do API.FRAME_NAMES[#API.FRAME_NAMES + 1] = k end
@@ -1238,6 +1314,9 @@ end
 -- Movers.Register and Fade.Register return nothing else.
 function View.RegisterMover(v, frame, key, label, default)
     if type(frame) ~= "table" or not str(key) then return false end
+    -- The default is a SetPoint list; anything else would only fail later, when
+    -- the mover places the frame.
+    if type(default) == "table" and not str(default[1]) then return false end
     return DUI.SafeCallAs(v.name, DUI.Movers.Register, frame, prefixed(v, key), label, default)
 end
 
@@ -1910,6 +1989,109 @@ function View.AttachCraftPane(v, width)
 end
 
 function View.On(v, event, fn) return API.On(event, fn, v.name) end
+
+-- One spell's Cooldown Manager moments (1.14). what = a spell id (any rank) or a
+-- piece key; handlers by moment, each (spellID, key), proc's with true or false,
+-- and changed(state) once now (when the piece shows) and after each of them.
+local WATCH = { ready = "CooldownReady", started = "CooldownStarted", usable = "CooldownUsable",
+    proc = "CooldownProc", buffUp = "CooldownBuffUp", buffDown = "CooldownBuffDown" }
+function View.WatchCooldown(v, what, handlers)
+    if not ((type(what) == "number" or str(what)) and type(handlers) == "table") then return nil end
+    if next(handlers) == nil then return nil end
+    for name, fn in pairs(handlers) do
+        if not (WATCH[name] or name == "changed") or type(fn) ~= "function" then
+            DUI.Print(string.format(L["%s: WatchCooldown has no moment called %s."], v.name, tostring(name)))
+            return nil
+        end
+    end
+    local changed = handlers.changed
+    local handle = { cooldownWatch = true, handles = {} }
+    for name, event in pairs(WATCH) do
+        local fn = handlers[name]
+        if fn or changed then
+            handle.handles[#handle.handles + 1] = API.On(event, function(sid, key, on)
+                local Rows = cdmRows()
+                if not (Rows and Rows.Matches(what, sid, key)) then return end
+                if fn then fn(sid, key, on) end
+                if changed then changed(API.CooldownState(key or sid)) end
+            end, v.name)
+        end
+    end
+    if changed then
+        local now = API.CooldownState(what)
+        if now then DUI.SafeCallAs(v.name, changed, now) end
+    end
+    return handle
+end
+
+-- One proc's moments (1.16): shown, renewed (each with key, stacks), hidden
+-- (key), and changed(state) once now and after each of them.
+local PROC_WATCH = { shown = "ProcShown", renewed = "ProcRenewed", hidden = "ProcHidden" }
+function View.WatchProc(v, key, handlers)
+    if not (str(key) and type(handlers) == "table" and next(handlers) ~= nil and procsNs()) then return nil end
+    for name, fn in pairs(handlers) do
+        if not (PROC_WATCH[name] or name == "changed") or type(fn) ~= "function" then
+            DUI.Print(string.format(L["%s: WatchProc has no moment called %s."], v.name, tostring(name)))
+            return nil
+        end
+    end
+    local changed = handlers.changed
+    local handle = { procWatch = true, handles = {} }
+    for name, event in pairs(PROC_WATCH) do
+        local fn = handlers[name]
+        if fn or changed then
+            handle.handles[#handle.handles + 1] = API.On(event, function(k, stacks)
+                if k ~= key then return end
+                if fn then fn(k, stacks) end
+                if changed then changed(API.ProcState(key)) end
+            end, v.name)
+        end
+    end
+    if changed then DUI.SafeCallAs(v.name, changed, API.ProcState(key)) end
+    return handle
+end
+
+-- An alert of the plugin's own (1.16), in Daylight UI's flares: the plugin
+-- says when it shows and goes. Its key is "<plugin>:<key>" to everyone else.
+local function ownProc(v, key) return str(key) and (v.name .. ":" .. key) or nil end
+function View.AddProcAlert(v, key, spec)
+    local ns = procsNs()
+    local full = ownProc(v, key)
+    if not (ns and full and type(spec) == "table") then return false end
+    local design, anim = spec.design or "sun", spec.anim or "pulse"
+    if not (ns.Data.DESIGNS[design] and ns.Data.ANIMS[anim]) then return false end
+    if spec.stacks ~= nil and not (type(spec.stacks) == "number" and spec.stacks >= 1) then return false end
+    if spec.sound ~= nil and type(spec.sound) ~= "string" and type(spec.sound) ~= "number" then return false end
+    local was = ns.Data.BY[full]
+    if was and was.owner ~= v.name then return false end
+    ns.Data.AddPlugin({ key = full, class = "PLUGIN", owner = v.name, label = str(spec.name) or key,
+        design = design, anim = anim, stacks = spec.stacks and math.floor(spec.stacks) or nil,
+        sound = spec.sound, combatOnly = false })
+    if ns.Flares.live[full] then ns.Flares.Repaint() end
+    return true
+end
+
+-- info: left and dur (seconds) for the time drain, stacks. False while Proc
+-- Alerts is off or for an alert never added.
+function View.ShowProcAlert(v, key, info)
+    local ns = procsNs()
+    local full = ownProc(v, key)
+    local p = ns and full and ns.Data.BY[full]
+    if not (p and p.owner == v.name and ns.Flares.holder) then return false end
+    if info ~= nil and type(info) ~= "table" then return false end
+    info = info or {}
+    local left, dur = tonumber(info.left), tonumber(info.dur)
+    local f = ns.Flares.Show(full, { left = left, dur = dur or left, stacks = tonumber(info.stacks) })
+    return f ~= nil
+end
+
+function View.HideProcAlert(v, key)
+    local ns = procsNs()
+    local full = ownProc(v, key)
+    if not (ns and full and ns.Flares.live[full]) then return false end
+    ns.Flares.Hide(full)
+    return true
+end
 
 function View.Paint(v, kind, fn, opts)
     local h = Report.StartPainter(v.name, kind, fn, opts)

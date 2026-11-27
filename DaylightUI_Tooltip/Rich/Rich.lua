@@ -98,10 +98,24 @@ end
 -- client.
 local hooked = setmetatable({}, { __mode = "k" })
 local holding = false
+-- Another addon adds its lines after the fill (often after the game's own
+-- Show) and then calls Show to fit them. The card takes them in at that Show:
+-- the loot window fills its tooltip again every frame after the tooltip's own
+-- update, so waiting for the next update left those lines drawn over the card.
+local function caughtUp(tip, s)
+    local p = Panel.Get(tip)
+    if s.pill or not (p and p:IsShown()) or p.chrome then return end
+    local n = tip.NumLines and tip:NumLines()
+    if isSecret(n) then return end
+    if n ~= s.lines then return Rich.Build(tip) end
+    Panel.Mute(p)
+end
 local function nativeShown(tip)
     if not Rich.On(tip) then return end
     local s = state[tip]
-    if s and s.dirty and tip:IsShown() then DUI.SafeCall(Rich.Build, tip) end
+    if s and tip:IsShown() then
+        if s.dirty then DUI.SafeCall(Rich.Build, tip) else DUI.SafeCall(caughtUp, tip, s) end
+    end
     if ns.Tooltip.Muted(tip) and not holding then
         holding = true
         tip:SetAlpha(0)
@@ -128,6 +142,11 @@ function Rich.Shown(tip)
     if not Rich.On(tip) then return Rich.Off(tip) end
     Rich.Hook(tip)
     local s = state[tip]
+    -- Hidden and shown in one frame (an owner's refill): the same kind of card
+    -- comes back, so the tooltip keeps the size it had (Panel.KeepSize).
+    if s and s.hiddenAt == GetTime() and s.kind ~= "unit" and Rich.Kind(s.data) == s.kind then
+        Panel.KeepSize(Panel.Get(tip))
+    end
     if s and s.dirty then Rich.Build(tip) end
     local p = Panel.Get(tip)
     if p and p:IsShown() then Panel.Fit(p) end
@@ -201,6 +220,7 @@ function Rich.Hidden(tip)
     if s then
         s.dirty = s.dirty or s.data ~= nil
         s.lines, s.unit, s.world, s.swept, s.key, s.spell = nil, nil, nil, nil, nil, nil
+        s.hiddenAt = GetTime()
     end
     Panel.Release(Panel.Get(tip))
     ns.Tooltip.ShowShell(tip, true)
@@ -210,7 +230,10 @@ end
 -- A setting changed: built again before the next draw, or put away.
 function Rich.Refresh(tip)
     if Rich.On(tip) then
-        stateOf(tip).dirty = true
+        local s = stateOf(tip)
+        s.dirty = true
+        -- The same lines no longer mean the same card (a piece moved or hid).
+        if s.seen then s.seen.n = nil end
     else
         Rich.Off(tip)
     end
@@ -422,10 +445,10 @@ local function questRow(p, name, have, need, chance, done)
     local label = name
     if chance and not done then label = name .. " " .. Hex(Style.INK.LABEL) .. chance .. "|r" end
     if done then
-        Panel.Row(p, label, L["Complete"], Style.INK.GOOD, Style.INK.OFF)
+        Panel.Row(p, label, L["Complete"], Style.INK.GOOD, Style.INK.OFF, nil, nil, true)
     elseif have then
         local r, g, b = Style.Accent()
-        Panel.Row(p, label, string.format(L["%d / %d"], have, need), { r, g, b }, Style.INK.TEXT)
+        Panel.Row(p, label, string.format(L["%d / %d"], have, need), { r, g, b }, Style.INK.TEXT, nil, nil, true)
         local cfg = ns.Tooltip.Config()
         if not (cfg and cfg.questBars == false) then
             Panel.Bar(p, { value = have, max = need, pair = accentPair(), h = 4 })
@@ -435,6 +458,19 @@ local function questRow(p, name, have, need, chance, done)
     end
 end
 
+-- An empty line: no text on either side (the game's AddLine(" ")).
+local function isBlank(line)
+    return line ~= nil and not line.right and ns.RichForeign.Blank(line.left)
+end
+
+-- Whether an objective is the next line after i, not counting empty ones: a gap
+-- between a quest's heading and its objectives doesn't part them.
+local function objectiveBelow(lines, i, n)
+    local j = i + 1
+    while j <= n and isBlank(lines[j]) do j = j + 1 end
+    return j <= n and Rich.Objective(lines[j]) ~= nil
+end
+
 -- Whether line i is part of a quest: "title", "objective", "player" (whose
 -- progress it is, in a group) or nil. n: the last line that counts.
 function Rich.QuestLine(lines, i, n)
@@ -442,23 +478,33 @@ function Rich.QuestLine(lines, i, n)
     if not line then return nil end
     if line.type == Rich.QUEST_PLAYER then return "player" end
     if Rich.Objective(line) ~= nil then return "objective" end
-    if line.left and not line.right
-        and (line.type == Rich.QUEST_TITLE or (i < n and Rich.Objective(lines[i + 1]) ~= nil)) then
+    if line.left and not line.right and not isBlank(line)
+        and (line.type == Rich.QUEST_TITLE or objectiveBelow(lines, i, n)) then
         return "title"
     end
     return nil
+end
+
+-- A line with Daylight UI's coins in it (a price, a quest's reward).
+local function hasCoin(line)
+    return line and not line.right and type(line.left) == "string" and not isSecret(line.left)
+        and line.left:find("|T[^|]-coin%-%a+") ~= nil
 end
 
 -- The tooltip's lines from line `from` on, in the card's look: a quest as
 -- above, a line with two sides as a row, any other as a sentence, an empty
 -- one as a gap. The colors go through the same rules as the skinned look
 -- (Tips.GameSide). A quest block gets a rule before and after it. skip: lines
--- to pass over (a card that draws them its own way).
-function Rich.Lines(p, n, lines, from, skip)
+-- to pass over (a card that draws them its own way). ruled: the card already
+-- put a line above (a section of its layout), so the first quest gets none.
+function Rich.Lines(p, n, lines, from, skip, ruled)
     local Tips = DUI.Tips
-    local inQuest, quest = false, nil
+    local inQuest, quest = ruled == true, nil
+    local afterTitle = false -- the line before was a quest's heading
     for i = from, n do
         local line = lines[i]
+        local gapOK = afterTitle
+        afterTitle = false
         local kind = not (skip and skip[i]) and Rich.QuestLine(lines, i, n) or nil
         local who, title = kind == "player", kind == "title"
         local name, have, need, chance, done
@@ -469,6 +515,9 @@ function Rich.Lines(p, n, lines, from, skip)
         if title then quest = ns.RichForeign.QuestKey(line.left) end
         if skip and skip[i] then
             -- Drawn elsewhere.
+        elseif gapOK and isBlank(line) and objectiveBelow(lines, i, n) then
+            -- The gap between a quest's heading and its objectives: not a section break.
+            afterTitle = true
         elseif who then
             -- Under a quest's title: a party member's name, small; yours, nothing.
             if not Rich.OwnName(line) then Panel.Text(p, Rich.Bare(line.left), Rich.QuestPlayerInk(line.left), Style.SIZE.small) end
@@ -476,6 +525,7 @@ function Rich.Lines(p, n, lines, from, skip)
             if not inQuest and p.count > 0 and p.items[p.count].kind ~= "rule" then Panel.Rule(p) end
             inQuest = true
             if title then
+                afterTitle = true
                 Panel.Section(p, Rich.Bare(line.left), Rich.QuestColor(line.id, line.left))
             else
                 questRow(p, name, have, need, chance, done)
@@ -488,9 +538,14 @@ function Rich.Lines(p, n, lines, from, skip)
             if not line.left and not line.right then
                 Panel.Gap(p, 4)
             elseif line.right then
-                Panel.Row(p, line.left or "", line.right, valueColor(line))
+                -- A long left side wraps rather than being cut: the game's tooltip
+                -- can't wrap it, so this is where a long objective gets its room.
+                Panel.Row(p, line.left or "", line.right, valueColor(line), nil, nil, nil, true)
             elseif Rich.IsFlavor(line) then
                 Rich.Flavor(p, line)
+            elseif hasCoin(line) then
+                -- Money keeps its own color: read as a yellow description its numbers turned green.
+                Panel.Text(p, line.left, line.hasLC and rgb(line.lc) or Style.INK.MONEY)
             else
                 local t, c = Tips.GameSide(line.left, line.hasLC and line.lc or nil)
                 Panel.Text(p, t, c)
@@ -521,8 +576,7 @@ function Rich.Generic(p, n, lines)
         end
     end
     Rich.Lines(p, own, lines, 2)
-    Foreign.Place(p, "mixed")
-    Foreign.Place(p, "own")
+    Foreign.Bottom(p)
 end
 
 -- How many of the tooltip's n lines are the data's own (the game's): the rest
@@ -533,13 +587,12 @@ end
 function Rich.Own(data, n)
     local list = type(data) == "table" and data.lines or nil
     local own = type(list) == "table" and #list or 0
-    -- The game writes the tooltip line each data line landed on into its
-    -- lineIndex. A data line can add nothing (a recipe's empty spacer), so the
-    -- last landed line is the true end, not the count of data lines.
+    -- A data line can add nothing (a recipe's empty spacer), so the last
+    -- drawn line the data reaches is the true end, not the count of its lines.
     local last
     for _, line in ipairs(type(list) == "table" and list or {}) do
-        local at = type(line) == "table" and line.lineIndex or nil
-        if not isSecret(at) and type(at) == "number" and (not last or at > last) then last = at end
+        local at = Read.Landed(line)
+        if at and (not last or at > last) then last = at end
     end
     if last then own = last end
     if own == 0 then own = n end

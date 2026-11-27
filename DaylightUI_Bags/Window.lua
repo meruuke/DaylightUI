@@ -191,9 +191,11 @@ local function onHandleMoved(f, key)
     local positions = DUI.DB.Positions()
     local p = positions[key]
     if p then
-        local h = DUI.Movers.Handle(key)
-        local w, hgt = 0, 0
-        if h then w, hgt = h:GetWidth(), h:GetHeight() end
+        -- The window's own size, as drawn: the handle can be taller (its least
+        -- size), and since it sits on the window's middle, taking its top would
+        -- lift the window a few pixels on every move.
+        local r = f:GetEffectiveScale() / UIParent:GetEffectiveScale()
+        local w, hgt = (f:GetWidth() or 0) * r, (f:GetHeight() or 0) * r
         local at = anchorOf(f)
         local x, y = DUI.Movers.PointOf(at, UIParent:GetWidth() / 2 + p[1], UIParent:GetHeight() / 2 + p[2], w, hgt)
         f.Set("position", { x, y, at = at })
@@ -324,6 +326,11 @@ function Window.Create(spec)
     f.money = text(f, Window.TEXT_SIZE, "RIGHT")
     f.money:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -E, E)
     if spec.kind == "bag" then
+        -- A click on the gold picks some up for a trade or a letter, as the
+        -- game's backpack money does.
+        f.moneyButton = CreateFrame("Button", nil, f)
+        f.moneyButton:SetAllPoints(f.money)
+        f.moneyButton:SetScript("OnClick", function() Window.PickUpMoney(f) end)
         -- Shown only at a vendor with something to sell (Window.UpdateSell).
         f.sellJunk = Window.TextButton(f, L["Sell junk"])
         -- On the bar's row, away from the money and currencies below.
@@ -465,17 +472,26 @@ end
 
 -- What a right click does to this item here, in the game's own words.
 function Window.PadUseLabel(f, b)
-    local info = padItem(b)
+    local info, bag, slot = padItem(b)
     if not info then return nil end
     if f.kind == "bank" then return L["To your bags"] end
     if ns.Bank and ns.Bank.open then return L["To the bank"] end
     local merchant = _G.MerchantFrame
-    if merchant and merchant:IsShown() and not info.hasNoValue then return CONTEXT_ACTION_LABEL_SELL or L["Sell"] end
+    if merchant and merchant:IsShown() then
+        -- The buyback tab: the game's right click does nothing there.
+        if merchant.selectedTab == 2 then return nil end
+        if not info.hasNoValue then return CONTEXT_ACTION_LABEL_SELL or L["Sell"] end
+    end
     if info.hasLoot then return CONTEXT_ACTION_LABEL_OPEN or L["Open"] end
     if info.isReadable then return CONTEXT_ACTION_LABEL_READ or L["Read"] end
     local link = info.hyperlink
     if link and C_Item.IsEquippableItem and C_Item.IsEquippableItem(link) then return CONTEXT_ACTION_LABEL_EQUIP or L["Equip"] end
     if C_Item.GetItemSpell and C_Item.GetItemSpell(info.itemID) then return CONTEXT_ACTION_LABEL_USE or L["Use"] end
+    -- An item that starts a quest has no use spell, but using it starts the
+    -- quest. The game's footer offers Use for anything IsUsableItem allows.
+    local quest = C_Container.GetContainerItemQuestInfo and C_Container.GetContainerItemQuestInfo(bag, slot)
+    if type(quest) == "table" and quest.questID and not quest.isActive then return CONTEXT_ACTION_LABEL_USE or L["Use"] end
+    if C_Item.IsUsableItem and C_Item.IsUsableItem(info.itemID) then return CONTEXT_ACTION_LABEL_USE or L["Use"] end
     return nil
 end
 
@@ -490,11 +506,58 @@ function Window.PadDestroy(b)
     if guid then C_Item.DeleteItem(guid) end
 end
 
+-- How many to split off, picked from a second menu, as the mouse's split box
+-- needs typing.
+function Window.PadSplit(b)
+    local info, bag, slot = padItem(b)
+    if not info or info.isLocked then return end
+    local keys, values = {}, {}
+    local half = math.floor((info.stackCount or 0) / 2)
+    for _, n in ipairs(ns.Stack.SplitAmounts(info.stackCount)) do
+        keys[#keys + 1] = n
+        values[n] = n == half and string.format(L["%d (half)"], n) or tostring(n)
+    end
+    if #keys == 0 then return end
+    DUI.Widgets.OpenMenu(b, keys, values, nil, function(n)
+        if not ns.Stack.SplitInto(bag, slot, n) then DUI.ShowError(ERR_INV_FULL or L["Your bags are full."]) end
+    end)
+end
+
+-- Whether the pet will eat the item in this slot now, as the game's bag asks
+-- before offering Feed Pet (ContainerFrame.lua Gamepad_IsFeedToPetValid).
+Window.FEED_PET = 6991
+function Window.PetEats(info)
+    if not (ns.FeedPet and ns.FeedPet.Known()) or not UnitExists("pet") then return false end
+    local can = C_PetInfo and C_PetInfo.CanPetEatItem
+    if type(can) ~= "function" or not can(info.itemID) then return false end
+    local usable = C_Spell and C_Spell.IsSpellUsable
+    if type(usable) == "function" then
+        local yes = usable(Window.FEED_PET)
+        if issecretvalue and issecretvalue(yes) then return false end
+        return yes == true
+    end
+    return true
+end
+
 function Window.PadMore(b)
-    local info = padItem(b)
+    local info, bag, slot = padItem(b)
     if not info then return end
     local keys, values = {}, {}
-    if C_Item.GetItemSpell and C_Item.GetItemSpell(info.itemID) then
+    -- Feeding casts Feed Pet on the food, which only a secure button can do: A
+    -- on the row clicks one (W.OpenMenu's secure rows). The game's bag drops
+    -- the food on the pet instead, but that runs as its own untainted code.
+    local feed = Window.PetEats(info)
+    if feed then
+        keys[#keys + 1] = "feed"
+        values.feed = CONTEXT_ACTION_LABEL_FEED_TO_PET or L["Feed Pet"]
+    end
+    if (info.stackCount or 0) > 1 and not info.isLocked then
+        keys[#keys + 1] = "split"
+        values.split = L["Split stack"]
+    end
+    -- The game offers this for anything IsUsableItem allows, a quest starter too.
+    if (C_Item.GetItemSpell and C_Item.GetItemSpell(info.itemID))
+        or (C_Item.IsUsableItem and C_Item.IsUsableItem(info.itemID)) then
         keys[#keys + 1] = "bind"
         values.bind = CONTEXT_ACTION_LABEL_BIND_TO_GAMEPAD_ACTION_BAR or L["Put on a controller bar"]
     end
@@ -513,8 +576,14 @@ function Window.PadMore(b)
             Window.PadDestroy(b)
         elseif k == "share" then
             DUI.Pad.Share(info.hyperlink, b)
+        elseif k == "split" then
+            -- A frame later: the first menu is still closing.
+            C_Timer.After(0, function() Window.PadSplit(b) end)
         end
-    end, nil, { confirm = { destroy = true } })
+    end, nil, { confirm = { destroy = true }, secure = feed and function(k)
+        if k ~= "feed" then return nil end
+        return { type = "spell", spell = Window.FEED_PET, ["target-bag"] = bag, ["target-slot"] = slot }
+    end or nil })
 end
 
 -- The groups' headings, as stops LB and RB move the D-pad to.
@@ -590,7 +659,9 @@ function Window.PadUseSecure(window, slotButton)
     if not label then return nil end
     local info, bag, slot = padItem(slotButton)
     if info and USED_IN_PLACE[label] and not slotButton.dluiGuarded and not Window.HandsOver(info) then
-        return { type = "item", item = bag .. " " .. slot }
+        -- A /use macro rather than the "item" action, which would equip a quest
+        -- item you can wear instead of starting its quest (Items.UseOver).
+        return { type = "macro", macrotext = "/use " .. bag .. " " .. slot }
     end
     return { type = "click", clickbutton = slotButton }
 end
@@ -636,6 +707,10 @@ function Window.PadSetup(f)
           after = Window.PadUsed },
         { key = "Y", label = CONTEXT_ACTION_LABEL_MORE_ACTIONS or L["More"],
           when = function(b) return padItem(b) ~= nil end, run = Window.PadMore },
+        -- An item held: B puts it back before it closes anything, as the game's bag.
+        { key = "B", follow = true, label = FRAME_ACTION_BACK or BACK or L["Back"],
+          when = function() return type(CursorHasItem) == "function" and CursorHasItem() == true end,
+          run = function() ClearCursor() end },
     }
     f.padTabs = function() return padGroups(f) end
     f.padTabsLabel = L["Groups"]
@@ -930,11 +1005,30 @@ function Window.PortraitMenu(f, spec)
     return b
 end
 
+-- How much gold to pick up, asked over the money in Daylight UI's own box (the
+-- game asks in its PICKUP_MONEY pop-up, never opened from addon code), then on
+-- the cursor as the game's MoneyInputFrame_PickupPlayerMoney does it.
+function Window.PickUpMoney(f)
+    if type(PickupPlayerMoney) ~= "function" then return end
+    DUI.Widgets.Ask({ key = "pickUpMoney", text = L["Pick up how much?"],
+        yes = L["Pick up"], no = CANCEL or L["Cancel"], money = { initial = 0 }, owner = f.money,
+        width = DUI.Widgets.COINS.gold + 2 * DUI.Widgets.COINS.small + 2 * DUI.Widgets.COINS.gap
+            + DUI.Widgets.COINS.glyph + 2 * DUI.Win.EDGE,
+        onYes = function(copper)
+            if copper > (GetMoney() or 0) then
+                DUI.ShowError(ERR_NOT_ENOUGH_MONEY or L["You don't have enough money."])
+                return
+            end
+            PickupPlayerMoney(copper)
+        end })
+end
+
 function Window.Sort()
     if InCombatLockdown and InCombatLockdown() then return end
     if type(PlaySound) == "function" and SOUNDKIT and SOUNDKIT.UI_BAG_SORTING_01 then DUI.SafeCall(PlaySound, SOUNDKIT.UI_BAG_SORTING_01) end
     local f = ns.window
-    if ns.Keep.Any() or ns.Keep.AnyMarkedJunk(f) then
+    ns.Keep.TellGame()
+    if ns.Keep.Any() or ns.Keep.ToEnd() or ns.Keep.AnyMarkedJunk(f) then
         -- Its own rounds: held until they're done, or SORT_MAX at most.
         local hold = Window.BeginSort(f, false, true)
         return ns.Keep.Sort(function() if hold then Window.EndSort(f, nil, hold) end end)
@@ -1245,6 +1339,8 @@ function Window.Relayout(f, synced, moved)
         end
         wipe(countBefore)
     end
+    -- Room for something shown in place of the slots (the bank's note).
+    if f.spec.itemsMin then h = math.max(h, f.spec.itemsMin(f) or 0) end
     local E = Window.EDGE
     f.items:SetSize(w, math.max(h, 1))
     -- Header, tool row, filters (when shown), slots and footer, a gap between
@@ -1477,6 +1573,17 @@ local function registerEvents()
         end
     end)
     DUI.RegisterEvent("BAG_UPDATE_COOLDOWN", soon(fillCooldowns))
+    -- The junk coin follows the vendor's window, read a frame later so the
+    -- window has opened or closed by then.
+    local junkAgain = soon(function()
+        for _, f in ipairs(ns.windows) do
+            if not f.spec.still then
+                for _, s in ipairs(f.set.Slots()) do ns.Items.FillJunk(s.button) end
+            end
+        end
+    end)
+    DUI.RegisterEvent("MERCHANT_SHOW", junkAgain)
+    DUI.RegisterEvent("MERCHANT_CLOSED", junkAgain)
     -- A fight needs the bag right at once: a cleanup still held lands now, and
     -- anything still gliding or fading lands where it was going.
     DUI.RegisterEvent("PLAYER_REGEN_DISABLED", function()
@@ -1526,7 +1633,7 @@ local function bagWindow()
         tools = {
             { key = "sort", icon = Window.SORT_ICON, title = BAG_CLEANUP_BAGS or L["Clean Up Bags"], onClick = function() Window.Sort() end,
               desc = function() return ns.Keep.SkippedText() end,
-              hint = L["Right-click: choose bags Clean Up skips"],
+              hint = L["Right-click: choose bags Clean Up and Sell junk skip"],
               onRightClick = function(w) ns.Keep.CleanupMenu(w.sort) end },
             { key = "slotsButton", icon = Window.SLOTS_ICON, title = L["Bag slots"], desc = L["Show your bag slots: drag a bag out, or drop one in."],
               onClick = function(w)
@@ -1554,6 +1661,8 @@ local function bagWindow()
               desc = L["Click, then click a scroll to comprehend it. Not during a fight."], onClick = function() end },
             { key = "pickLockButton", icon = ns.PickLock.ICON, title = ns.PickLock.Title,
               desc = L["Click, then click a lockbox to pick its lock. Not during a fight."], onClick = function() end },
+            { key = "feedPetButton", icon = ns.FeedPet.ICON, title = ns.FeedPet.Title,
+              desc = L["Click, then click a food to feed your pet. Not during a fight."], onClick = function() end },
         },
     })
     ns.window = f
@@ -1566,8 +1675,6 @@ function ns.Build(mod)
     ns.module = mod
     DUI.SafeCall(ns.UpgradeBank, DUI.DB.Active())
     if not mod.db.enabled then return end
-    -- Warn about other bag addons (the setup guide's list: Baganator, Bagnon).
-    for _, c in ipairs(DUI.InstallerPages.ClashesFor("Bags")) do DUI.WarnIfLoaded(c.addon, c.label, c.what) end
     DUI.AfterCombat(function()
         local f = bagWindow()
         if ns.Slots then ns.Slots.Create(f) end
@@ -1575,6 +1682,7 @@ function ns.Build(mod)
         ns.Disenchant.Register(f)
         ns.Comprehend.Register(f)
         ns.PickLock.Register(f)
+        ns.FeedPet.Register(f)
         ns.Prep.Start(f)
         ns.Junk.Register()
         ns.ItemTree.Register()

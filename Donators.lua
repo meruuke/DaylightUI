@@ -20,6 +20,7 @@ DUI.Donators = Donators
 
 -- Most given first. The amounts are kept privately and never shipped.
 Donators.LIST = {
+    "Harrumph",
     "E leader",
     "Fley",
     "InventorOfTrees",
@@ -29,6 +30,7 @@ Donators.LIST = {
     "Somebody",
     "Pownzerfaust",
     "Tih Tahz",
+    "qiba",
     "Thorvald87",
     "Popatuna",
     "Boof",
@@ -43,7 +45,6 @@ Donators.LIST = {
     "blukraken",
     "Gimson",
     "Spixx",
-    "Harrumph",
     "eterion1234",
     "Fang",
     "Manuel",
@@ -73,6 +74,11 @@ Donators.LIST = {
     "Clément aka Harlow Bloom - Forever - PvP RP",
     "Jonathan",
     "Paul",
+    "Aaron",
+    "Brian",
+    "Owen",
+    "Reghas",
+    "Scandalari",
     "HappyS",
     "ramnokri",
     "Shady",
@@ -94,6 +100,10 @@ Donators.LIST = {
     "Gutrush",
     "ElJakeo",
     "Oliver",
+    "Karchedon",
+    "AJ",
+    "Cpt NightShade",
+    "Gravius Sunmourn",
     "Hugo",
     "Daniel C.",
     "sam",
@@ -132,6 +142,10 @@ Donators.MONTHLY = {
     "Daniel C.",
     "Paul",
     "Oliver",
+    "Aaron",
+    "Brian",
+    "Owen",
+    "AJ",
 }
 
 local WHITE = "Interface\\Buttons\\WHITE8X8"

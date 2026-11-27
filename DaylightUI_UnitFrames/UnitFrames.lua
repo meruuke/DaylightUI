@@ -99,6 +99,72 @@ function UF.UnderOf(right, left, flipRight, flipLeft)
     return r and l and "both" or r and "right" or l and "left" or nil
 end
 
+-- A frame's two ends (Defaults.lua, ns.END_FRAMES): Style.Slant's side and
+-- under, and whether the inner end (spec.slant, the one the bars fill toward)
+-- and the outer end are angled. The outer end stays square under a portrait
+-- sitting on the frame, since the ring covers it.
+function UF.FrameEnds(f, cfg)
+    local inner = f.spec.slant
+    if not inner then return nil, nil, false, false end
+    local innerOn = cfg.slant ~= false
+    local outerOn = cfg.slantOuter == true
+    if outerOn and UF.PortraitMode(f, cfg) ~= "none"
+        and not (UF.PORTRAIT_FREE[f.spec.unit] and cfg.portraitAt == "free") then
+        outerOn = false
+    end
+    local innerFlip, outerFlip = cfg.slantUnder == true, cfg.slantUnderOuter == true
+    local side, under
+    if inner == "right" then
+        side, under = Style.EndsOf(outerOn, outerFlip, innerOn, innerFlip)
+    else
+        side, under = Style.EndsOf(innerOn, innerFlip, outerOn, outerFlip)
+    end
+    return side, under, innerOn, outerOn
+end
+
+-- side when the frame's end on that side is flipped (its bottom corner out),
+-- for a tab on that end to lean the same way; else nil.
+function UF.FlipAt(f, side)
+    local u = f.under
+    if side and u and (u == side or u == "both") then return side end
+    return nil
+end
+
+-- How a piece hung under f (a cast bar, the swing bars, Ribbon's power line)
+-- continues f's ends. total is the height from f's top down to the piece's
+-- bottom, and ref a table kept by the piece (filled here, for Style.Slant). Each
+-- end f has angled is cut at f's slope over total; an end f flips is continued
+-- from f's bottom corner instead (ref.drop), so the piece leans back in and the
+-- two make a chevron. f carries ends, under and endCut (its cut over fH, its
+-- height). Returns the ends and the cut, or nil and 0.
+function UF.HangEnds(f, total, ref, fH)
+    fH = fH or f:GetHeight()
+    local ends = f.ends
+    local k = (ends and type(fH) == "number" and fH > 0) and (f.endCut or f.cut or 0) / fH or 0
+    ref.frame, ref.height = f, total
+    local drop = ref.drop or {}
+    ref.drop = drop
+    drop.left = UF.FlipAt(f, "left") and fH or nil
+    drop.right = UF.FlipAt(f, "right") and fH or nil
+    local cut = k * total
+    if cut <= 0 then return nil, 0 end
+    return ends, cut
+end
+
+-- Whether ends (Style.Slant's side) includes end_.
+function UF.HasEnd(ends, end_) return ends == "both" or (type(end_) == "string" and ends == end_) end
+
+-- A layer hung off the fill's moving edge and growing back into it (the DoT
+-- veil, the cost shade) wears the fill's edge and its own back edge, so with
+-- both of the frame's ends angled a clip at each end would be a fourth mask (a
+-- texture takes three). Only the end the fill starts from can reach it, so it
+-- keeps that end's clip alone. Run before the frame's Style.Slant.
+function UF.ClipToStart(f)
+    local start = f.growLeft and "right" or "left"
+    if f.dotVeil then Style.ClipSpan(f.dotVeil.bar:GetStatusBarTexture(), nil, nil, start) end
+    if f.cost then Style.ClipSpan(f.cost:GetStatusBarTexture(), nil, nil, start) end
+end
+
 -- Whether the fill's moving edge (from UF.UnderOf's ends) leans under.
 function UF.EdgeUnder(under, edge)
     if not edge then return nil end
@@ -629,7 +695,6 @@ UF.OVERSHIELD = {
     alpha = 0.55,            -- the stripes over the health (also a shield's alpha)
     glowWidth = 10,
 }
-local TRAIL_MASK = { right = DUI.MEDIA .. "mask-trail-r.png", left = DUI.MEDIA .. "mask-trail-l.png" }
 
 -- Every unit button (these and the group headers' buttons) uses this template.
 -- PingableUnitFrameTemplate is the game's own (its unit frames use it), so the
@@ -837,8 +902,11 @@ end
 -- level 30), so one dragged over it drew underneath. It goes above the frame
 -- and everything on it, as on the player frame.
 UF.PIECE_LIFT = 15
-function UF.LiftPiece(h, f)
-    h:SetFrameLevel(f:GetFrameLevel() + UF.PIECE_LIFT)
+-- A free portrait sits over the other free pieces, as the ring sits over the
+-- frame's own bars, so its level badge stays on top of a free power bar.
+UF.PORTRAIT_LIFT = 5
+function UF.LiftPiece(h, f, over)
+    h:SetFrameLevel(f:GetFrameLevel() + UF.PIECE_LIFT + (over or 0))
 end
 
 -- The standalone tag (target.threatTagAt = "free"): a holder on UIParent with
@@ -868,7 +936,7 @@ UF.PORTRAIT_FREE = { player = "unitframes.playerPortrait", target = "unitframes.
 function UF.CreatePortraitHolder(f)
     local unit = f.spec.unit
     local h = CreateFrame("Frame", "DaylightUIPortrait_" .. unit, UIParent)
-    UF.LiftPiece(h, f)
+    UF.LiftPiece(h, f, UF.PORTRAIT_LIFT)
     h:SetSize(40, 40)
     h.key = UF.PORTRAIT_FREE[unit]
     h:Hide()
@@ -876,6 +944,55 @@ function UF.CreatePortraitHolder(f)
     f:HookScript("OnShow", function() if h.want then h:Show() end end)
     f:HookScript("OnHide", function() h:Hide() end)
     return h
+end
+
+-- A portrait on its own still targets on a left click and opens the unit's menu
+-- on a right click, like the frame. The holder is a plain frame of Daylight UI's
+-- (it hides and shows in a fight), so the click is a secure button inside the
+-- frame laid over the holder's spot: never anchored to the holder, since a
+-- protected frame can't be. It shows with its frame, so the unit watch drives it.
+-- Placed out of combat only: after a layout and after the holder's mover applies.
+function UF.PlacePortraitClick(f)
+    if InCombatLockdown() then return end
+    local h, b = f.portraitHolder, f.portraitClick
+    if not h then return end
+    if not f.portraitFree then
+        if b then b:Hide() end
+        return
+    end
+    if not b then
+        b = CreateFrame("Button", nil, f, "SecureUnitButtonTemplate")
+        b:SetAttribute("useparent-unit", true)
+        b:SetAttribute("*type1", "target")
+        b:SetAttribute("*type2", "togglemenu")
+        b:RegisterForClicks("AnyUp")
+        b:SetScript("OnEnter", function() UF.OnEnter(f) end)
+        b:SetScript("OnLeave", UF.OnLeave)
+        if type(ClickCastFrames) == "table" then ClickCastFrames[b] = true end
+        f.portraitClick = b
+    end
+    -- The holder's offsets are in its own scale, the button's in the frame's.
+    local k = h:GetEffectiveScale() / b:GetEffectiveScale()
+    b:ClearAllPoints()
+    local placed = false
+    for i = 1, h:GetNumPoints() do
+        local point, rel, relPoint, x, y = h:GetPoint(i)
+        -- Only onto frames the button may anchor to: the screen or a secure frame.
+        if type(rel) == "nil" or rel == UIParent or (type(rel) == "table" and rel.IsProtected and rel:IsProtected()) then
+            b:SetPoint(point, rel or UIParent, relPoint, (x or 0) * k, (y or 0) * k)
+            placed = true
+        end
+    end
+    if not placed then
+        -- Held by another piece of Daylight UI's: stand on the same spot of the screen.
+        local cx, cy = h:GetCenter()
+        if not cx then b:Hide() return end
+        b:SetPoint("CENTER", UIParent, "BOTTOMLEFT", cx * k, cy * k)
+    end
+    b:SetSize(h:GetWidth() * k, h:GetHeight() * k)
+    b:SetFrameStrata(h:GetFrameStrata())
+    b:SetFrameLevel(h:GetFrameLevel() + 20)
+    b:Show()
 end
 
 -- Each frame inside the portrait keeps its place above the portrait when the
@@ -888,14 +1005,16 @@ local function noteLevels(frame)
         noteLevels(c)
     end
 end
+-- A frame a player placed in Layers keeps its level (c.layerOwn).
 local function relevel(frame)
     for _, c in ipairs({ frame:GetChildren() }) do
-        if c.levelOffset then
+        if c.levelOffset and not c.layerOwn then
             c:SetFrameLevel(frame:GetFrameLevel() + c.levelOffset)
             relevel(c)
         end
     end
 end
+UF.NoteLevels, UF.Relevel = noteLevels, relevel
 
 -- Puts the portrait, and the status icons that ride on it, on the frame or in
 -- its holder. Pieces inside the secure frame can't be anchored to a frame of
@@ -961,7 +1080,7 @@ function UF.LayoutThreatTag(f, cfg, side)
         end
     end
     tag:SetSize(w, h)
-    if f.spec.slant then Style.Slant(tag, side, cut) end
+    if f.spec.slant then Style.Slant(tag, side, cut, nil, UF.FlipAt(f, side)) end
     local shell = Style.GetShell(tag)
     Style.LayoutShell(shell)
     shell:SetShown(cfg.threatTagBox ~= false)
@@ -1023,7 +1142,8 @@ function UF.HealthTextSpot(f, cfg)
     if pos == "center" then return "", 0, function() return 0 end end
     local h = pos == "outer" and outer or inner
     local dir = h == "LEFT" and 1 or -1
-    if h == outer then return h, dir, function() return 0 end end
+    -- At the outer end it keeps clear of that end's own angle, when it has one.
+    if h == outer then return h, dir, function() return f.outerCut or 0 end end
     return h, dir, function(cut) return cut or 0 end
 end
 
@@ -1071,10 +1191,16 @@ end
 -- bottom so the two never meet. SetTileName stores what PlaceTileName needs (a
 -- party button places it later, from UF.SizeTab).
 function UF.SetTileName(f, cfg, text)
-    local cut = (f.spec.slant and cfg.slant ~= false) and Pixel.Snap(f, cfg.height * UF.SLANT) or 0
+    -- Clear of each angled end: the inner one (cut) and the outer one, set on its own.
+    local ends, _, innerOn, outerOn = UF.FrameEnds(f, cfg)
+    local full = ends and Pixel.Snap(f, cfg.height * UF.SLANT) or 0
+    local cut, outerCut = innerOn and full or 0, outerOn and full or 0
+    local inner = f.spec.slant
+    local cutL = inner == "left" and cut or (inner == "right" and outerCut) or 0
+    local cutR = inner == "right" and cut or (inner == "left" and outerCut) or 0
     local pos = ((f.spec.group or ns.Spots.Valid(cfg.namePos)) and cfg.namePos) or "bar"
     f.tileName = {
-        cutPad = cut,
+        cutL = cutL, cutR = cutR,
         showPercent = cfg.showPercent == true,
         -- The health text at the outer end hands the name the inner half.
         healthOuter = cfg.healthTextPos == "outer",
@@ -1084,11 +1210,12 @@ function UF.SetTileName(f, cfg, text)
         -- big frame (player, target...) only comes here for a spot.
         pos = pos,
         box = { w = cfg.width, h = cfg.height, padX = 3, padY = 2,
-                cutL = f.spec.slant == "left" and cut or 0, cutR = f.spec.slant == "right" and cut or 0 },
+                cutL = cutL, cutR = cutR },
         -- A group tile's name outside the tile sits on a name tab (nameTag).
         -- A style with a name row has that row above the frame instead.
         tag = (f.spec.group and not f.nameRow and cfg.nameTag ~= false and UF.TAG_SPOTS[pos]) == true,
         cut = cut > 0 and f.spec.slant or nil,
+        flip = innerOn and cfg.slantUnder == true,
     }
     if f.tileName.tag then
         local size = text and tonumber(text.name) or 12
@@ -1212,8 +1339,9 @@ local function placeNameTag(f, t)
         local L = ns.Spots.Layout(t.pos, NAME_GROW[t.pos] or "center", t.box, { x = t.x, y = t.y })
         tag:SetPoint(L.point, f.health or f, L.relPoint, L.x, L.y)
     end
-    -- Angled like the tile, at the same end.
-    Style.Slant(tag, t.cut, t.cut and Pixel.Snap(f, h * UF.SLANT) or 0)
+    -- Angled like the tile, at the same end, leaning the same way.
+    Style.Slant(tag, t.cut, t.cut and Pixel.Snap(f, h * UF.SLANT) or 0, nil,
+        (t.cut and t.flip) and t.cut or nil)
     Style.LayoutShell(Style.GetShell(tag))
     fs:SetPoint("CENTER", tag, "CENTER", 0, 0)
     fs:SetJustifyH("CENTER")
@@ -1242,8 +1370,8 @@ function UF.PlaceTileName(f)
     -- The name lives in its tab while it has one, else back on the tile.
     if f.nameTag then f.nameText:SetParent(t.tag and f.nameTag or f.overlay) end
     if t.pos ~= "bar" and ns.Spots.Valid(t.pos) then return placeNameAtSpot(f, t) end
-    local leftPad = 3 + (f.spec.slant == "left" and t.cutPad or 0)
-    local rightPad = 3 + (f.spec.slant == "right" and t.cutPad or 0)
+    local leftPad = 3 + (t.cutL or 0)
+    local rightPad = 3 + (t.cutR or 0)
     -- Target of target and pet: clear of the health text, when it's shown.
     local textLeft = (f.spec.slant == "left") ~= (t.healthOuter == true)
     if not f.spec.group and t.showPercent then
@@ -1467,9 +1595,17 @@ function UF.Layout(f, cfg, text, keepSize)
         and ((cfg.showName ~= false and cfg.nameOnBar ~= true) or cfg.showPercent == true)
     f.hitTop = rowOn and (tonumber(cfg.tabHeight) or UF.TAB_HEIGHT) or 0
     -- Work out the angled end first, since corner icons keep clear of it.
-    local side = cfg.slant ~= false and f.spec.slant or nil
-    local cut = side and Pixel.Snap(f, cfg.height * UF.SLANT) or 0
+    -- Each end is set on its own (UF.FrameEnds). side is the inner end when
+    -- it's angled, as everything placed clear of it expects; ends and under
+    -- are the whole shape.
+    local ends, under, innerOn, outerOn = UF.FrameEnds(f, cfg)
+    local side = innerOn and f.spec.slant or nil
+    local fullCut = ends and Pixel.Snap(f, cfg.height * UF.SLANT) or 0
+    local cut = side and fullCut or 0
     f.cut = cut
+    f.outerCut = outerOn and fullCut or 0
+    -- Read by what hangs under the frame (UF.HangEnds).
+    f.ends, f.under, f.endCut = ends, under, fullCut
     -- Party buttons with neither a portrait nor a name tab showing carry their
     -- icons in the corners, like tiles.
     -- A backdrop carries the name on its art, so there's no tab.
@@ -1485,7 +1621,6 @@ function UF.Layout(f, cfg, text, keepSize)
         local reserve = band.w + band.gap + (band.cut or 0)
         if band.side == "left" then insetL = T + reserve else insetR = T + reserve end
     end
-    f.health:SetPoint("TOPLEFT", f, "TOPLEFT", insetL, -T)
     -- Tiles can optionally fill health bottom to top instead of across.
     f.health:SetOrientation(cfg.fillVertical == true and "VERTICAL" or "HORIZONTAL")
     -- The player's power bar may stand on its own, and in Ribbon every power
@@ -1505,19 +1640,63 @@ function UF.Layout(f, cfg, text, keepSize)
             UF.UpdatePower(f, true)
         end
     end
-    if showPower and where == "inside" then
-        f.power:ClearAllPoints()
-        f.power:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", insetL, T)
-        f.power:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -insetR, T)
-        f.power:SetHeight(Pixel.Snap(f, cfg.powerHeight))
-        f.separator:ClearAllPoints()
-        f.separator:SetPoint("BOTTOMLEFT", f.power, "TOPLEFT", 0, 0)
-        f.separator:SetPoint("BOTTOMRIGHT", f.power, "TOPRIGHT", 0, 0)
-        f.separator:SetHeight(Pixel.Px(f, Style.SEPARATOR_PX))
-        f.health:SetPoint("BOTTOMRIGHT", f.separator, "TOPRIGHT", 0, 0)
-    else
-        f.health:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -insetR, T)
+    local inside = showPower and where == "inside"
+    -- A tile sized by its header can't grow, so a tall power bar stops where
+    -- it would leave less than UF.MIN_HEALTH of health.
+    local sep = Pixel.Px(f, Style.SEPARATOR_PX)
+    local powerH = 0
+    if inside then
+        local room = f:GetHeight() - 2 * T - sep - Pixel.Snap(f, UF.MIN_HEALTH)
+        powerH = math.max(Pixel.Px(f, 1), math.min(Pixel.Snap(f, cfg.powerHeight), Pixel.Snap(f, room)))
     end
+    -- A portrait on the frame sits over the outer end, and a bar running on
+    -- under it hid the last tenth of its range (a centered text sat off the
+    -- middle of what shows). Each bar starts where the ring's outline crosses
+    -- the bar's edge farthest from the ring's middle: a full bar still meets
+    -- the ring with no dark sliver, and a round ring hides only the sliver its
+    -- curve takes off a straight end. The empty part and the line between the
+    -- bars still run on under the ring, so the frame looks the same.
+    -- A ring sized on the frame with its power line (Ribbon) needs the line's
+    -- room now, which PowerBar.LayoutLine sets again further down.
+    if hung and showPower then
+        local lineH, gap = ns.PowerBar.LineSize(f, cfg)
+        f.foot = gap + lineH
+    end
+    local ring = f.portrait and not f.backdropOn and UF.RingShape(f, cfg) or nil
+    if ring and (ring.mode == "none" or ring.free) then ring = nil end
+    f.ringShape = ring
+    local outerIn = (ring and ring.outerRight) and insetR or insetL
+    local function clear(y0, y1)
+        if not ring then return 0 end
+        return math.max(0, math.min(UF.RingEdge(f, ring, y0), UF.RingEdge(f, ring, y1)) - outerIn)
+    end
+    f.healthRing = clear(T + (inside and (powerH + sep) or 0), f:GetHeight() - T)
+    f.powerRing = inside and clear(T, T + powerH) or 0
+    local function sides(more)
+        if ring and ring.outerRight then return insetL, insetR + more end
+        return insetL + more, insetR
+    end
+    local hL, hR = sides(f.healthRing)
+    f.health:SetPoint("TOPLEFT", f, "TOPLEFT", hL, -T)
+    if inside then
+        local pL, pR = sides(f.powerRing)
+        f.power:ClearAllPoints()
+        f.power:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", pL, T)
+        f.power:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -pR, T)
+        f.power:SetHeight(powerH)
+        f.separator:ClearAllPoints()
+        f.separator:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", insetL, T + powerH)
+        f.separator:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -insetR, T + powerH)
+        f.separator:SetHeight(sep)
+        f.health:SetPoint("BOTTOMRIGHT", f.separator, "TOPRIGHT", insetR - hR, 0)
+    else
+        f.health:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -hR, T)
+    end
+    -- Under the ring the empty part runs on to the border, as it did before
+    -- the bars stepped clear of it.
+    UF.BackToBorder(f.health, ring, f.healthRing)
+    local ownPower = type(f.insidePower) == "table" and f.insidePower.power or f.power
+    if ownPower then UF.BackToBorder(ownPower, ring, inside and f.powerRing or 0) end
     -- With a backdrop the health is a strip along the foot, over the power,
     -- and the art takes the rest (UF.LayoutBackdrop).
     if f.backdropOn then
@@ -1642,17 +1821,21 @@ function UF.Layout(f, cfg, text, keepSize)
     if f.power then f.power:SetReverseFill(f.growLeft) end
     if f.altMana then f.altMana:SetReverseFill(f.growLeft) end
     if f.spec.slant then
-        Style.Slant(f, side, cut)
-        -- Each fill's moving edge follows the frame's angle (straight when
-        -- reversed, since the angle belongs to the other end).
+        UF.ClipToStart(f)
+        Style.Slant(f, ends, fullCut, nil, under)
+        -- Each fill's moving edge takes the shape of the end it runs toward: the
+        -- inner end, or the outer one when reversed.
         local H = f:GetHeight()
         local ph = (showPower and where == "inside") and (f.power:GetHeight() + Pixel.Px(f, Style.SEPARATOR_PX)) or 0
-        f.healthCut = cut * (H - 2 * T - ph) / H
-        if f.backdropOn then f.healthCut = cut * f.health:GetHeight() / H end
+        local toward = f.growLeft and "left" or "right"
+        local angled = (toward == f.spec.slant) and innerOn or (toward ~= f.spec.slant and outerOn)
+        f.healthCut = angled and fullCut * (H - 2 * T - ph) / H or 0
+        if f.backdropOn then f.healthCut = angled and fullCut * f.health:GetHeight() / H or 0 end
         -- The stripe owns the angled end, so the bars' fill stays square.
-        local fillSide = (not f.flipped and cfg.fillVertical ~= true and not (band and band.along)) and side or nil
-        Style.AngleFill(f.health, fillSide, f.healthCut)
-        if f.power and where == "inside" then Style.AngleFill(f.power, fillSide, cut * f.power:GetHeight() / H) end
+        local fillSide = (angled and cfg.fillVertical ~= true and not (band and band.along)) and toward or nil
+        local fillUnder = UF.EdgeUnder(under, fillSide)
+        Style.AngleFill(f.health, fillSide, f.healthCut, fillUnder)
+        if f.power and where == "inside" then Style.AngleFill(f.power, fillSide, fullCut * f.power:GetHeight() / H, fillUnder) end
     end
 
     f.predictHeals, f.predictAbsorbs = cfg.predictHeals ~= false, cfg.predictAbsorbs ~= false
@@ -1669,7 +1852,7 @@ function UF.Layout(f, cfg, text, keepSize)
         if f.cost then f.cost:Hide() end
     end
     f.showThreat = cfg.showThreat ~= false
-    UF.LayoutPrediction(f, side)
+    UF.LayoutPrediction(f)
 
     f.percentText:ClearAllPoints()
     f.bigNumber = cfg.bigNumber == true
@@ -1717,6 +1900,7 @@ function UF.Layout(f, cfg, text, keepSize)
     f.percentText:SetShown(cfg.showPercent == true)
 
     UF.LayoutPortrait(f, cfg)
+    UF.PlacePortraitClick(f)
     if f.backdrop then UF.LayoutBackdrop(f, cfg, side, cut) end
     f.crestOnTab = not (f.portrait and f.portrait:IsShown())
     f.showLevel, f.showLeader, f.showResting = cfg.showLevel ~= false, cfg.showLeader ~= false, cfg.showResting ~= false
@@ -1749,7 +1933,10 @@ function UF.Layout(f, cfg, text, keepSize)
         -- Its angled end: the frame's, or its own (<frame>.tab.slant).
         local tabSide = side
         if f.tabSlant == "on" then tabSide = f.spec.slant elseif f.tabSlant == "off" then tabSide = nil end
-        if f.spec.slant then Style.Slant(f.tab, tabSide, tabSide and Pixel.Snap(f, f.tabHeight * UF.SLANT) or 0) end
+        -- On a flipped end it leans the same way.
+        if f.spec.slant then
+            Style.Slant(f.tab, tabSide, tabSide and Pixel.Snap(f, f.tabHeight * UF.SLANT) or 0, nil, UF.FlipAt(f, tabSide))
+        end
         Style.LayoutShell(Style.GetShell(f.tab))
         UF.SizeTab(f)
     end
@@ -2018,14 +2205,95 @@ end
 
 -- A hit rect is protected on a secure button, so in combat (a party button made
 -- mid-fight) it waits until combat ends. Ribbon's row above and line below are
--- clickable like the frame too (f.hitTop, f.foot from UF.Layout).
+-- clickable like the frame too (f.hitTop, f.foot from UF.Layout). Nested
+-- raid or party tiles give up f.nestInset at each end (Group:LayoutButton).
 function UF.SetHitRect(f, l, r)
     local t, b = -(f.hitTop or 0), -(f.foot or 0)
+    local nest = tonumber(f.nestInset) or 0
+    l, r = l + nest, r + nest
     if InCombatLockdown() then
         DUI.AfterCombat(function() f:SetHitRectInsets(l, r, t, b) end, "hitrect:" .. tostring(f))
         return
     end
     f:SetHitRectInsets(l, r, t, b)
+end
+
+-- The portrait's size and place, from the settings and the frame's size alone,
+-- so UF.Layout can keep the bars clear of it before the portrait itself is
+-- laid out. A portrait on its own takes its holder's scale here, since the
+-- socket's border is measured in the holder's pixels.
+-- Returns { mode, free, outerRight, socket, portraitScale, R, Rb, off, half,
+-- shapeArt, y }; only mode and free when there's no portrait to show.
+function UF.RingShape(f, cfg)
+    local mode = UF.PortraitMode(f, cfg)
+    local holder = f.portraitHolder
+    local free = UF.PORTRAIT_FREE[f.spec.unit] and cfg.portraitAt == "free"
+    -- An options preview has no holder, so a portrait on its own leaves it,
+    -- as a power bar on its own does.
+    if free and not holder then mode = "none" end
+    free = (free and mode ~= "none" and cfg.enabled ~= false) and true or false
+    local ring = { mode = mode, free = free }
+    if mode == "none" then return ring end
+    local outerRight = f.spec.slant == "left"
+    local portraitScale = tonumber(cfg.portraitScale) or 1
+    local socket = ns.Socket.Wanted(f, cfg, mode)
+    -- The socket's portrait is drawn a size bigger at the same Portrait size.
+    local scale = portraitScale * (socket and ns.Socket.SIZE or 1)
+    local R, y
+    if f.ringShare then
+        -- As tall as the whole frame with its row and line, centered on it.
+        local up, down = f.hitTop or 0, f.foot or 0
+        R = Pixel.Snap(f, (f:GetHeight() + up + down) * f.ringShare * scale)
+        y = Pixel.Snap(f, (up - down) / 2)
+    else
+        R = Pixel.Snap(f, f:GetHeight() * UF.PORTRAIT_SIZE * scale / 2)
+        y = 0
+    end
+    if free then
+        y = 0
+        holder:SetScale(DUI.Movers.Scale(holder.key))
+    end
+    -- Its middle sits where the classic ring's does, on a whole pixel: half a
+    -- pixel off, the ring drew a pixel wider on one side.
+    local off = Pixel.Snap(f, R * UF.PORTRAIT_OUT)
+    local shapeArt = UF.ShapeArt(cfg.portraitShape, outerRight)
+    -- Set into the frame, the ring is built from the inside out on the classic
+    -- ring's radius: the picture keeps its size and the frame's border goes
+    -- round the socket's thin line, so a thicker border makes the whole ring a
+    -- little bigger, as it makes the bar heavier. R becomes its outer edge.
+    local Rb = R
+    if socket then R = ns.Socket.Outer(f, Rb, cfg.portraitRingWidth, shapeArt, free) end
+    ring.outerRight, ring.socket, ring.portraitScale = outerRight, socket, portraitScale
+    ring.R, ring.Rb, ring.off, ring.shapeArt, ring.y = R, Rb, off, shapeArt, y
+    -- A square's half-side, or the ring's radius: how far it reaches each way.
+    ring.half = shapeArt and R * UF.SQUARE or R
+    return ring
+end
+
+-- How far in from the frame's outer end the ring's outline is on the row y
+-- (up from the frame's bottom). A square or angled portrait's inner side is
+-- straight. 0 where the ring doesn't reach that row.
+function UF.RingEdge(f, ring, y)
+    local dy = math.abs(y - (f:GetHeight() / 2 + ring.y))
+    if dy >= ring.half then return 0 end
+    if ring.shapeArt then return ring.half - ring.off end
+    return math.sqrt(ring.half * ring.half - dy * dy) - ring.off
+end
+
+-- A bar's empty part, reaching more past the bar's outer end (the end under
+-- the portrait), or just the bar.
+function UF.BackToBorder(bar, ring, more)
+    local back = Style.BarBack(bar)
+    if not back then return end
+    back:ClearAllPoints()
+    if not ring or more <= 0 then
+        back:SetAllPoints(bar)
+        return
+    end
+    local l, r = -more, 0
+    if ring.outerRight then l, r = 0, more end
+    back:SetPoint("TOPLEFT", bar, "TOPLEFT", l, 0)
+    back:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", r, 0)
 end
 
 -- The hit rect waits for combat to end (UF.SetHitRect).
@@ -2041,13 +2309,10 @@ function UF.LayoutPortrait(f, cfg)
         ns.Socket.Layout(f, nil)
         return
     end
-    local mode = UF.PortraitMode(f, cfg)
     local holder = f.portraitHolder
-    local free = UF.PORTRAIT_FREE[f.spec.unit] and cfg.portraitAt == "free"
-    -- An options preview has no holder, so a portrait on its own leaves it,
-    -- as a power bar on its own does.
-    if free and not holder then mode = "none" end
-    f.portraitFree = (free and mode ~= "none" and cfg.enabled ~= false) and true or false
+    local ring = UF.RingShape(f, cfg)
+    local mode = ring.mode
+    f.portraitFree = ring.free
     f.iconsStay = f.portraitFree and cfg.portraitIconsStay == true
     UF.HomePortrait(f)
     if holder then
@@ -2063,44 +2328,25 @@ function UF.LayoutPortrait(f, cfg)
         return
     end
     f.ringColor = cfg.portraitRing
-    local outerRight = f.spec.slant == "left"
-    f.portraitScale = tonumber(cfg.portraitScale) or 1
-    local socket = ns.Socket.Wanted(f, cfg, mode)
-    -- The socket's portrait is drawn a size bigger at the same Portrait size.
-    local scale = f.portraitScale * (socket and ns.Socket.SIZE or 1)
-    local R
-    if f.ringShare then
-        -- As tall as the whole frame with its row and line, centered on it.
-        local up, down = f.hitTop or 0, f.foot or 0
-        R = Pixel.Snap(f, (f:GetHeight() + up + down) * f.ringShare * scale)
-        f.portraitY = (up - down) / 2
-    else
-        R = Pixel.Snap(f, f:GetHeight() * UF.PORTRAIT_SIZE * scale / 2)
-        f.portraitY = 0
-    end
-    if f.portraitFree then
-        f.portraitY = 0
-        holder:SetScale(DUI.Movers.Scale(holder.key))
-    end
-    -- Its middle sits where the classic ring's does.
-    local off = R * UF.PORTRAIT_OUT
-    local shapeArt = UF.ShapeArt(cfg.portraitShape, outerRight)
-    -- Set into the frame, the ring is built from the inside out on the classic
-    -- ring's radius: the picture keeps its size and the frame's border goes
-    -- round the socket's thin line, so a thicker border makes the whole ring a
-    -- little bigger, as it makes the bar heavier. R becomes its outer edge.
-    local Rb = R
-    if socket then R = ns.Socket.Outer(f, Rb, cfg.portraitRingWidth, shapeArt) end
+    local outerRight = ring.outerRight
+    f.portraitScale = ring.portraitScale
+    local socket = ring.socket
+    local R, Rb, off, shapeArt, half = ring.R, ring.Rb, ring.off, ring.shapeArt, ring.half
+    f.portraitY = ring.y
     if f.portraitFree then holder:SetSize(2 * R, 2 * R) end
     p.shapeArt = shapeArt
     p.corners = UF.ShapeCorners(shapeArt)
-    -- A square's half-side, or the ring's radius: how far it reaches each way.
-    local half = shapeArt and R * UF.SQUARE or R
     f.portraitOverlap = half - off  -- how far the ring reaches over the bar
     local Rk, ratio, inner
     if socket then
         Rk, ratio, inner = ns.Socket.RingSize(Rb, cfg.portraitRingWidth)
         f.ringFile, f.ringLitFile = ns.Socket.RingFiles(cfg.portraitRingWidth, shapeArt)
+        -- The black gap between the picture and the line is a share of the
+        -- ring, under a pixel at normal sizes: the picture's soft edge then
+        -- lay over it and bright art showed there as loose specks. Keep it
+        -- whole screen pixels wide.
+        local gap = Pixel.Px(f.portraitFree and holder or f, ns.Socket.GAP_PX) / (shapeArt and UF.SQUARE or 1)
+        inner = math.min(inner, Rk * ratio - gap)
     else
         Rk = R
         f.ringFile, f.ringLitFile, ratio = UF.RingFiles(cfg.portraitRingWidth, cfg.portraitRingLine, shapeArt)
@@ -2111,6 +2357,10 @@ function UF.LayoutPortrait(f, cfg)
     f.portraitEdge, f.portraitX = outerRight and "RIGHT" or "LEFT", outerRight and off or -off
     UF.PlacePortrait(f, 1)
     local art = 2 * Rk / UF.RING_OUTER
+    -- The dragon's opening is cut to the ring's outer edge, so its picture is
+    -- sized from the ring and never rounded on its own: rounding it moved the
+    -- opening a fraction of a pixel off the ring and a sliver of dragon showed
+    -- beside it.
     p.ring:SetSize(art, art)
     if shapeArt then
         -- A square elite wears a gold frame with corner thorns, drawn in the
@@ -2541,7 +2791,8 @@ function UF.PlaceBarName(f)
     local p = f.portrait
     local pad = 4
     if p and p:IsShown() then
-        pad = pad + math.max(0, f.portraitOverlap or 0)
+        -- The bar already starts at the ring (f.healthRing), so only what's left.
+        pad = pad + math.max(0, (f.portraitOverlap or 0) - (f.healthRing or 0))
     end
     local markerW = f.markerShown and not f.markerSpot and ((f.markerSize or UF.MARKER_SIZE) + 4) or 0
     if f.marker and not f.markerSpot then
@@ -2908,17 +3159,20 @@ function UF.StylePrediction(f)
     end
 end
 
--- side is the frame's angled end ("right": bars grow right) or nil.
-function UF.LayoutPrediction(f, side)
+-- Lays the heals, shields and overshield over f.health, whose fill's edge
+-- (Style.AngleFill, set just before) they copy.
+function UF.LayoutPrediction(f)
     UF.StylePrediction(f)
     if f.health:GetOrientation() == "VERTICAL" then return layoutPredictionVertical(f) end
     for _, s in ipairs({ f.heals, f.absorbs, f.overshield }) do s:SetOrientation("HORIZONTAL") end
     local growLeft = f.growLeft
     if type(growLeft) ~= "boolean" then growLeft = f.spec.slant == "left" end
-    if f.flipped then side = nil end
     local lead = growLeft and "LEFT" or "RIGHT"
     local back = growLeft and "RIGHT" or "LEFT"
-    local c = side and f.healthCut or 0
+    -- Each segment's edge copies the health fill's own (laid out just before):
+    -- which end it runs toward, how far it leans, and whether it's flipped.
+    local edge, c, under = Style.GetFillAngle(f.health)
+    c = edge and c or 0
     local w = f.health:GetWidth()
     local anchor = f.health:GetStatusBarTexture()
     for _, s in ipairs({ f.heals, f.absorbs }) do
@@ -2927,15 +3181,16 @@ function UF.LayoutPrediction(f, side)
         s:SetPoint("BOTTOM" .. back, anchor, "BOTTOM" .. lead, 0, 0)
         s:SetWidth(w)
         s:SetReverseFill(growLeft)
-        Style.AngleFill(s, side and (growLeft and "left" or "right") or nil, c)
+        Style.AngleFill(s, edge, c, under)
         local wedge = s.wedge
         wedge:ClearAllPoints()
         wedge:SetPoint("TOP" .. lead, anchor, "TOP" .. lead, 0, 0)
         wedge:SetPoint("BOTTOM" .. lead, anchor, "BOTTOM" .. lead, 0, 0)
         wedge:SetWidth(math.max(c, 0.01))
-        wedge.mask:SetTexture(TRAIL_MASK[growLeft and "left" or "right"], "CLAMP", "CLAMP")
+        wedge.mask:SetTexture(Style.SlantImage(true, growLeft and "left" or "right", under), "CLAMP", "CLAMP")
         -- The mask's line runs from the fill's edge at the top to a cut back at
-        -- the bottom, so it hangs off the wedge's back side.
+        -- the bottom (the other way round on a flipped edge), so it hangs off the
+        -- wedge's back side.
         wedge.mask:ClearAllPoints()
         wedge.mask:SetPoint("TOP" .. back, wedge, "TOP" .. back, 0, 0)
         wedge.mask:SetPoint("BOTTOM" .. back, wedge, "BOTTOM" .. back, 0, 0)
@@ -3997,7 +4252,9 @@ function UF.LayoutPowerExtras(f, cfg, text, side, cut, H, free, endPad)
         f.powerText:SetJustifyH("CENTER")
     elseif pos == "outer" then
         local outer = inner == "LEFT" and "RIGHT" or "LEFT"
-        local opad = endPad and 4 or ((side and cut * (ph + Pixel.Px(f, 2)) / H or 0) + 4)
+        -- An angled outer end (the frame's own, set on its own) keeps the text clear of it.
+        local ocut = (not free and (f.outerCut or 0) > 0) and f.outerCut or (side and cut or 0)
+        local opad = endPad and 4 or (ocut * (ph + Pixel.Px(f, 2)) / H + 4)
         UF.PlaceText(f.powerText, outer, f.power, outer, (outer == "LEFT" and 1 or -1) * opad, Pixel.Px(f, 1), nx, ny)
         f.powerText:SetJustifyH(outer)
     else
@@ -4017,7 +4274,10 @@ function UF.LayoutPowerExtras(f, cfg, text, side, cut, H, free, endPad)
         f.altMana:SetPoint("BOTTOMLEFT", f.power, "BOTTOMLEFT", 0, 0)
         f.altMana:SetPoint("BOTTOMRIGHT", f.power, "BOTTOMRIGHT", 0, 0)
         f.altMana:SetHeight(h)
-        Style.AngleFill(f.altMana, not f.flipped and side or nil, side and cut * h / H or 0)
+        -- Its edge copies the power fill's (laid out just before), flip included.
+        local edge, pc, pu = Style.GetFillAngle(f.power)
+        local pH = f.power:GetHeight()
+        Style.AngleFill(f.altMana, edge, (edge and pH > 0) and pc * h / pH or 0, pu)
         Style.SetBarColor(f.altMana, Style.PowerColor("MANA"))
         f.druidMana = on and cfg.druidMana ~= false
     end
@@ -4108,12 +4368,16 @@ function UF.CreateCost(f, spec)
         DUI.SafeRegister(h, "RegisterUnitEvent", e, "player")
     end
     DUI.SafeRegister(h, "RegisterEvent", "ACTIONBAR_UPDATE_STATE")
-    h:SetScript("OnEvent", function(_, event, _, _, spellID)
+    h:SetScript("OnEvent", function(_, event, _, castGUID, spellID)
         if f.test then return end
         if event == "UNIT_SPELLCAST_START" then
-            f.costCast = spellID
+            f.costCast, f.costGUID = spellID, castGUID
         elseif event ~= "ACTIONBAR_UPDATE_STATE" then
-            f.costCast = nil
+            -- Only this cast's own end clears it. A hunter's Auto Shot lands
+            -- and a key pressed mid-cast fails while Aimed Shot runs on.
+            local mine = isSecret(castGUID) or isSecret(f.costGUID) or type(f.costGUID) == "nil"
+                or castGUID == f.costGUID
+            if mine then f.costCast, f.costGUID = nil, nil end
         end
         -- Turned off, so don't ask the client (this fires often).
         if not f.costPreview then f.cost:Hide(); return end
@@ -4340,8 +4604,11 @@ UF.fighting = false
 -- "UnitFrames.raid") hands its alpha to UF.PaintFade, and the range fade
 -- multiplies it (a secret range answer still goes to SetAlphaFromBoolean).
 function UF.CombatAlpha(f)
-    if f.test then return 1 end
-    return type(f.fadeNow) == "number" and f.fadeNow or 1
+    local o = f.fadeOf or f
+    if o.test then return 1 end
+    local n = f.fadeNow
+    if type(n) ~= "number" then n = o.fadeNow end
+    return type(n) == "number" and n or 1
 end
 
 -- While the fade engine eases (every frame, every tile) the range isn't asked
@@ -4562,6 +4829,8 @@ end
 -- full), or "read" with the answer in f.rangeIn (possibly secret, never
 -- compared here).
 local function readRange(f)
+    -- A piece shows its frame's answer (paintAlpha).
+    if f.fadeOf then return end
     if not f.rangeFade or f.test then
         f.rangeRead = "none"
         return
@@ -4595,19 +4864,42 @@ local function readRange(f)
     f.rangeRead, f.rangeIn = "read", inRange
 end
 
--- The fade's alpha times the kept range answer.
+-- Whether a part needs the alpha set on it: the game's aura containers don't
+-- pass their parent's alpha on, and a part outside the frame never gets it.
+local function ownAlpha(part, f)
+    if part.GetObjectType and part:GetObjectType() == "AuraContainer" then return true end
+    local p = part:GetParent()
+    for _ = 1, 6 do
+        if type(p) == "nil" then return true end
+        if p == f then return false end
+        p = p:GetParent()
+    end
+    return true
+end
+
+-- The fade's alpha times the kept range answer. A frame repaints its pieces
+-- (f.pieces past the first) and the parts that fade with it (f.fadeKids).
 local paintAlpha
 function paintRange(f)
     paintAlpha(f)
     UF.FollowModels(f.fadeOf or f)
+    if f.fadeOf then return end
+    local pieces = f.pieces
+    if pieces then for i = 2, #pieces do paintAlpha(pieces[i]) end end
+    for _, part in ipairs(f.fadeKids or {}) do
+        -- Never read its alpha back. It can be secret after a secret dim.
+        if ownAlpha(part, f) then paintAlpha(part) else part:SetAlpha(1) end
+    end
 end
 
 function paintAlpha(f)
     local m = UF.CombatAlpha(f)
-    local r = f.rangeRead
+    -- A piece reads its frame's range answer.
+    local o = f.fadeOf or f
+    local r = o.rangeRead
     -- A secret answer can't tell when it dims, so it's on for as long as it's asked.
-    DUI.Fade.Whole(f, "range", r == "read" and f.rangeFade == true and not f.test)
-    if r == "none" or not f.rangeFade or f.test then
+    if not f.fadeOf then DUI.Fade.Whole(f, "range", r == "read" and f.rangeFade == true and not f.test) end
+    if r == "none" or not o.rangeFade or o.test then
         setFaded(f, m)
         return
     end
@@ -4616,17 +4908,18 @@ function paintAlpha(f)
         f.paintHow, f.paintA = "plain", m
         return
     end
-    local inRange = f.rangeIn
+    local inRange, dim = o.rangeIn, o.rangeAlpha
     if isSecret(inRange) then
-        if f.SetAlphaFromBoolean and pcall(f.SetAlphaFromBoolean, f, inRange, m, m * f.rangeAlpha) then
-            f.paintHow, f.paintA, f.paintB, f.paintC = "bool", inRange, m, m * f.rangeAlpha
+        if f.SetAlphaFromBoolean then
+            f:SetAlphaFromBoolean(inRange, m, m * dim)
+            f.paintHow, f.paintA, f.paintB, f.paintC = "bool", inRange, m, m * dim
         else
             f:SetAlpha(m)
             f.paintHow, f.paintA = "plain", m
         end
         return
     end
-    local a = m * (inRange == true and 1 or f.rangeAlpha)
+    local a = m * (inRange == true and 1 or dim)
     f:SetAlpha(a)
     f.paintHow, f.paintA = "plain", a
 end

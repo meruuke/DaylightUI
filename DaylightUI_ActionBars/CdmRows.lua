@@ -12,6 +12,7 @@ local L = DUI.L
 local CD = ns.Cooldowns
 local Data = ns.CdmData
 local Fx = ns.CdmEffects
+local Tether = ns.CdmTether
 
 local Rows = {}
 ns.CdmRows = Rows
@@ -26,7 +27,7 @@ local AURA_VIEWERS = { BuffIconCooldownViewer = true, BuffBarCooldownViewer = tr
 
 
 local weak = { __mode = "k" }
-local frames = {}                          -- [g] = { layout = frame, pieces = { [id] = frame } }
+local frames = {}                          -- [g] = { layout, pieces[id], tethers[root] }, all frames
 local claimed = setmetatable({}, weak)     -- item -> piece id
 local sizes = setmetatable({}, weak)       -- bar item -> { w, h }
 local faded = setmetatable({}, weak)       -- item -> true
@@ -100,7 +101,7 @@ function Rows.Init()
         f:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
         f:SetSize(1, 1)
         f:Hide()
-        frames[g] = { layout = f, pieces = {} }
+        frames[g] = { layout = f, pieces = {}, tethers = {} }
     end
 end
 
@@ -148,14 +149,91 @@ local function pieceFrame(g, id)
     return t[id]
 end
 
+local function usable(item)
+    return not (InCombatLockdown() and item.IsProtected and item:IsProtected())
+end
+
+-- Queues one layout pass for the fight's end.
+local function heldUntilFightEnds(f)
+    if usable(f) then return false end
+    DUI.AfterCombat(Rows.Refresh, "cdm:tether")
+    return true
+end
+
+-- Leads that are ours and unprotected carry the tether themselves; any other lead's
+-- is placed from its position when it moves, never anchored to it.
+local function anchorTether(f, relative, point, x, y)
+    if f.tetherRelative == relative and f.tetherPoint == point and f.tetherX == x and f.tetherY == y then return end
+    f:ClearAllPoints()
+    f:SetPoint("TOPLEFT", relative, point, x, y)
+    f.tetherRelative, f.tetherPoint, f.tetherX, f.tetherY = relative, point, x, y
+end
+
+local function isHung(f)
+    return f.tetherRelative ~= nil and f.tetherRelative ~= f:GetParent()
+end
+
+-- A protected tether would make its lead protected too, so it can't move in a fight.
+local function hangsOff(f, key)
+    return Tether.Hangable(key, f.lead) and not f:IsProtected()
+end
+
+-- Nil when it follows nothing or its lead can't be measured now.
+local function leadSpot(f)
+    if not f.lead then return nil end
+    local pointX, pointY = Tether.PointAt(f.lead, f.leadAt)
+    if not pointX then return nil end
+    return pointX + f.fromLeadX, pointY + f.fromLeadY
+end
+
+-- Tethers placed beside a lead rather than hung off it: placed again on each pass, and
+-- whenever the lead is placed or laid out.
+local following = {}
+local function setFollowing(f, placedFromLead)
+    following[f] = placedFromLead or nil
+end
+
+-- Spans an attached group's shown pieces, so they move together and clamp on screen as one.
+local function tetherFrame(g, root)
+    local tethers = frames[g].tethers
+    local f = tethers[root]
+    if not f then
+        f = CreateFrame("Frame", "DaylightUICdmTether" .. g .. "_" .. tostring(root), frames[g].layout)
+        f:SetClampedToScreen(true)
+        tethers[root] = f
+    end
+    return f
+end
+
+local function holdsFrame(framesByKey, f)
+    for _, member in pairs(framesByKey) do
+        if member == f then return true end
+    end
+    return false
+end
+
+-- Anything hung off these can't be a group's lead.
+function Rows.IsCdmFrame(f)
+    if type(f) ~= "table" then return false end
+    if Rows.pieceInfo[f] then return true end
+    for _, talentSetFrames in pairs(frames) do
+        if talentSetFrames.layout == f or holdsFrame(talentSetFrames.pieces, f)
+            or holdsFrame(talentSetFrames.tethers, f) then
+            return true
+        end
+    end
+    return false
+end
+
 -- Plugins (DaylightUI.API, kind "cdmpiece"): each shown piece's frame (Daylight UI's,
 -- whatever draws the spell inside it), by its key, with what it shows. Two
 -- tables kept and swapped, so a pass makes no garbage.
-Rows.pieceInfo = setmetatable({}, weak)   -- piece frame -> { key, spellID, shape, drawnBy }
+Rows.pieceInfo = setmetatable({}, weak)   -- piece frame -> { key, spellID, shape, drawnBy, chain, item }
 local toldNow, toldLast, toldEver = {}, {}, setmetatable({}, weak)
 function Rows.ReportPieces(g, items, blocks)
     local R = DUI.APIReport
     for f in pairs(toldNow) do toldNow[f] = nil end
+    local set = Data.Get(g)
     for id, item in pairs(items) do
         local f = frames[g] and frames[g].pieces[id]
         if f then
@@ -164,6 +242,9 @@ function Rows.ReportPieces(g, items, blocks)
             if not info then info = {}; Rows.pieceInfo[f] = info end
             info.key, info.shape, info.drawnBy = key, blocks[id] and blocks[id].kind, drawn[id]
             info.spellID = (ns.CdmOwn and ns.CdmOwn.SpellOf(id)) or Fx.SpellOf(item)
+            info.item = item
+            local root = set.pieces[id] and Data.Root(set, id)
+            info.chain = root ~= nil and tostring(root) or key
             toldNow[f] = key
             if not toldEver[f] then
                 toldEver[f] = true
@@ -179,16 +260,37 @@ function Rows.ReportPieces(g, items, blocks)
     toldNow, toldLast = toldLast, toldNow
 end
 
--- The shown piece for a spell (any rank's key), or nil.
-function Rows.PieceOf(spellID)
+-- Whether a piece (its spell and key) is what a plugin asked for: a piece key
+-- ("11", "s100"), or a spell id of any rank.
+function Rows.Matches(want, spellID, key)
+    if type(want) == "string" then return key == want end
+    if type(want) ~= "number" then return false end
+    if spellID == want or key == tostring(want) then return true end
+    local C = ns.CdmCustom
+    local fam = C and C.KeyOfSpell(want)
+    if not fam then return false end
+    return key == fam or (type(spellID) == "number" and C.KeyOfSpell(spellID) == fam)
+end
+
+-- The shown piece for a spell (any rank) or a piece key, or nil.
+function Rows.PieceOf(want)
     for f, key in pairs(toldLast) do
         local info = Rows.pieceInfo[f]
-        if info and (info.spellID == spellID or key == tostring(spellID)) then return f end
+        if info and (info.spellID == want or key == tostring(want)) then return f end
+    end
+    for f, key in pairs(toldLast) do
+        local info = Rows.pieceInfo[f]
+        if info and Rows.Matches(want, info.spellID, key) then return f end
     end
 end
 
-local function usable(item)
-    return not (InCombatLockdown() and item.IsProtected and item:IsProtected())
+-- What a shown piece reads now (Fx.State plus what it is), or nil.
+function Rows.StateOf(f)
+    local info = toldLast[f] and Rows.pieceInfo[f]
+    if not (info and info.item) then return nil end
+    local t = Fx.State(info.item)
+    t.key, t.spellID, t.shape, t.drawnBy, t.chain = info.key, info.spellID, info.shape, info.drawnBy, info.chain
+    return t
 end
 
 -- A shield placed as a bar that fills by the shield left (CdmBars.IsShield). Only
@@ -213,7 +315,7 @@ local function release(item)
     if claimed[item] or faded[item] or sizes[item] then
         claimed[item], faded[item], sizes[item] = nil, nil, nil
         item:SetAlpha(1)
-        item:EnableMouse(true)
+        Fx.GameMouse(item)
         return true
     end
 end
@@ -298,20 +400,123 @@ local function place(item, block, f, button)
     end
 end
 
--- Moves a piece to its spot. One already showing that moves (its chain closing up,
--- or opening for a piece coming back) glides; one just shown snaps. Piece frames
--- are Daylight UI's, so the items anchored to them follow, in fights too.
-local function put(f, layout, x, y)
-    if f.goalX == x and f.goalY == y and f.atX then return end
-    f.goalX, f.goalY = x, y
+-- x, y are from the layout's center; relative sits originX, originY from it. A move glides,
+-- a new anchor snaps. Items anchored to piece frames follow, in combat too.
+local function put(f, relative, relativePoint, originX, originY, x, y)
+    local sameAnchor = f.goalRelative == relative and f.goalPoint == relativePoint
+    if sameAnchor and f.goalOriginX == originX and f.goalOriginY == originY
+        and f.goalX == x and f.goalY == y and f.atX then
+        return
+    end
+    f.goalRelative, f.goalPoint, f.goalX, f.goalY = relative, relativePoint, x, y
+    f.goalOriginX, f.goalOriginY = originX, originY
     local fx, fy = x, y
-    if f.atX and f:IsShown() and not (InCombatLockdown() and f:IsProtected()) then fx, fy = f.atX, f.atY end
+    if sameAnchor and f.atX and f:IsShown() and not (InCombatLockdown() and f:IsProtected()) then
+        fx, fy = f.atX, f.atY
+    end
     f.moveKey = f.moveKey or {}
     DUI.Motion.Tween(f.moveKey, 0, 1, (fx == x and fy == y) and 0 or DUI.Motion.NORMAL, function(p)
         f.atX, f.atY = fx + (x - fx) * p, fy + (y - fy) * p
         f:ClearAllPoints()
-        f:SetPoint("TOPLEFT", layout, "CENTER", f.atX, f.atY)
+        f:SetPoint("TOPLEFT", relative, relativePoint, f.atX - originX, f.atY - originY)
     end)
+end
+
+-- By root piece; reused across passes, which run on every aura change.
+local attachedChains = {}
+
+local function forgetAttachedChains()
+    for _, chain in pairs(attachedChains) do
+        chain.key, chain.left, chain.tether = nil, nil, nil
+    end
+end
+
+local function readAttachedChains(set)
+    forgetAttachedChains()
+    for _, root in ipairs(Data.Index(set).roots) do
+        local key, offsetX, offsetY, at = Tether.Of(set, root)
+        if key then
+            local chain = attachedChains[root]
+            if not chain then
+                chain = {}
+                attachedChains[root] = chain
+            end
+            local p = set.pieces[root]
+            chain.key, chain.at, chain.offsetX, chain.offsetY = key, at, offsetX, offsetY
+            chain.rootX, chain.rootY = tonumber(p.x) or 0, tonumber(p.y) or 0
+        end
+    end
+end
+
+local function coverBox(set, id, box)
+    local chain = attachedChains[Data.Root(set, id)]
+    if not (chain and chain.key) then return end
+    local right, bottom = box.x + box.w, box.y - box.h
+    if chain.left == nil then
+        chain.left, chain.top, chain.right, chain.bottom = box.x, box.y, right, bottom
+        return
+    end
+    chain.left, chain.top = math.min(chain.left, box.x), math.max(chain.top, box.y)
+    chain.right, chain.bottom = math.max(chain.right, right), math.min(chain.bottom, bottom)
+end
+
+local function sizeTether(f, width, height)
+    if f.tetherW == width and f.tetherH == height then return end
+    f:SetSize(width, height)
+    f.tetherW, f.tetherH = width, height
+end
+
+-- At the saved spot when there's no lead or it can't be measured.
+local function placeTether(f, chain)
+    if heldUntilFightEnds(f) or (isHung(f) and heldUntilFightEnds(f.tetherRelative)) then return end
+    f.extentLeft, f.extentTop = chain.left, chain.top
+    sizeTether(f, math.max(1, chain.right - chain.left), math.max(1, chain.top - chain.bottom))
+    f:Show()
+    f.lead, f.leadAt = Tether.Lead(chain.key), chain.at
+    f.fromLeadX = chain.offsetX + (chain.left - chain.rootX)
+    f.fromLeadY = chain.offsetY + (chain.top - chain.rootY)
+    local hung = f.lead ~= nil and hangsOff(f, chain.key)
+    setFollowing(f, f.lead ~= nil and not hung)
+    if hung then
+        anchorTether(f, f.lead, f.leadAt, f.fromLeadX, f.fromLeadY)
+    else
+        local x, y = leadSpot(f)
+        anchorTether(f, f:GetParent(), "CENTER", x or chain.left, y or chain.top)
+    end
+end
+
+local function hideTether(f)
+    if not f:IsShown() or heldUntilFightEnds(f) then return end
+    setFollowing(f, false)
+    f:Hide()
+end
+
+-- Closed-up buffs count by their closed box, so they never push a group off the screen edge.
+local function placeTethers(g, set, items, closed, boxes)
+    readAttachedChains(set)
+    for id in pairs(items) do coverBox(set, id, boxes[id]) end
+    for id in pairs(closed) do coverBox(set, id, boxes[id]) end
+    for root, chain in pairs(attachedChains) do
+        if chain.key and chain.left then
+            local f = tetherFrame(g, root)
+            placeTether(f, chain)
+            if f:IsShown() then chain.tether = f end
+        end
+    end
+    for root, f in pairs(frames[g].tethers) do
+        local chain = attachedChains[root]
+        if not (chain and chain.tether == f) then hideTether(f) end
+    end
+end
+
+local function putPiece(f, set, id, layout, x, y)
+    local chain = attachedChains[Data.Root(set, id)]
+    local tether = chain and chain.tether
+    if tether then
+        put(f, tether, "TOPLEFT", tether.extentLeft, tether.extentTop, x, y)
+    else
+        put(f, layout, "CENTER", 0, 0, x, y)
+    end
 end
 
 -- One pass's scratch tables, wiped at its start. A pass runs on every aura shown or
@@ -401,8 +606,12 @@ local function truthUp(id, holder)
     if A and A.Unseen(id) then return nil end
     -- A buff someone else can put up too (Battle Shout): the item only counts your
     -- own cast. Where the holder can read it whoever cast it, that's the better
-    -- word; where it can't, yours being up or down is the best there is.
-    if A and A.GameBlind(id) and A.Knows(holder) then return nil end
+    -- word, though the item saying yours is up still counts; where it can't,
+    -- yours being up or down is the best there is.
+    if A and A.GameBlind(id) and A.Knows(holder) then
+        if holder.anyCaster and buffUp(holder.ids) == true then return true end
+        return nil
+    end
     -- A row that doesn't list the rank you know: its item saying up is still true
     -- (a lower rank), but its silence isn't a down.
     if A and A.Short(id) then return buffUp(holder and holder.ids) == true or nil end
@@ -535,7 +744,7 @@ local function claim(item)
         faded[item] = nil
         claimed[item] = id
         item:SetAlpha(1)
-        item:EnableMouse(true)
+        Fx.GameMouse(item)
         hook(item)
         mine[id] = item
     else
@@ -747,6 +956,9 @@ function Rows.Update()
         for id, f in pairs(fr.pieces) do
             if not (show and set.pieces[id]) then f:Hide() end
         end
+        if not show then
+            for _, f in pairs(fr.tethers) do hideTether(f) end
+        end
     end
 
     -- Claim items by piece.
@@ -909,6 +1121,7 @@ function Rows.Update()
         end
         local layout = frames[g].layout
         local boxes = Data.Layout(set, shown)
+        placeTethers(g, set, items, closed, boxes)
         -- A closed-up Daylight UI buff stays shown where it gave up its spot, with
         -- nothing visible while down, so its button comes up there the moment the
         -- buff does. The game's item saying "up" reopens the spot.
@@ -922,14 +1135,14 @@ function Rows.Update()
             local side = set.pieces[id] and set.pieces[id].side
             local x, y = b.x, b.y
             if side == "up" then y = y + h elseif side == "left" then x = x - w end
-            put(f, layout, x, y)
+            putPiece(f, set, id, layout, x, y)
             f:SetSize(w, h)
             f:Show()
             place(item, blocks[id], f, set.pieces[id])
         end
         for id, item in pairs(items) do
             local b, f = boxes[id], pieceFrame(g, id)
-            put(f, layout, b.x, b.y)
+            putPiece(f, set, id, layout, b.x, b.y)
             f:SetSize(b.w, b.h)
             f:Show()
             place(item, blocks[id], f, set.pieces[id])
@@ -988,7 +1201,7 @@ function Rows.Update()
     end
     Fx.EndPass(told)
     -- Done here, not above, since a buff that's down may have closed up out of items.
-    for id, isDown in pairs(downs) do Fx.BuffMoment(set.pieces[id], items[id], isDown) end
+    for id, isDown in pairs(downs) do Fx.BuffMoment(set.pieces[id], items[id], isDown, id) end
 
     DUI.SafeCall(Rows.ReportPieces, g, items, blocks)
 
@@ -1176,12 +1389,41 @@ DUI.RegisterEvent("ACTIVE_TALENT_GROUP_CHANGED", function() Rows.Refresh() end)
 DUI.RegisterEvent("SPELLS_CHANGED", function() Rows.Refresh() end)
 -- "Hide out of combat" blocks show and hide with combat.
 DUI.RegisterEvent("PLAYER_REGEN_DISABLED", function() Rows.Refresh() end)
-DUI.RegisterEvent("PLAYER_REGEN_ENABLED", function() Rows.Refresh() end)
+-- Leads built or moved in combat can be followed now.
+DUI.RegisterEvent("PLAYER_REGEN_ENABLED", function()
+    Tether.Stale()
+    Rows.Refresh()
+end)
 -- The other show rules only need the alpha pass.
 for _, e in ipairs({ "PLAYER_TARGET_CHANGED", "GROUP_ROSTER_UPDATE", "PLAYER_MOUNT_DISPLAY_CHANGED",
     "PLAYER_ENTERING_WORLD", "ZONE_CHANGED_NEW_AREA" }) do
     DUI.RegisterEvent(e, function() Rows.Away() end)
 end
+local function isFollowed(key)
+    for _, chain in pairs(attachedChains) do
+        if chain.key == key then return true end
+    end
+    return false
+end
+
+-- Any frame placed may carry a lead hung off it, so a group placed from a lead is
+-- placed again. Settings place every frame again: one pass for the burst.
+DUI.On("MoverApplied", function()
+    local leadChanged = Tether.Restate()
+    if leadChanged or next(following) ~= nil then Rows.Refresh() end
+end)
+-- Party and raid frames laid out again move without being placed.
+DUI.On("FrameLaidOut", function(key)
+    if isFollowed(key) then Rows.Refresh() end
+end)
+DUI.On("UnlockChanged", function()
+    if next(following) ~= nil then Rows.Refresh() end
+end)
+-- Any setting may switch a lead on or off, or make it loop. Only that needs a pass:
+-- a group whose lead moves is placed again when the lead is placed or laid out, else on
+-- the next pass.
 DUI.On("SettingChanged", function(scope, path)
-    if scope == "ActionBars" and type(path) == "string" and path:sub(1, 3) == "cdm" then Rows.Refresh() end
+    local leadChanged = Tether.Restate()
+    local isCdmSetting = scope == "ActionBars" and type(path) == "string" and path:sub(1, 3) == "cdm"
+    if leadChanged or isCdmSetting then Rows.Refresh() end
 end)

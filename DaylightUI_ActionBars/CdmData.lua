@@ -30,9 +30,11 @@ Data.BAR_LOOK = { color = "class", icon = true, text = 11, time = true }
 -- (buffs that aren't up still show), close the gap of a hidden piece, and the gap
 -- between pieces (a piece's own gap wins). Then when the chain shows: only in a
 -- group, only with a target, not while mounted, and where (anywhere | instance =
--- dungeons, raids, battlegrounds, arenas | world).
+-- dungeons, raids, battlegrounds, arenas | world). tether: the lead's Unlock Frames key, or false;
+-- the root's top-left sits tetherX, tetherY from the lead's tetherAt point.
 Data.CHAIN = { grow = "start", combat = false, always = false, collapse = true, spacing = Data.GAP,
-    group = false, target = false, mounted = false, where = "any" }
+    group = false, target = false, mounted = false, where = "any",
+    tether = false, tetherAt = "CENTER", tetherX = 0, tetherY = 0 }
 
 -- The game's info for a cooldown id. GetCooldownViewerCooldownInfo builds a new
 -- table on every call, and the pieces ask for it many times per pass, so in a fight
@@ -45,6 +47,7 @@ Data.INFO_EVENTS = {
     "PLAYER_PVP_TALENT_UPDATE", "PLAYER_EQUIPMENT_CHANGED", "COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED",
 }
 local infoCache, infoFrom = {}, nil
+local infoGen = 0   -- counts the times the cache was emptied
 
 -- The categories the game keeps a list for, as name -> value, or nil without a
 -- Cooldown Manager. The game's settings code adds negative values to the enum for
@@ -62,7 +65,7 @@ function Data.Categories()
     end
     return out
 end
-function Data.ForgetInfo() wipe(infoCache) end
+function Data.ForgetInfo() wipe(infoCache); infoGen = infoGen + 1 end
 for _, e in ipairs(Data.INFO_EVENTS) do DUI.RegisterEvent(e, Data.ForgetInfo) end
 
 function Data.Info(id)
@@ -168,6 +171,10 @@ local function oldOrigin(g)
     local pos = DUI.DB and DUI.DB.Positions and DUI.DB.Positions()["cdm.s" .. tostring(g)]
     if DUI.Movers and DUI.Movers.Valid and DUI.Movers.Valid(pos) then return pos[1], pos[2] end
     return Data.ORIGIN[1], Data.ORIGIN[2]
+end
+
+local function isFiniteNumber(v)
+    return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
 end
 
 -- Brings a saved layout up to the current format (old formats, renamed keys).
@@ -397,6 +404,93 @@ function Data.MoveToProfiles(again)
     end
 end
 
+-- The classes whose spell list has a spell id ("GROUP" for a buff anyone can
+-- wear), from CdmSpells, built on first use.
+local spellClasses
+local function classesOf(sid)
+    if not spellClasses then
+        local S = ns.CdmSpells
+        if type(S) ~= "table" then return nil end
+        spellClasses = {}
+        for class, list in pairs(S) do
+            if type(list) == "table" and class ~= "FACTS" then
+                for _, f in ipairs(list) do
+                    if type(f) == "table" then
+                        for _, s in ipairs(f) do
+                            spellClasses[s] = spellClasses[s] or {}
+                            spellClasses[s][class] = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return spellClasses[sid]
+end
+
+-- Pieces only one class has, by key.
+local NAMED_CLASS = { seal = "PALADIN", aura = "PALADIN", blessing = "PALADIN",
+    fire = "SHAMAN", earth = "SHAMAN", water = "SHAMAN", air = "SHAMAN" }
+
+-- Whether a piece is plainly another class's: its spell is on other classes' lists
+-- and not on this one's or the group buffs', or it's a seal, totem or pet this
+-- class doesn't have. Nil when it can't be told yet (the game hasn't named the
+-- spell behind a cooldown id).
+function Data.Foreign(id, class)
+    local sids = {}
+    if type(id) == "number" then
+        local info = Data.Info(id)
+        if not info then return nil end
+        for _, k in ipairs({ "spellID", "overrideSpellID" }) do
+            local s = info[k]
+            if type(s) == "number" and not isSecret(s) then sids[#sids + 1] = s end
+        end
+    elseif type(id) == "string" then
+        local s = tonumber(id:match("^s(%d+)$"))
+        if s then
+            sids[1] = s
+        elseif NAMED_CLASS[id] then
+            return NAMED_CLASS[id] ~= class
+        elseif id == "pet" then
+            local C = ns.CdmCustom
+            return not (C and type(C.PETS) == "table" and C.PETS[class])
+        end
+    end
+    local other = false
+    for _, s in ipairs(sids) do
+        local on = classesOf(s)
+        if on then
+            if on[class] or on.GROUP then return false end
+            other = true
+        end
+    end
+    return other
+end
+
+-- Whether set holds a piece that is plainly another class's: then the layout was
+-- made on that class, not this one.
+function Data.OtherClass(set, class)
+    if type(set) ~= "table" or type(set.pieces) ~= "table" then return false end
+    for id in pairs(set.pieces) do
+        if Data.Foreign(id, class) then return true end
+    end
+    return false
+end
+
+-- Takes another class's pieces out of set (their hooked pieces go free where
+-- they are). A layout made on a druid and handed to a warrior otherwise showed
+-- Moonfire on the warrior. Returns whether every piece could be told.
+function Data.KeepClass(set, class)
+    if type(set) ~= "table" or type(set.pieces) ~= "table" or type(class) ~= "string" then return false end
+    local gone, sure = {}, true
+    for id in pairs(set.pieces) do
+        local f = Data.Foreign(id, class)
+        if f == nil then sure = false elseif f then gone[#gone + 1] = id end
+    end
+    for _, id in ipairs(gone) do Data.RemovePiece(set, id) end
+    return sure
+end
+
 -- Once per character, the layout it had before layouts were per character (1.6.0
 -- and older, kept in cdmSaved by Data.MoveOld under its profile's name) becomes a
 -- profile of its class. Those showed nothing since 1.6.1, and 1.6.4 removed the
@@ -451,8 +545,13 @@ function Data.TakeSaved(again)
                 if Data.HasPieces(sets[1]) and Data.HasPieces(sets[2]) then
                     label = string.format(DUI.L["%s, talent set %d"], name, from)
                 end
-                id = Data.NewProfile(label, class, normalize(copy(sets[from]), ox, oy))
-                made[key] = id
+                -- A layout made on another class sharing the profile isn't this one's.
+                local set = normalize(copy(sets[from]), ox, oy)
+                id = nil
+                if not Data.OtherClass(set, class) then
+                    id = Data.NewProfile(label, class, set)
+                    made[key] = id
+                end
             end
             if not picked then cdm.use[g] = id end
         end
@@ -464,7 +563,9 @@ end
 -- the other (another class) showed nothing. A pick of another class's profile
 -- becomes a copy of it for this class, made once per layout and class and kept in
 -- cdmClassCopies. `from` is the original, so two characters never copy back and
--- forth. Returns the copy's id.
+-- forth. A layout holding another class's spells was made on that class and is
+-- not copied: a new warrior sharing a druid's first name got the druid's Moonfire.
+-- Returns the copy's id, or nil.
 local function classCopy(id, class)
     local p = Data.Profile(id)
     local origin = Data.Profile(p.from) and p.from or id
@@ -475,6 +576,7 @@ local function classCopy(id, class)
     local key = string.format("%s|%s", tostring(origin), class)
     local made = root.cdmClassCopies[key]
     if not (Data.Profile(made) and Data.Profile(made).class == class) then
+        if Data.OtherClass(normalize(o.set), class) then return nil end
         made = Data.NewProfile(o.name, class, normalize(copy(o.set)))
         Data.Profile(made).from = origin
         root.cdmClassCopies[key] = made
@@ -482,6 +584,7 @@ local function classCopy(id, class)
     return made
 end
 
+local keptGen
 function Data.MendShared()
     local class = myClass()
     if not class or not DUI.DB.CharKey() then return end
@@ -495,6 +598,23 @@ function Data.MendShared()
             -- An empty one isn't worth keeping; the search below fills it.
             use[g] = Data.HasPieces(p.set) and classCopy(use[g], class) or nil
             Data.Changed()
+        end
+    end
+    -- Copies made before they were checked: another class's pieces come out, the
+    -- ones added since stay. Tried again when the game's cooldown info changes,
+    -- until every piece could be told.
+    if keptGen ~= infoGen then
+        keptGen = infoGen
+        local root = DUI.DB.Root()
+        for _, list in ipairs({ root.cdmClassCopies, root.cdmFromSaved }) do
+            if type(list) == "table" then
+                for _, id in pairs(list) do
+                    local p = Data.Profile(id)
+                    if p and p.class == class and not p.kept and Data.KeepClass(normalize(p.set), class) then
+                        p.kept = true
+                    end
+                end
+            end
         end
     end
     -- Once. The shared layout became a profile named after the first name (or
@@ -518,8 +638,9 @@ function Data.MendShared()
                     found = id
                 end
             end
-            if found then
-                use[g] = classCopy(found, class)
+            local made = found and classCopy(found, class)
+            if made then
+                use[g] = made
                 Data.Changed()
             end
         end
@@ -1065,8 +1186,7 @@ end
 -- Moves id's chain so its first piece's top-left is at x, y (whole numbers). Used by
 -- the editor's nudges and typed positions.
 function Data.MoveChain(set, id, x, y)
-    local function finite(n) return type(n) == "number" and n == n and n ~= math.huge and n ~= -math.huge end
-    if not (set.pieces[id] and finite(x) and finite(y)) then return false end
+    if not (set.pieces[id] and isFiniteNumber(x) and isFiniteNumber(y)) then return false end
     local p = set.pieces[Data.Root(set, id)]
     Data.Changed()
     p.x, p.y = floor(x + 0.5), floor(y + 0.5)
@@ -1181,6 +1301,8 @@ Data.BAR_TEXT_KEYS = { "nameSize", "nameColor", "timeSize", "timeColor" }
 Data.CHAIN_FIELDS = {
     grow = { "start", "center", "end" }, combat = true, always = true, collapse = true, spacing = { 0, 16 },
     group = true, target = true, mounted = true, where = { "any", "instance", "world" },
+    tether = { key = true }, tetherX = { -4096, 4096 }, tetherY = { -4096, 4096 },
+    tetherAt = { "CENTER", "TOP", "BOTTOM", "LEFT", "RIGHT", "TOPLEFT", "TOPRIGHT", "BOTTOMLEFT", "BOTTOMRIGHT" },
 }
 -- Spell options (defaults live in CdmEffects). icon / bar = that shape only.
 Data.SPELL_FIELDS = {
@@ -1188,7 +1310,7 @@ Data.SPELL_FIELDS = {
     noSwipe = { bool = true, icon = true }, noGcd = { bool = true, icon = true }, reverse = { bool = true, icon = true },
     activeGlow = { bool = true, icon = true }, noDurationSwipe = { bool = true, icon = true },
     activeColor = { color = true, alpha = true, icon = true },
-    glowColor = { color = true }, readyGlowColor = { color = true }, usableGlowColor = { color = true },
+    glowColor = { color = true, accent = true }, readyGlowColor = { color = true, accent = true }, usableGlowColor = { color = true, accent = true },
     desat = { values = { "game", "grey", "color" }, icon = true },
     onCd = { values = { "show", "fade", "hide" } },
     onReady = { values = { "show", "fade", "hide" } },
@@ -1213,9 +1335,9 @@ Data.SPELL_FIELDS = {
     fxStrength = { min = 0.1, max = 1, bar = true },
     fxColors = { values = { "group", "bar", "accent", "class", "custom" }, bar = true },
     fxColorA = { color = true, bar = true }, fxColorB = { color = true, bar = true },
-    missing = { bool = true }, missingGlow = { bool = true }, missingGlowColor = { color = true },
-    upGlow = { bool = true }, upGlowColor = { color = true },
-    clipGlow = { bool = true }, clipGlowColor = { color = true },
+    missing = { bool = true }, missingGlow = { bool = true }, missingGlowColor = { color = true, accent = true },
+    upGlow = { bool = true }, upGlowColor = { color = true, accent = true },
+    clipGlow = { bool = true }, clipGlowColor = { color = true, accent = true },
     hideActive = { bool = true }, hideMissing = { bool = true },
     readySound = { sound = true }, usableSound = { sound = true }, buffSound = { sound = true }, buffEndSound = { sound = true },
 }
@@ -1232,6 +1354,16 @@ end
 
 local function isRGB(c)
     return type(c) == "table" and type(c[1]) == "number" and type(c[2]) == "number" and type(c[3]) == "number"
+end
+
+-- Not checked to exist, so keys of plugins that aren't loaded are kept.
+local function isFrameKey(v)
+    return type(v) == "string" and #v > 0 and #v <= 128 and not v:find("%c")
+end
+Data.IsFrameKey = isFrameKey
+
+local function isNumberRange(spec)
+    return type(spec) == "table" and type(spec[1]) == "number"
 end
 
 -- Checks a value against a field. Returns the value to keep, or nil when it's bad.
@@ -1267,11 +1399,21 @@ local function check(spec, v)
         local a = v[4]
         if a ~= nil and type(a) ~= "number" then return nil end
         return { v[1], v[2], v[3], max(0, min(1, a or 1)) }
-    elseif type(spec[1]) == "number" then
+    elseif spec.key then
+        if v == false or isFrameKey(v) then return v end
+    elseif isNumberRange(spec) then
         if type(v) == "number" and v == v then return max(spec[1], min(spec[2], floor(v + 0.5))) end
     elseif oneOf(spec, v) then
         return v
     end
+end
+
+-- Nil when malformed. Non-finite numbers are refused, not clamped to the limit.
+function Data.SavedChainValue(key, value)
+    local spec = Data.CHAIN_FIELDS[key]
+    if spec == nil then return nil end
+    if isNumberRange(spec) and not isFiniteNumber(value) then return nil end
+    return check(spec, value)
 end
 
 -- Sets one look key, either for the whole chain (whole = true, which clears the
@@ -1312,9 +1454,8 @@ end
 -- Sets one chain toggle (Data.CHAIN), from any piece in it. A new spacing applies to
 -- every piece and clears their own gaps.
 function Data.SetChainValue(set, id, key, value)
-    local spec = Data.CHAIN_FIELDS[key]
-    if not (set.pieces[id] and spec) then return false end
-    value = check(spec, value)
+    if not set.pieces[id] then return false end
+    value = Data.SavedChainValue(key, value)
     if value == nil then return false end
     Data.Changed()
     local c = Data.Chain(set, id)
@@ -1359,13 +1500,16 @@ function Data.SetSpellValue(set, id, key, value)
         if type(value) ~= "table" or not isRGB(value.lo) or not isRGB(value.hi) then return false end
         value = { lo = { value.lo[1], value.lo[2], value.lo[3] }, hi = { value.hi[1], value.hi[2], value.hi[3] } }
     elseif spec.color then
-        if not isRGB(value) then return false end
-        if spec.alpha then
-            local a = value[4]
-            if a ~= nil and type(a) ~= "number" then return false end
-            value = { value[1], value[2], value[3], max(0, min(1, a or 1)) }
-        else
-            value = { value[1], value[2], value[3] }
+        -- An accent color also takes nil, which follows the accent again.
+        if value ~= nil or not spec.accent then
+            if not isRGB(value) then return false end
+            if spec.alpha then
+                local a = value[4]
+                if a ~= nil and type(a) ~= "number" then return false end
+                value = { value[1], value[2], value[3], max(0, min(1, a or 1)) }
+            else
+                value = { value[1], value[2], value[3] }
+            end
         end
     elseif spec.values then
         if not oneOf(spec.values, value) then return false end

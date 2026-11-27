@@ -517,6 +517,123 @@ T.test("the wedge's mask sits on its back side, so only the triangle shows", fun
     T.eq(p, "TOPLEFT", "growing right: off its left")
 end)
 
+-- The bar ends a frame's shell is cut with: { left = "straight"|"slash"|"backslash", right = ... }.
+local function shapeOf(f)
+    local S = DaylightUI.Style
+    local sl = S.GetSlant(f)
+    local out = {}
+    for _, e in ipairs({ "left", "right" }) do
+        local on = sl and sl.cut > 0 and (sl.side == e or sl.side == "both")
+        local flip = sl and (sl.under == e or sl.under == "both")
+        out[e] = S.EndGlyph(e, on, flip)
+    end
+    return out
+end
+
+T.test("bar ends: all four shapes on the player frame, each end on its own", function()
+    local SPEC = { unit = "player", label = "Player", power = true, slant = "right", tab = true }
+    local base = { width = 220, height = 50, powerHeight = 13, showName = true, showPercent = true, portrait = "none" }
+    -- The player's inner end is its right. { inner angled, inner flipped, outer angled, outer flipped }
+    local cases = {
+        { "/--/", { true, false, true, true }, "slash", "slash" },
+        { "\\--/", { true, false, true, false }, "backslash", "slash" },
+        { "/--\\", { true, true, true, true }, "slash", "backslash" },
+        { "\\--\\", { true, true, true, false }, "backslash", "backslash" },
+    }
+    for _, c in ipairs(cases) do
+        local cfg = {}
+        for k, v in pairs(base) do cfg[k] = v end
+        cfg.slant, cfg.slantUnder, cfg.slantOuter, cfg.slantUnderOuter = c[2][1], c[2][2], c[2][3], c[2][4]
+        local f = make(SPEC, cfg)
+        local shape = shapeOf(f)
+        T.eq(shape.left, c[3], c[1] .. ": left end")
+        T.eq(shape.right, c[4], c[1] .. ": right end")
+        -- The health fill runs toward the right end and takes its shape.
+        local edge, cut, under = DaylightUI.Style.GetFillAngle(f.health)
+        T.eq(edge, "right", c[1])
+        T.truthy(cut > 0, c[1])
+        T.eq(under == true, c[4] == "backslash", c[1] .. ": the fill's edge leans like the right end")
+        T.eq(f.outerCut > 0, true, c[1] .. ": the outer end is cut")
+    end
+end)
+
+T.test("bar ends: a portrait on the frame keeps the outer end straight", function()
+    local f = make({ unit = "player", label = "Player", power = true, slant = "right", tab = true, portrait = true },
+        { width = 220, height = 50, powerHeight = 13, showName = true, slant = true, slantOuter = true,
+          portrait = "class", portraitScale = 1 })
+    T.eq(shapeOf(f).left, "straight", "the ring covers it")
+    T.eq(f.outerCut, 0)
+end)
+
+T.test("bar ends: a reversed fill takes the outer end's shape", function()
+    local cfg = {}
+    for k, v in pairs(TCFG) do cfg[k] = v end
+    -- The target: inner end left, outer end right flipped (\), filling from the inner end.
+    cfg.slantOuter, cfg.slantUnderOuter, cfg.reverseFill = true, true, true
+    local f = make(TARGET, cfg)
+    local edge, cut, under = DaylightUI.Style.GetFillAngle(f.health)
+    T.eq(edge, "right", "reversed, it runs toward the outer end")
+    T.truthy(cut > 0)
+    T.eq(under, true)
+    cfg.slantOuter = false
+    f = make(TARGET, cfg)
+    T.isnil((DaylightUI.Style.GetFillAngle(f.health)), "a straight outer end: a square edge")
+end)
+
+T.test("bar ends: on a flipped end, heals, shields, overheal and overshield lean with it, in a fight", function()
+    local cfg = {}
+    for k, v in pairs(TCFG) do cfg[k] = v end
+    -- The target's inner end (left) flipped, the outer end angled too: /--/.
+    cfg.slantUnder, cfg.slantOuter, cfg.slantUnderOuter = true, true, false
+    cfg.dotTint = true
+    local spec = {}
+    for k, v in pairs(TARGET) do spec[k] = v end
+    spec.dots = true
+    local f, ns = make(spec, cfg)
+    stub.EnterCombat()
+    stub.units.target = { name = "Pal", isPlayer = true, class = "MAGE", health = stub.Secret(20), maxHealth = stub.Secret(50),
+                          pct = stub.Secret(40), incoming = stub.Secret(900), absorbs = stub.Secret(400) }
+    ns.UF.UpdateAll(f, true)
+    local S = DaylightUI.Style
+    local edge, cut, under = S.GetFillAngle(f.health)
+    T.eq(edge, "left"); T.eq(under, true)
+    for _, s in ipairs({ f.heals, f.absorbs }) do
+        local e2, c2, u2 = S.GetFillAngle(s)
+        T.eq(e2, edge); T.near(c2, cut); T.eq(u2, true, "the segment's edge is flipped too")
+        -- The wedge fills the triangle the flipped edge leaves: the left end's
+        -- trail turned round, which is the right end's cut image.
+        T.eq(s.wedge.mask.__texture, DaylightUI.MEDIA .. "mask-slant-r.png")
+        T.truthy(s.wedge:IsShown())
+        for _, tex in ipairs({ s:GetStatusBarTexture(), s.wedge:GetStatusBarTexture() }) do
+            T.truthy(#(tex.__masks or {}) <= 3)
+        end
+    end
+    -- The overheal past the frame's end is cut by that end: the left end leans under.
+    local clipped = false
+    for _, m in ipairs(f.heals:GetStatusBarTexture().__masks or {}) do
+        if m.__texture == DaylightUI.MEDIA .. "mask-trail-r.png" then clipped = true end
+    end
+    T.truthy(clipped, "overheal is cut along the flipped end")
+    -- The overshield and its line stay inside both ends.
+    T.eq(#(f.overshield:GetStatusBarTexture().__masks or {}), 2)
+    -- Class layers and the DoT veil fit in three masks with both ends angled.
+    T.truthy(#(f.dotVeil.bar:GetStatusBarTexture().__masks or {}) <= 3)
+end)
+
+T.test("bar ends: on a flipped end the cost shade and druid mana lean with the power fill", function()
+    local f = make({ unit = "player", label = "Player", power = true, slant = "right", tab = true },
+        { width = 220, height = 50, powerHeight = 13, showName = true, slant = true, slantUnder = true,
+          slantOuter = true, costPreview = true })
+    local S = DaylightUI.Style
+    local e, c, u = S.GetFillAngle(f.power)
+    T.eq(e, "right"); T.eq(u, true)
+    local e2, _, u2 = S.GetFillAngle(f.cost)
+    T.eq(e2, e); T.eq(u2, true)
+    local e3, c3, u3 = S.GetFillAngle(f.altMana)
+    T.eq(e3, e); T.eq(u3, true); T.truthy(c3 > 0 and c3 < c)
+    T.truthy(#(f.cost:GetStatusBarTexture().__masks or {}) <= 3)
+end)
+
 T.test("power text shows on the power bar when turned on", function()
     local cfg = {}
     for k, v in pairs(TCFG) do cfg[k] = v end
@@ -574,6 +691,25 @@ T.test("a cast shades the power it will use, and stops when the cast ends", func
         stub.FireEvent(e, "player", "guid", 123)
         T.falsy(f.cost:IsShown(), e)
     end
+    stub.spellCosts = nil
+end)
+
+-- A hunter's Aimed Shot: Auto Shot lands (its own SUCCEEDED) and a key pressed
+-- mid-cast fails ("another action is in progress") while the cast runs on.
+-- Only the end of this cast may take its shade away.
+T.test("the cost shade stays for the whole cast while other casts end around it", function()
+    local f = costFrame({ costPreview = true })
+    stub.FireEvent("UNIT_SPELLCAST_START", "player", "aimed", 123)
+    T.truthy(f.cost:IsShown())
+    stub.FireEvent("UNIT_SPELLCAST_SUCCEEDED", "player", "auto", 75)
+    T.truthy(f.cost:IsShown(), "Auto Shot landing mid-cast")
+    stub.FireEvent("UNIT_SPELLCAST_FAILED", "player", "other", 1978)
+    T.truthy(f.cost:IsShown(), "another spell refused mid-cast")
+    stub.FireEvent("ACTIONBAR_UPDATE_STATE")
+    T.truthy(f.cost:IsShown(), "an action bar refresh")
+    T.eq(f.cost.__value, 50)
+    stub.FireEvent("UNIT_SPELLCAST_SUCCEEDED", "player", "aimed", 123)
+    T.falsy(f.cost:IsShown(), "the cast itself ending")
     stub.spellCosts = nil
 end)
 
@@ -1355,6 +1491,72 @@ T.test("unit frames: fade through the engine and multiply with the range fade", 
     for _ = 1, 30 do stub.RunOnUpdate(DUI.Fade.driver, 1 / 60) end
     T.eq(f:GetAlpha(), 1, "a fight brings it back")
     stub.LeaveCombat()
+end)
+
+T.test("unit frames: frames that only show with your target have no Show with a target", function()
+    local DUI, ns = stub.Load({ module = true })
+    local function fadeRow(pageId, field)
+        for _, page in ipairs(ns.OPTIONS.pages) do
+            if page.id == pageId then
+                for _, g in ipairs(page.groups) do
+                    for _, item in ipairs(g.items or {}) do
+                        if item.key == pageId .. ".fade." .. field then return item end
+                    end
+                end
+            end
+        end
+    end
+    local get = function(k) return DUI:Get("UnitFrames", k) end
+    for _, id in ipairs({ "target", "targettarget" }) do
+        for _, field in ipairs({ "target", "targetEnemy" }) do
+            local row = fadeRow(id, field)
+            T.truthy(row, id .. " still has the row for the Fade page's lookups")
+            T.truthy(row and row.hidden and row.hidden(get), id .. ": " .. field .. " hidden")
+        end
+        T.falsy(fadeRow(id, "mouseover").hidden, id .. ": the other rows stay")
+    end
+    for _, id in ipairs({ "player", "focus", "pet" }) do
+        local row = fadeRow(id, "target")
+        T.truthy(row and not (row.hidden and row.hidden(get)), id .. ": Show with a target stays")
+    end
+    -- The Fade page's copies follow the area's own rule.
+    local hub = DUI.Fade.HubGroups()
+    for _, card in ipairs(hub) do
+        for _, item in ipairs(card.items) do
+            if item.label == "Settings for" and item.choices then
+                local values = item.choices()
+                for id in pairs(values) do
+                    if id == "UnitFrames:target.fade." then
+                        item.set(id)
+                        for _, row in ipairs(card.items) do
+                            if row.label == "Show with a target" or row.label == "Only enemies" then
+                                T.truthy(row.hidden(), "Fade page: " .. row.label .. " hidden for the target frame")
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+T.test("upgrade 25: Show with a target on the target frame becomes Always", function()
+    local _, ns = stub.Load({ module = true })
+    local p = { modules = { UnitFrames = { groupFrames = 24,
+        target = { fade = { mode = "ooc", target = true } },
+        targettarget = { fade = { mode = "always", target = true, targetEnemy = true } },
+        focus = { fade = { mode = "ooc", target = true } } } }, positions = {}, general = {} }
+    ns.UpgradeGroupFrames(p)
+    local uf = p.modules.UnitFrames
+    T.eq(uf.target.fade.mode, "never", "it was always shown at its opacity: now it says so")
+    T.isnil(uf.target.fade.target)
+    T.eq(uf.targettarget.fade.mode, "never", "only enemies: kept shown, so an enemy never fades")
+    T.isnil(uf.targettarget.fade.target); T.isnil(uf.targettarget.fade.targetEnemy)
+    T.eq(uf.focus.fade.mode, "ooc", "the focus frame's means your target: left alone")
+    T.eq(uf.focus.fade.target, true)
+    local q = { modules = { UnitFrames = { groupFrames = 24, target = { fade = { mode = "ooc" } } } }, positions = {}, general = {} }
+    ns.UpgradeGroupFrames(q)
+    T.eq(q.modules.UnitFrames.target.fade.mode, "ooc", "without it, the fade is untouched")
 end)
 
 T.test("unit frames: player and pet can fade only at full health", function()
@@ -2300,4 +2502,41 @@ T.test("a secret name keeps to the Max name length by width", function()
     T.truthy(t.tab:GetWidth() < t:GetWidth() * 0.5, "narrower than a secret name's usual half")
     T.truthy(t.nameText:GetWidth() < 4 * 7 + 6, "the name as wide as 4 letters")
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- A player's ask: the power bar as tall as the health, side by side with the
+-- portrait between them. The power slider stopped at 20 while health went to 80.
+T.test("the power bar height goes as high as the frame's height, and lays out that tall", function()
+    local DUI, ns = stub.Load({ module = true })
+    stub.RunTimers()
+    local O = DUI.Options
+    local function row(pageId, label)
+        for _, g in ipairs(O.GetPage(pageId).groups) do
+            for _, it in ipairs(g.items) do
+                if it.label == label then return it end
+            end
+        end
+    end
+    for _, page in ipairs({ "player", "target", "focus", "party" }) do
+        local h, p = row("UnitFrames." .. page, "Height"), row("UnitFrames." .. page, "Power bar height")
+        T.truthy(h and p, page)
+        T.eq(p.max, h.max, page .. ": power goes as high as health")
+    end
+    T.eq(ns.DEFAULTS.player.powerHeight, 11, "the default stays")
+    DUI:Set("UnitFrames", "player.powerAt", "free")
+    DUI:Set("UnitFrames", "player.powerHeight", 43)
+    stub.RunTimers()
+    local bar = DaylightUIPowerBar_player
+    T.truthy(bar and bar:IsShown(), "the free power bar shows")
+    T.truthy(bar:GetHeight() >= DaylightUI.Pixel.Snap(bar, 43) - 0.01, "as tall as asked")
+end)
+
+T.test("a tile that can't grow keeps some health under a power bar taller than it", function()
+    local _, ns = stub.Load({ module = true, login = false })
+    local f = ns.UF.Create(PLAYER)
+    f:SetSize(100, 30)
+    ns.UF.Layout(f, { width = 100, height = 30, powerHeight = 60, showName = true, showPercent = true }, ns.DEFAULTS.playerText, true)
+    local px = DaylightUI.Pixel.Px(f, DaylightUI.Style.BorderPx(f))
+    T.truthy(f:GetHeight() - 2 * px - f.power:GetHeight() >= ns.UF.MIN_HEALTH, "health still shows")
+    T.truthy(f.power:GetHeight() < 30, "the power bar stops inside the tile")
 end)

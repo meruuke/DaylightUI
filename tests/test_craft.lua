@@ -163,6 +163,90 @@ T.test("craft: a tab for each profession with a crafting window, the open one pi
     T.eq(f.tab, 197, "the open profession's tab picked")
 end)
 
+-- A player had Cooking in front of their two main professions. A tab dragged to a
+-- new spot stays there for this character, the others glide aside while it moves,
+-- and letting go never counts as a click on the tab.
+T.test("craft: a tab dragged to the front stays there for this character; the others glide aside", function()
+    local ns = load()
+    local f = open(ns)
+    local Win = DaylightUI.Win
+    local right = f.headerRight or f.close
+    right.GetLeft = function() return 600 end   -- the fake game lays nothing out
+    local s = f:GetEffectiveScale()
+    local tail, cook = f.tabs[1], f.tabs[2]
+    local function at(b) local _, _, _, x = b:GetPoint(1); return x end
+    local gap = Win.TAB_GAP
+    local cookMid = -gap - cook:GetWidth() / 2
+    stub.cursorPos = { (600 + cookMid) * s, 0 }
+    T.truthy(cook:GetScript("OnDragStart"), "a tab can be dragged")
+    cook:GetScript("OnDragStart")(cook, "LeftButton")
+    stub.cursorPos = { (600 - 1000) * s, 0 }
+    Win.TabDragMove(f)
+    local tailFrom = -gap - cook:GetWidth() - gap
+    T.near(at(tail), tailFrom, 0.5, "Tailoring starts where it was drawn, no jump")
+    frame(2)
+    T.truthy(at(tail) > tailFrom + 0.5 and at(tail) < -gap - 0.5, "and glides aside: " .. at(tail))
+    frame(20)
+    T.near(at(tail), -gap, 0.5, "Tailoring now rightmost")
+    cook:GetScript("OnDragStop")(cook)
+    cook:Click()
+    T.eq(#PW.Calls("OpenTradeSkill"), 0, "letting go isn't a click")
+    frame(20)
+    T.eq(f.tabs[1].text:GetText(), "Cooking")
+    T.eq(f.tabs[2].text:GetText(), "Tailoring")
+    T.deq(DaylightUI.DB.Character().craftOrder, { 185, 197 }, "saved for this character")
+    T.eq(ns.Data.Tabs()[1].name, "Cooking", "every list of tabs reads the order")
+    ns.Window.tabs = nil
+    ns.Window.MakeTabs(f)
+    T.eq(f.tabs[1].text:GetText(), "Cooking", "rebuilt tabs keep it")
+    stub.Advance(1)
+    f.tabs[1]:Click()
+    T.eq((PW.Calls("OpenTradeSkill")[1] or {})[1], 185, "a click after it still switches")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- Out of combat the mouse sits on a secure caster laid over the tab, so the drag
+-- starts there. Its release must not cast the profession.
+T.test("craft: a tab dragged from its secure caster moves too, and the release casts nothing", function()
+    local ns = load()
+    local f = open(ns)
+    local Win = DaylightUI.Win
+    local right = f.headerRight or f.close
+    right.GetLeft = function() return 600 end
+    local s = f:GetEffectiveScale()
+    local cook = f.tabs[2]
+    cook.GetLeft, cook.GetBottom = function() return 560 end, function() return 500 end
+    cook:GetScript("OnEnter")(cook)
+    local b = _G.DaylightUICraftTab
+    T.truthy(b and b:IsShown() and b:GetAttribute("type1") == "spell", "the caster is over Cooking")
+    stub.cursorPos = { (600 - Win.TAB_GAP - 5) * s, 0 }
+    b:GetScript("OnDragStart")(b, "LeftButton")
+    T.falsy(b:GetAttribute("type1"), "the caster casts nothing while a tab is dragged")
+    stub.cursorPos = { (600 - 1000) * s, 0 }
+    Win.TabDragMove(f)
+    b:GetScript("OnLeave")(b)
+    b:GetScript("OnDragStop")(b)
+    frame(20)
+    T.eq(f.tabs[1].text:GetText(), "Cooking", "moved")
+    T.deq(DaylightUI.DB.Character().craftOrder, { 185, 197 })
+    T.eq(#PW.Calls("CastSpell"), 0, "nothing cast")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("craft: a new profession keeps its place among the saved order", function()
+    local profs = PW.Sample()
+    profs[#profs + 1] = { name = "First Aid", skillLine = 129, icon = 135966, spellID = 3273, rank = 1, max = 75, recipes = {} }
+    local ns = load({ profs = profs })
+    DaylightUI.DB.Character().craftOrder = { 185, 197 }
+    local names = {}
+    for _, t in ipairs(ns.Data.Tabs()) do names[#names + 1] = t.name end
+    T.eq(table.concat(names, ", "), "Cooking, Tailoring, First Aid")
+    DaylightUI.DB.Character().craftOrder = { 129, 197 }
+    names = {}
+    for _, t in ipairs(ns.Data.Tabs()) do names[#names + 1] = t.name end
+    T.eq(table.concat(names, ", "), "First Aid, Cooking, Tailoring", "Cooking (not saved) keeps its spot")
+end)
+
 T.test("craft: learned recipes under their categories, in the game's order", function()
     local ns = load()
     open(ns)
@@ -834,6 +918,69 @@ T.test("craft: a link clicked with your own window open swaps to the small windo
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
+-- Links clicked with a window already up: the list still comes in after
+-- TRADE_SKILL_SHOW, and while it does the game may still answer with what was open
+-- before (stale) or with nothing.
+for _, stale in ipairs({ false, true }) do
+    local how = stale and " (old profession still read)" or ""
+    T.test("craft: a slow link clicked with your own window open opens the small window" .. how, function()
+        local ns = load()
+        PW.Load()
+        frame(3)
+        PW.Open(185)
+        frame(10)
+        T.truthy(DaylightUI.Win.IsOpen(ns.Window.frame))
+        PW.LinkOpens(true, stale)
+        frame(5)
+        PW.LinkArrives(197, "Brat Mage")
+        frame(20)
+        T.truthy(ns.View.frame and DaylightUI.Win.IsOpen(ns.View.frame), "theirs opens")
+        T.falsy(DaylightUI.Win.IsOpen(ns.Window.frame), "yours goes")
+        T.eq(ns.View.frame.title:GetText(), "Tailoring")
+        T.eq(ProfessionsFrame:GetParent(), DaylightUI.Win.Followers.aside, "the game's stays parked")
+        T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    end)
+
+    T.test("craft: a second slow link replaces the first in the small window" .. how, function()
+        local ns = load()
+        PW.Load()
+        frame(3)
+        PW.LinkOpens(true)
+        frame(5)
+        PW.LinkArrives(197, "Brat Mage")
+        frame(20)
+        T.truthy(ns.View.frame and DaylightUI.Win.IsOpen(ns.View.frame))
+        PW.LinkOpens(true, stale)
+        frame(5)
+        PW.LinkArrives(185, "Barry")
+        frame(20)
+        T.truthy(DaylightUI.Win.IsOpen(ns.View.frame), "still the small window")
+        T.eq(ns.View.frame.title:GetText(), "Cooking")
+        T.truthy(string.find(ns.View.frame.sub:GetText() or "", "Barry", 1, true), "the new owner")
+        T.falsy(DaylightUI.Win.IsOpen(ns.Window.frame), "never yours")
+        T.eq(ProfessionsFrame:GetParent(), DaylightUI.Win.Followers.aside, "the game's stays parked")
+        T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    end)
+
+    T.test("craft: a link clicked with nothing open, read stale at first, opens the small window" .. how, function()
+        local ns = load()
+        PW.Load()
+        frame(3)
+        PW.Open(185)
+        frame(10)
+        PW.Close()
+        frame(20)
+        PW.LinkOpens(false, stale)
+        frame(5)
+        PW.LinkArrives(197, "Brat Mage")
+        frame(20)
+        T.truthy(ns.View.frame and DaylightUI.Win.IsOpen(ns.View.frame), "theirs opens")
+        T.falsy(DaylightUI.Win.IsOpen(ns.Window.frame), "not yours")
+        T.eq(ProfessionsFrame:GetParent(), DaylightUI.Win.Followers.aside, "the game's stays parked")
+        T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    end)
+end
+
 T.test("craft: a guild member's recipes are the small window; the whole guild's list stays the game's", function()
     local ns = load()
     PW.Load()
@@ -905,6 +1052,33 @@ T.test("craft: the footer: Create, the amount, Create all [n]", function()
     T.eq(ns.Make.amount, 1, "a new recipe starts at one")
     T.truthy(foot.buttons[1].off, "nothing to make it with")
     T.truthy(foot.buttons[2].off)
+end)
+
+-- The game's crafting page (ValidateControls) lets Create through when
+-- HasNoReagentCost says so, whatever is in the bags, and offers no Create all then.
+T.test("craft: a recipe that costs no materials can be made with none in the bags", function()
+    local profs = PW.Sample()
+    for _, r in ipairs(profs[1].recipes) do if r.id == 104 then r.free = true end end
+    local ns = load({ profs = profs })
+    open(ns)
+    ns.List.lines[104]:Click()
+    frame(5)
+    local foot = footer(ns)
+    T.falsy(foot.buttons[1].off, "Create is on with no linen in the bags")
+    T.falsy(foot.buttons[2] and foot.buttons[2]:IsShown(), "no Create all, as the game's page")
+    T.falsy(ns.Make.box:IsShown(), "no amount either")
+    local right = page(ns).recipe.stack
+    T.truthy(shown(right, "lineSpec")[1].value:GetText() ~= "Missing materials", "not called missing")
+    page(ns).list.mats:Click()
+    T.truthy(names(ns):find("Bolt of Linen Cloth", 1, true), "Have materials keeps it")
+    page(ns).list.mats:Click()
+    ns.List.lines[104]:Click()
+    frame(5)
+    foot.buttons[1]:Click()
+    local calls = PW.Calls("CraftRecipe")
+    T.eq(#calls, 1, "Create crafts it")
+    T.eq(calls[1][1], 104)
+    T.eq(calls[1][2], 1)
 end)
 
 -- What the client hands an edit box's OnTextChanged when the player types.
@@ -1311,21 +1485,133 @@ local function shiftClick(f, shift)
     _G.IsModifiedClick = was
 end
 
+-- The game's modified clicks (IsModifiedClick with its Forever defaults from
+-- Bindings_Camelot.xml, HandleModifiedItemClick from ItemButtonTemplate.lua),
+-- with the keys held in `held` (SHIFT, CTRL).
+local function gameClicks(held)
+    local was = { _G.IsModifiedClick, _G.HandleModifiedItemClick }
+    local keys = { CHATLINK = "SHIFT", DRESSUP = "CTRL", COMPAREITEMS = "SHIFT", RECIPEWATCHTOGGLE = "SHIFT" }
+    local g = { dressed = {} }
+    _G.IsModifiedClick = function(k)
+        if k == nil then return held.SHIFT == true or held.CTRL == true end
+        return held[keys[k] or ""] == true
+    end
+    _G.HandleModifiedItemClick = function(link)
+        if not link then return false end
+        if IsModifiedClick("CHATLINK") and ChatFrameUtil and ChatFrameUtil.InsertLink(link) then return true end
+        if IsModifiedClick("DRESSUP") then g.dressed[#g.dressed + 1] = link; return true end
+        return false
+    end
+    function g.Done() _G.IsModifiedClick, _G.HandleModifiedItemClick = was[1], was[2] end
+    return g
+end
+
 T.test("craft: Shift-click on a recipe, an enchant too, puts the recipe's link in the open chat box", function()
     local profs = PW.Sample()
     profs[1].recipes[2].enchant = true
     local ns = load({ profs = profs })
     open(ns)
     local chat = fakeChat(true)
-    local was = _G.IsModifiedClick
-    _G.IsModifiedClick = function(k) return k == "CHATLINK" end
+    local g = gameClicks({ SHIFT = true })
     for _, b in ipairs(shown(page(ns).list.stack, "lineSpec")) do
         local r = b.lineSpec.recipe
         if r and r.id == 102 then b.lineSpec.onClick(b) end
     end
-    _G.IsModifiedClick = was
+    g.Done()
     chat.Done()
     T.truthy(chat.inserted[1] and chat.inserted[1]:find("Henchant:102", 1, true), "the enchant's link")
+end)
+
+-- The game's list (Blizzard_ProfessionsRecipeList.lua): a modified click goes to
+-- HandleModifiedItemClick with the recipe's link; when nothing took it, Shift
+-- (RECIPEWATCHTOGGLE) tracks or untracks the recipe. A modified click never picks.
+T.test("craft: Shift-click with no chat box tracks the recipe, Ctrl-click tries it on, neither picks", function()
+    local ns = load()
+    open(ns)
+    T.eq(ns.Window.Picked(), 102)
+    local chat = fakeChat(false)
+    local g = gameClicks({ SHIFT = true })
+    ns.List.lines[101]:Click()
+    g.Done()
+    T.eq(ns.Window.Picked(), 102, "Shift-click didn't pick it")
+    local calls = PW.Calls("SetRecipeTracked")
+    T.eq(calls[1] and calls[1][1], 101, "tracked, the game's way")
+    T.eq(calls[1] and calls[1][2], true)
+    g = gameClicks({ CTRL = true })
+    ns.List.lines[101]:Click()
+    g.Done()
+    chat.Done()
+    T.eq(ns.Window.Picked(), 102, "Ctrl-click didn't pick it")
+    T.truthy(g.dressed[1] and g.dressed[1]:find("Henchant:101", 1, true), "the recipe's link went to the game")
+    T.eq(#PW.Calls("SetRecipeTracked"), 1, "Ctrl doesn't track")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- The game's result icon (Blizzard_ProfessionsRecipeSchematicForm.lua) redraws its
+-- tooltip every frame, so Shift compares the made item with what you wear, and its
+-- click hands the made item's link to HandleModifiedItemClick (Shift links it,
+-- Ctrl tries it on). A recipe result tooltip's data isn't an item's own in this
+-- fake (a guess at why a player saw no compare): the compare must use the made item.
+T.test("craft: Shift compares the made item on a recipe row and the recipe's result, pressed mid-hover too", function()
+    local ns = load()
+    open(ns)
+    local shift, data, compared = false, nil, {}
+    local shop = { shown = false }
+    function shop:IsShown() return self.shown end
+    function shop:Hide() self.shown = false end
+    local was = { _G.GameTooltip, _G.GameTooltip_ShowCompareItem, _G.C_TooltipComparison, _G.TooltipUtil, _G.IsModifiedClick }
+    local owner
+    _G.GameTooltip = { shoppingTooltips = { shop },
+        SetOwner = function(_, o) owner = o end, GetOwner = function() return owner end,
+        IsOwned = function(_, o) return owner == o end, Show = function() end, Hide = function() owner = nil end,
+        SetRecipeResultItem = function() data = { type = "recipe" } end,
+        SetHyperlink = function(_, l) data = { type = "item", hyperlink = l } end,
+        SetItemByID = function(_, id) data = { type = "item", hyperlink = "|Hitem:" .. id .. "|h" } end,
+        GetPrimaryTooltipData = function() return data end }
+    _G.C_TooltipComparison = { CompareItem = function(item)
+        compared[#compared + 1] = item.hyperlink
+        shop.shown = true
+    end }
+    -- The game's: only an item's own tooltip data has something to compare.
+    _G.GameTooltip_ShowCompareItem = function(t)
+        local d = t:GetPrimaryTooltipData()
+        if d and d.type == "item" and d.hyperlink then C_TooltipComparison.CompareItem({ hyperlink = d.hyperlink }, t) end
+    end
+    _G.TooltipUtil = nil
+    _G.IsModifiedClick = function(k) return shift and (k == "COMPAREITEMS" or k == nil) end
+    local function hover(b, what)
+        compared = {}
+        shift = false
+        b:GetScript("OnEnter")(b)
+        T.eq(#compared, 0, what .. ": no compare without Shift")
+        T.eq(type(b.UpdateTooltip), "function", what .. ": the game's tooltip timer has something to call")
+        shift = true
+        b:UpdateTooltip()
+        T.truthy(compared[1] and compared[1]:find("Hitem:9101", 1, true), what .. ": Shift pressed mid-hover compares the hood")
+        shift = false
+        b:UpdateTooltip()
+        T.falsy(shop.shown, what .. ": letting go of Shift takes it away")
+        b:GetScript("OnLeave")(b)
+    end
+    hover(ns.List.lines[101], "a recipe row")
+    ns.List.lines[101]:Click()
+    frame(10)
+    local top = shown(page(ns).recipe.stack, "lineSpec")[1]
+    T.eq(top.lineSpec.recipe.id, 101)
+    hover(top, "the recipe's result")
+    _G.GameTooltip, _G.GameTooltip_ShowCompareItem, _G.C_TooltipComparison, _G.TooltipUtil, _G.IsModifiedClick =
+        was[1], was[2], was[3], was[4], was[5]
+    local g = gameClicks({ CTRL = true })
+    top:Click()
+    g.Done()
+    T.truthy(g.dressed[1] and g.dressed[1]:find("Hitem:9101", 1, true), "Ctrl-click on the result tries the hood on")
+    local chat = fakeChat(true)
+    g = gameClicks({ SHIFT = true })
+    top:Click()
+    g.Done()
+    chat.Done()
+    T.truthy(chat.inserted[1] and chat.inserted[1]:find("Hitem:9101", 1, true), "Shift-click links the made item")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
 T.test("craft: Shift-click on the profession's name puts its link in the open chat box", function()

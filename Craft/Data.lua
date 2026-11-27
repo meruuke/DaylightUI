@@ -94,7 +94,39 @@ function Data.Tabs()
             end
         end
     end
-    return out
+    return Data.Ordered(out)
+end
+
+-- The player's own order of professions (tabs dragged in this window), kept per
+-- character as a list of skill lines.
+function Data.SetOrder(ids)
+    local char = DUI.DB and DUI.DB.Character and DUI.DB.Character()
+    if not char then return end
+    local copy = {}
+    for i, id in ipairs(ids) do copy[i] = id end
+    char.craftOrder = copy
+end
+
+-- Sorts a list of professions (each with .skillLine) by the saved order, in place.
+-- Saved ones fill the spots saved ones held, in the saved order; any other (one
+-- learned since, or one without a window) keeps its spot. The data text's list
+-- uses this too.
+function Data.Ordered(list)
+    local char = DUI.DB and DUI.DB.Character and DUI.DB.Character()
+    local saved = char and char.craftOrder
+    if type(saved) ~= "table" then return list end
+    local rank = {}
+    for i, id in ipairs(saved) do rank[id] = i end
+    local spots, picked = {}, {}
+    for i, p in ipairs(list) do
+        if p.skillLine and rank[p.skillLine] then
+            spots[#spots + 1] = i
+            picked[#picked + 1] = p
+        end
+    end
+    table.sort(picked, function(a, b) return rank[a.skillLine] < rank[b.skillLine] end)
+    for k, i in ipairs(spots) do list[i] = picked[k] end
+    return list
 end
 
 -- Primary professions (the ones that can be unlearned), with or without a crafting
@@ -251,6 +283,17 @@ function Data.OutputItem(id)
     return s and num(s.outputItemID) or nil
 end
 
+-- The link of the item a recipe makes, the one the game's own result icon hands to
+-- a Shift or Ctrl click: what its tooltip compares with your gear. An enchant makes
+-- no item, so nil.
+function Data.ResultLink(recipe)
+    if type(recipe) ~= "table" or recipe.enchant then return nil end
+    local out = call("GetRecipeOutputItemData", recipe.id)
+    local link = type(out) == "table" and str(out.hyperlink) or str(recipe.link)
+    if link and string.find(link, "|Hitem:", 1, true) then return link end
+    return nil
+end
+
 -- How many one craft makes, on average (some make 1 to 3).
 function Data.Yield(id)
     local s = schematic(id)
@@ -331,6 +374,13 @@ function Data.Waiting(id)
     return left ~= nil
 end
 
+-- Whether a recipe can be made now as far as materials go. A recipe that costs none
+-- (a rogue's poisons with the Reagent Economy perk) still lists them, so the bag count
+-- says no; the game's own crafting page lets it through (ValidateCraftRequirements).
+function Data.CanMake(recipe)
+    return type(recipe) == "table" and (recipe.count > 0 or recipe.free == true)
+end
+
 -- Everything the list needs: { prof, sections = { { id, name, order, recipes } }, byID }.
 -- Sections in the game's category order, recipes in the game's list order.
 function Data.Read()
@@ -346,7 +396,8 @@ function Data.Read()
             local recipe = { id = id, name = str(r.name) or "", icon = r.icon, link = str(r.hyperlink), favorite = r.favorite == true,
                 difficulty = num(r.relativeDifficulty) or Data.TRIVIAL, skillUps = num(r.numSkillUps) or 0,
                 canSkillUp = r.canSkillUp ~= false, enchant = r.isEnchantingRecipe == true, verb = str(r.alternateVerb),
-                count = num(call("GetCraftableCount", id)) or 0, mats = mats, sub = Data.MaterialsLine(mats) }
+                count = num(call("GetCraftableCount", id)) or 0, mats = mats, sub = Data.MaterialsLine(mats),
+                free = call("HasNoReagentCost", id) == true }
             local cat = num(r.categoryID) and category(r.categoryID, cats) or nil
             if recipe.favorite then cat = Data.FAVORITES end
             local key = cat and cat.id or 0

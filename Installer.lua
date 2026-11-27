@@ -29,11 +29,13 @@ DUI.Installer = Installer
 
 Installer.VERSION = 2 -- bump to show a new guide to already set-up characters once
 Installer.EXISTING = "existing"
-Installer.ROLE_TEXT = {
-    ["DPS/Tank"] = L["Party on the left, you and your target low in the middle."],
-    Healer = L["Your party and raid as square tiles under you, dispels easy to spot."],
-    ["Immersive Preset"] = L["Calm for questing: bars and your frame fade after a fight, the micro menu waits for the mouse. All shown in dungeons."],
-}
+DUI.WithLanguage(function()
+    Installer.ROLE_TEXT = {
+        ["DPS/Tank"] = L["Party on the left, you and your target low in the middle."],
+        Healer = L["Your party and raid as square tiles under you, dispels easy to spot."],
+        ["Immersive Preset"] = L["Calm for questing: bars and your frame fade after a fight, the micro menu waits for the mouse. All shown in dungeons."],
+    }
+end)
 -- The opening's sunrise: its height, the band of the art it shows and how far
 -- right of center its frame sits.
 Installer.OPENING_BANNER = { height = 190, crop = { 0.286, 0.750 }, shift = 27 }
@@ -329,9 +331,11 @@ function Installer.Questions()
     local list = P.Questions(flow.path)
     if list[1] and list[1].role then table.insert(out, table.remove(list, 1)) end
     -- Only where Daylight UI's own part is installed: otherwise there's
-    -- nothing to choose between.
+    -- nothing to choose between. A clash over part of a module (raid frames,
+    -- the minimap) is left to the clash box after the reload: the guide
+    -- switches whole modules.
     for _, c in ipairs(P.Clashes()) do
-        local mod = P.Module(c.module)
+        local mod = P.ClashWhole(c) and P.Module(c.module)
         if mod and P.AddonInstalled(mod.addon) then
             out[#out + 1] = { id = "clash:" .. c.addon, clash = c, part = L["Other addons"], short = c.label }
         end
@@ -627,7 +631,7 @@ function Installer.SetModule(mod, on)
     if not (flow and mod) then return end
     flow.modules[mod.addon] = on
     for _, c in ipairs(DUI.InstallerPages.Clashes()) do
-        if c.module == mod.name then flow.clashes[c.addon] = on and "ours" or "theirs" end
+        if c.module == mod.name and DUI.InstallerPages.ClashWhole(c) then flow.clashes[c.addon] = on and "ours" or "theirs" end
     end
     local page = Installer.pages and Installer.pages.modules
     if page and page.Refresh then page.Refresh() end
@@ -919,7 +923,7 @@ function Installer.Summary()
         end
     end
     for _, c in ipairs(P.Clashes()) do
-        if Installer.ClashTakesOver(c) then others[#others + 1] = c.label end
+        if P.ClashWhole(c) and Installer.ClashTakesOver(c) then others[#others + 1] = c.label end
     end
     local modPage = Installer.HasStep("modules") and "modules" or nil
     local function add(fmt, label, names, page)
@@ -1086,16 +1090,16 @@ end
 
 -- Installs the profile's Edit Mode layout (the standard one for DPS / Tank,
 -- the profile's own for the rest). Returns ok, whether it wrote anything, and
--- a reason on failure.
+-- a reason on failure (and "full" when the game has no room for another layout).
 local function placeLayout(target)
     if target == DUI.DB.ActiveName() and EditMode.IsActive(target) then return true, false end
-    local ok, why
+    local ok, why, code
     if target == "DPS/Tank" then
-        ok, why = EditMode.Install(nil, target)
+        ok, why, code = EditMode.Install(nil, target)
     else
-        ok, why = EditMode.UseProfile(target)
+        ok, why, code = EditMode.UseProfile(target)
     end
-    if not ok then return false, false, why end
+    if not ok then return false, false, why, code end
     return true, true
 end
 
@@ -1161,7 +1165,7 @@ local function applyModules(flow)
         end
     end
     for _, c in ipairs(P.Clashes()) do
-        if Installer.ClashTakesOver(c) and P.AddonOn(c.addon) then
+        if P.ClashWhole(c) and Installer.ClashTakesOver(c) and P.AddonOn(c.addon) then
             api.DisableAddOn(c.addon, me)
             changed = true
         end
@@ -1192,6 +1196,8 @@ function Installer.Finish()
     local P, D = DUI.Profiles, DUI.InstallerDraft
     local active = DUI.DB.ActiveName()
     local slot = Installer.CurrentSlot()
+    local had = {}
+    for n in pairs(DUI.DB.Root().profileData) do had[n] = true end
     local target, why, fresh
     if flow.path == "tour" then
         target, why, fresh = saveAs(flow.roles[slot])
@@ -1207,8 +1213,17 @@ function Installer.Finish()
         D.CopyInto(fresh)
         P.Replace(target, fresh)
     end
-    local ok, written, err = placeLayout(target)
+    local ok, written, err, code = placeLayout(target)
+    -- The game's list of account layouts is full: the Finish page lists them
+    -- to delete one from (InstallerSteps.lua).
+    flow.full = code == "full" or nil
     if not ok then
+        -- Profiles made for this Finish go again: each Try again would leave
+        -- another one behind with no layout of its own.
+        local list = DUI.DB.Root().profileData
+        for n in pairs(list) do
+            if not had[n] and n ~= DUI.DB.ActiveName() then list[n] = nil end
+        end
         return done(false, string.format(L["Couldn't place the layout: %s. Then press Try again."], tostring(err)))
     end
     local reload = written or fresh ~= nil or target ~= active or D.NeedsReload()
@@ -1345,4 +1360,4 @@ function Installer.Install(preset, existing)
 end
 
 DUI.RegisterCommand("install", function() Installer.Show() end,
-    L["/dui install - the setup guide: set this character up, or take the tour again"])
+    function() return L["/dui install - the setup guide: set this character up, or take the tour again"] end)

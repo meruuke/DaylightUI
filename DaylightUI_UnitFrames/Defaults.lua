@@ -50,7 +50,7 @@ ns.DEFAULTS = {
                slant = true, bigNumber = true, healthText = "value", percentSign = false, hideFullHealth = false, reverseFill = false, portrait = "class", portraitRing = "class", portraitShape = "round", portraitLook = "socket", portraitRingWidth = "normal", portraitRingLine = true, portraitDragon = false, portraitDragonColor = "class",
                predictHeals = true, predictAbsorbs = true, showThreat = true,
                showLevel = false, levelPos = "ring", levelX = 0, levelY = 0, showLeader = true, showResting = true, showPvP = true, pvpSize = 1, leaderSize = 1, restSize = 1, showPowerText = false, powerFormat = "value", powerPercentSign = false, hideFullPower = false, powerTextPos = "inner", healthTextPos = "inner", healthTextX = 0, healthTextY = 0, powerTextX = 0, powerTextY = 0, druidMana = true,
-               druidBars = { enabled = false, width = 94, height = 6, spacing = 2, showText = false }, costPreview = true, costColor = { 0, 0, 0 }, costAlpha = 0.45, regenSweep = "off", fade = DaylightUI.Fade.Defaults({ fullHealth = false, fullMana = false, target = true }) },
+               druidBars = { enabled = false, width = 94, height = 6, spacing = 2, showText = false }, costPreview = true, costColor = { 0, 0, 0 }, costAlpha = 0.45, regenSweep = "off", regenTicks = false, fade = DaylightUI.Fade.Defaults({ fullHealth = false, fullMana = false, target = true }) },
     target = { enabled = true, texts = textSlots(), namePos = "bar", nameX = 0, nameY = 0, nameColor = "global", nameCustom = { 1, 1, 1 }, percentColor = "white", percentCustom = { 1, 1, 1 }, nameLimitLen = 0, tabHeight = 16, portraitScale = 1, portraitAt = "frame", portraitIconsStay = false, markerSize = 16, width = 187, height = 43, showPower = true, powerHeight = 11, powerAt = "inside", powerWidth = 187, powerSlant = true, powerSlantBoth = false, powerSlantUnder = false, powerSlantUnderLeft = false, powerOwnAngle = false, powerLean = 0.21, showName = true, nameOnBar = false, showPercent = true,
                showMarker = true, showClassification = true, slant = true, bigNumber = true, healthText = "percent", percentSign = false, hideFullHealth = false, reverseFill = false,
                portrait = "class", portraitRing = "class", portraitShape = "round", portraitLook = "socket", portraitRingWidth = "normal", portraitRingLine = true, predictHeals = true, predictAbsorbs = true, showThreat = true, threatTag = true,
@@ -64,9 +64,14 @@ ns.DEFAULTS = {
                      -- Power bar off by default, since most people only glance to see who it is.
                      showPower = false, powerHeight = 4, powerTextPos = "inner", powerTextX = 0, powerTextY = 0,
                      showPowerText = false, powerFormat = "value", powerPercentSign = false, hideFullPower = false,
+                     -- A portrait is off by default on the small frames, and so are its icons.
+                     portrait = "none", portraitRing = "class", portraitShape = "round", portraitLook = "socket", portraitRingWidth = "normal", portraitRingLine = true, portraitScale = 1,
+                     showLevel = false, levelPos = "ring", levelX = 0, levelY = 0, showLeader = false, leaderSize = 1, showPvP = false, pvpSize = 1,
                      predictHeals = true, predictAbsorbs = true, fade = DaylightUI.Fade.Defaults() },
     pet = { enabled = true, showPercent = false, namePos = "bar", nameX = 0, nameY = 0, healthText = "percent", healthTextPos = "inner", healthTextX = 0, healthTextY = 0, percentSign = false, hideFullHealth = false, powerTextPos = "inner", powerTextX = 0, powerTextY = 0, nameColor = "global", nameCustom = { 1, 1, 1 }, percentColor = "white", percentCustom = { 1, 1, 1 }, nameLimitLen = 0, width = 94, height = 20, powerHeight = 4, showPower = true, showName = true, slant = true,
             reverseFill = false, showPowerText = false, powerFormat = "value", powerPercentSign = false, hideFullPower = false,
+            portrait = "none", portraitRing = "class", portraitShape = "round", portraitLook = "socket", portraitRingWidth = "normal", portraitRingLine = true, portraitScale = 1,
+            showLevel = false, levelPos = "ring", levelX = 0, levelY = 0, showLeader = false, leaderSize = 1, showPvP = false, pvpSize = 1,
             predictHeals = true, predictAbsorbs = true, fade = DaylightUI.Fade.Defaults({ fullHealth = false }), happiness = true, happinessBar = false,
             happinessLook = "square", happinessSide = "right", happinessSpot = "outleft", happinessSize = 16, happinessX = 0, happinessY = 0,
             -- The name on the bar, or with nameOnBar off, in a small tab above the frame like the others.
@@ -79,7 +84,8 @@ ns.DEFAULTS = {
     -- sits over it, "free" uses its own mover. x/y nudge it above or below.
     playerCastbar = { enabled = true, at = "below", x = 0, y = 0, width = 285, height = 27, showIcon = false, slant = true, slantLeft = false, slantUnder = false, slantUnderLeft = false, ownAngle = false, lean = 0.21, reverseFill = false,
                       from = "frame",   -- when hung "below": under the player frame, or "power" for under a free-standing power bar (player.powerAt free)
-                      shell = { own = false, borderPx = 8, cornerPx = 6, shadowPx = 4 } },   -- its own border (UF.OwnShell)
+                      shell = { own = false, borderPx = 8, cornerPx = 6, shadowPx = 4 },   -- its own border (UF.OwnShell)
+                      fade = DaylightUI.Fade.Defaults() },
     -- The target's cast bar: inside its frame over the power bar (at = "power"),
     -- or its own bar with its own size above or below the frame (nudged by
     -- x/y) or on its own mover ("free").
@@ -100,7 +106,10 @@ ns.DEFAULTS = {
               -- interrupt comes off cooldown (DUI.Interrupt).
               kickStyle = "blade", kickedBy = true, kickedByPos = "right", kickMark = false,
               -- channelTicks: lines on your own bar where each tick of a channel lands.
-              channelTicks = false },
+              channelTicks = false,
+              -- spellColors: your own spells in a color of their own, a list
+              -- of { name, icon, color }, matched by name (every rank).
+              spellColors = {} },
     -- The focus cast bar: inside its frame over the power bar, or its own.
     focusCastbar = { enabled = true, at = "power", x = 0, y = 0, fitFrame = true, width = 200, height = 20, showIcon = true, slant = false, slantLeft = false, slantUnder = false, slantUnderLeft = false, ownAngle = false, lean = 0.21, reverseFill = false },
     -- Each party member's cast bar (PartyCasts.lua): inside the frame over the
@@ -108,7 +117,8 @@ ns.DEFAULTS = {
     -- bar beside the frame ("free", with spot right|left|below|above and x/y).
     -- insideTextSize: its text inside the frame (0 fits the power bar).
     partyCastbar = { enabled = true, at = "power", spot = "right", x = 0, y = 0, width = 140, height = 10, showIcon = true,
-                     slant = false, insideTextSize = 0, reverseFill = false },
+                     slant = false, slantLeft = false, slantUnder = false, slantUnderLeft = false,
+                     insideTextSize = 0, reverseFill = false },
     -- The target's and focus's own cast bar colors.
     targetCasts = { cast = { 0.78, 0.62, 0.30 }, channel = { 0.78, 0.62, 0.30 }, locked = { 0.42, 0.42, 0.45 },
                     interrupted = { 0.52, 0.17, 0.15 }, classColor = false, customGradient = DaylightUI.Style.DefaultStops() },
@@ -119,11 +129,13 @@ ns.DEFAULTS = {
               customGradient = DaylightUI.Style.DefaultStops(),   -- fill "customGradient": every hand's bar in these colors
               slant = false, slantLeft = false, slantUnder = false, slantUnderLeft = false, ownAngle = false, lean = 0.21, showIcon = false, textSize = 12, reverseFill = false, spacing = 0, growUp = false,
               colors = { main = { 0.80, 0.68, 0.46 }, off = { 0.62, 0.56, 0.46 }, ranged = { 0.50, 0.66, 0.52 },
-                         queued = { 0.86, 0.44, 0.32 } } },
+                         queued = { 0.86, 0.44, 0.32 } },
+              fade = DaylightUI.Fade.Defaults() },
     combo = { enabled = true, size = 14, fullRed = true,
         height = 0, gap = 3, x = 0, y = 0,
         color = { 1.0, 0.82, 0.25 }, fullColor = { 0.95, 0.22, 0.2 },
         colorMode = "color", customGradient = DaylightUI.Style.DefaultStops(), fullAll = false, empty = 0.4, border = 2, slant = true, anchor = "target",
+        slantOuter = false, slantUnder = false, slantUnderOuter = false,
         side = "below", align = "inner", stretch = false },
     party = { enabled = true, texts = textSlots(), nameColor = "global", nameCustom = { 1, 1, 1 }, percentColor = "white", percentCustom = { 1, 1, 1 }, nameLimitLen = 0, tabHeight = 16, portraitScale = 1, markerSize = 13, powerTextPos = "inner", width = 170, height = 34, showPower = true, powerHeight = 7, spacing = 38, showName = true, nameOnBar = false,
               showPercent = true, slant = true, bigNumber = true, healthText = "percent", percentSign = false, hideFullHealth = false, reverseFill = false, portrait = "class", portraitRing = "class", portraitShape = "round", portraitLook = "socket", portraitRingWidth = "normal", portraitRingLine = true,
@@ -145,8 +157,9 @@ ns.DEFAULTS = {
               }),
               -- Header layout: down or across, frames per line, sorting, you.
               direction = "columns", perLine = 5, groupSpacing = 4, sortBy = "role", hideSelf = true, showSolo = false,
-              -- Grow from the bottom and/or the right (Group.Corner).
-              growUp = false, growLeft = false,
+              -- Grow from the bottom and/or the right (Group.Corner), or from
+              -- the middle of the line so a short group sits centered (Group.Anchor).
+              growUp = false, growLeft = false, growCenter = false,
               -- Tile look pieces, off or unused in the default look.
               fillVertical = false, showPower = true, namePos = "bar", nameAlign = "center", nameX = 0, nameY = 0, nameTag = true,
               rolePos = "home", roleSize = 11, roleX = 0, roleY = 0, markerPos = "home", markerX = 0, markerY = 0, leaderPos = "home", leaderX = 0, leaderY = 0, showReady = true, readyPos = "right", readySize = 14, readyX = 0, readyY = 0,
@@ -170,7 +183,7 @@ ns.DEFAULTS = {
     partyPetText = { name = 10, percent = 10, power = 0 },
     raid = { enabled = true, texts = textSlots(), showInParty = false, width = 72, height = 28, spacing = 2, groupSpacing = 4, showName = true,
              nameColor = "global", nameCustom = { 1, 1, 1 }, nameLimitLen = 0,
-             direction = "columns", sortBy = "group", groups = 8, growUp = false, growLeft = false,
+             direction = "columns", sortBy = "group", groups = 8, growUp = false, growLeft = false, growCenter = false,
              perLine = 5, fillVertical = false, hideSelf = false, namePos = "bar", nameAlign = "center", nameX = 0, nameY = 0, nameTag = true,
              -- Aura groups (AuraGroups.lua), placed by Spots on the tile.
              indicators = indicators(8),
@@ -349,11 +362,24 @@ do
     -- height), instead of the shared Slant angle. angle: the older setting,
     -- above 0 for its own angle; upgrade step 21 moves it to the two above.
     d.ownAngle, d.lean, d.angle = false, 0.21, 0
+    -- Its right and left ends flipped (bottom corner out), each on its own.
+    d.slantUnder, d.slantUnderLeft = false, false
     -- The numbers on the bars, using the player frame's keys. Size 0 fits its bar.
     d.showPercent, d.healthText, d.percentSign, d.hideFullHealth = false, "percent", false, false
     d.healthTextPos, d.healthTextSize = "center", 0
     d.showPowerText, d.powerFormat, d.powerPercentSign, d.hideFullPower = false, "value", false, false
     d.powerTextPos, d.powerTextSize = "center", 0
+end
+
+-- Each end of a frame is set on its own (Options.EndRows): slant angles the
+-- inner end (the one the bars fill toward), slantOuter the outer one, and
+-- slantUnder / slantUnderOuter flip that end so its bottom corner sticks out.
+-- Frames copied from these (raid sizes, arena, focus target, party targets)
+-- take them along.
+ns.END_FRAMES = { "player", "target", "targettarget", "pet", "focus", "party", "partyPet", "raid" }
+for _, k in ipairs(ns.END_FRAMES) do
+    local d = ns.DEFAULTS[k]
+    d.slantOuter, d.slantUnder, d.slantUnderOuter = false, false, false
 end
 
 -- The name tab's own look and placement (Daylight style; UF.TabLook, UF.PlaceTab).
@@ -440,6 +466,16 @@ for _, frame in ipairs({ "party", "raid" }) do
     end
 end
 
+-- Icon borders (Auras.SetBorder), set on each frame: the look icons always
+-- had. The custom color starts at the Daylight accent.
+local function iconBorder()
+    local a = DaylightUI.Style.ACCENT
+    return { px = 2, debuff = "dispel", noType = "wine", buff = "plain", color = { a[1], a[2], a[3] }, glow = true }
+end
+ns.BORDER_FRAMES = { "targetAuras", "focusAuras", "playerAuras", "petAuras", "party", "raid" }
+for _, key in ipairs(ns.BORDER_FRAMES) do ns.DEFAULTS[key].iconBorder = iconBorder() end
+ns.DEFAULTS.personal.auras.iconBorder = iconBorder()
+
 -- Raid setups by size (Raid.lua; the Raid 10, Raid 20 and Raid 40 pages).
 -- 11 to 20 players use raid20 / raid20Text and 21 to 40 use raid40 / raid40Text,
 -- built like the 10-player raid setup, unless follow is on (the default), in
@@ -511,6 +547,12 @@ ns.STRATA_FRAMES = { "player", "target", "targettarget", "pet", "focus", "focust
 for _, k in ipairs(ns.STRATA_FRAMES) do
     ns.DEFAULTS[k].strata = k == "personal" and "LOW" or "MEDIUM"
 end
+-- The target's and focus's cast bars draw with their frame by default, wherever
+-- they stand ("FRAME"); a strata of their own can still be picked.
+ns.CASTBAR_STRATA_LABELS = { FRAME = "Same as frame" }
+for k, v in pairs(ns.STRATA_LABELS) do ns.CASTBAR_STRATA_LABELS[k] = v end
+ns.CASTBAR_STRATA = { "FRAME", "BACKGROUND", "LOW", "MEDIUM", "HIGH", "DIALOG" }
+ns.DEFAULTS.targetCastbar.strata, ns.DEFAULTS.focusCastbar.strata = "FRAME", "FRAME"
 
 -- Bar animation (the core's BarFx.lua) per bar, set on each page: a frame's
 -- health and power, each cast bar, the swing timers. Off here; a new setup

@@ -268,6 +268,8 @@ function Ed.Plus(side) return ui and ui.plus[side] end
 
 -- After a layout change: update the live layout, then the editor.
 function Ed.Changed()
+    ns.CdmTether.Rebase(Ed.Set())
+    ns.CdmTether.Stale()
     Data.Changed()
     Rows.Refresh()
     Ed.Draw()
@@ -288,6 +290,12 @@ function Ed.SetAttach(id, side)
         attach = nil
     end
     Ed.Draw()
+end
+
+local function catchUpWithLeads(set)
+    local Tether = ns.CdmTether
+    Tether.Follow(set)
+    Tether.Rebase(set)
 end
 
 -- The layout pill's menu: a heading per talent set with the class's layouts
@@ -328,6 +336,7 @@ function Ed.SetGroup(g)
     Data.SetViewing(g)
     Data.Ensure(Data.CurrentIndex())
     selected, attach, pending = nil, nil, nil
+    catchUpWithLeads(Ed.Set())
     Rows.Refresh()
     Ed.Draw()
 end
@@ -601,17 +610,32 @@ local function chainMiddle(set, id)
     return (l + r) / 2 - (tonumber(p.x) or 0), (t + b) / 2 - (tonumber(p.y) or 0)
 end
 
--- Moves the picked chain so its middle is at x, y from screen center (0, 0 is
--- centered, as in unlock mode). Used by the card's Position row.
+-- Nil when the chain is placed by its spot instead.
+local function offsetFromLead(set, id)
+    local Tether = ns.CdmTether
+    if not Tether.MeasuredFromLead(set, id) then return nil end
+    local _, offsetX, offsetY = Tether.Of(set, Data.Root(set, id))
+    return offsetX, offsetY
+end
+
+local function moveOffsetTo(set, id, x, y)
+    local accepted, changed = ns.CdmTether.MoveOffset(set, Data.Root(set, id), x, y)
+    if changed then Ed.Changed() end
+    return accepted
+end
+
+-- Moves the picked chain's middle to x, y from its lead's point, else from screen center.
 function Ed.MoveTo(x, y)
     local set = Ed.Set()
     if selected == nil or not set.pieces[selected] then return false end
     local mx, my = chainMiddle(set, selected)
+    if offsetFromLead(set, selected) then return moveOffsetTo(set, selected, x - mx, y - my) end
     if not Data.MoveChain(set, selected, x - mx, y - my) then return false end
     Ed.Changed()
     return true
 end
 
+-- Ed.Changed re-measures a following chain's offset from its new spot.
 function Ed.Nudge(dx, dy)
     local set = Ed.Set()
     if selected == nil or not set.pieces[selected] then return false end
@@ -621,13 +645,17 @@ function Ed.Nudge(dx, dy)
     return true
 end
 
--- Where the picked chain's middle is relative to screen center, or nil.
+-- The picked chain's middle from its lead's point, else screen center; nil with nothing picked.
 function Ed.Spot()
     local set = Ed.Set()
     if selected == nil or not set.pieces[selected] then return nil end
-    local p = set.pieces[Data.Root(set, selected)]
     local mx, my = chainMiddle(set, selected)
-    return floor((tonumber(p.x) or 0) + mx + 0.5), floor((tonumber(p.y) or 0) + my + 0.5)
+    local x, y = offsetFromLead(set, selected)
+    if not x then
+        local p = set.pieces[Data.Root(set, selected)]
+        x, y = tonumber(p.x) or 0, tonumber(p.y) or 0
+    end
+    return floor(x + mx + 0.5), floor(y + my + 0.5)
 end
 
 -- The tray can be moved out of the way by dragging any empty spot. It's kept fully
@@ -693,7 +721,7 @@ function Ed.EndTrayMove() trayMove = nil end
 -- Opening and closing
 -- ---------------------------------------------------------------------
 
-local build
+local build, endLeadHighlight
 
 -- g = the talent set to edit (nil = the one in use).
 function Ed.Open(g)
@@ -726,6 +754,7 @@ function Ed.Open(g)
     DUI.Movers.HoldGrid("cdm", true)
     if not ui then build() end
     ui.overlay:Show()
+    catchUpWithLeads(Ed.Set())
     Ed.Draw()
     if DUI.Sound then DUI.Sound.Play("open") end
     ns.CdmGuide.Offer()
@@ -738,6 +767,7 @@ function Ed.Close()
     ns.CdmGuide.Stop()
     if Ed.FlowCheck then Ed.FlowCheck() end   -- stop the outline colors from cycling
     selected, attach, pending, drag, trayMove = nil, nil, nil, nil, nil
+    if ui then endLeadHighlight() end
     Data.SetViewing(nil)
     DUI.Movers.ShowGuides(nil, nil)
     ns.CdmCard.Hide()
@@ -857,7 +887,8 @@ local function flowOn()
 end
 Ed.FlowCheck = function() flowOn() end
 function Ed.Flowing() return flowDriver ~= nil and flowDriver:GetScript("OnUpdate") ~= nil end
-local function outline(f, px)
+-- A still outline keeps its phase-0 colors.
+local function outline(f, px, still)
     local line, halos = ring(f, 7), { ring(f, 6), ring(f, 5) }
     local a, b
     local function paint(ph)
@@ -876,8 +907,12 @@ local function outline(f, px)
                 out = out + hw
             end
             a, b = accentEnds()
-            paint(phase)
-            flows[paint] = true
+            if still then
+                paint(0)
+            else
+                paint(phase)
+                flows[paint] = true
+            end
         else
             flows[paint] = nil
         end
@@ -924,6 +959,11 @@ local function previewFor(id)
     f.time = DUI.Style.Text(f.bar, 11, "RIGHT")
     f.time:SetPoint("RIGHT", f.bar, "RIGHT", -4, 0)
     f.key = f:CreateFontString(nil, "OVERLAY")
+    -- A sample stack count, over the swipe like the real icon's.
+    f.over = CreateFrame("Frame", nil, f)
+    f.over:SetAllPoints(f)
+    f.over:SetFrameLevel(f.cd:GetFrameLevel() + 2)
+    f.count = f.over:CreateFontString(nil, "OVERLAY")
     f.lit = outline(f, 2)
     f:SetScript("OnMouseDown", onPieceDown)
     f:SetScript("OnMouseUp", onPieceUp)
@@ -940,6 +980,44 @@ local function sample(id)
     local dur = 8 + (id % 23)
     local t = ((GetTime() or 0) + id * 1.7) % dur
     return dur, t
+end
+
+-- The fill and the empty part as the spell's real bar paints them: its own Fill and
+-- Background, else its group's Bar color and Background, and its animation.
+local function paintBarFill(f, set, id, p)
+    local CD = ns.Cooldowns
+    f.parts = f.parts or {}
+    f.parts.back = DUI.Style.BarBack(f.bar)
+    f.button = p
+    -- Per spell colors go by the spell id, as on the real bar.
+    if not f.cooldownInfo then f.cooldownInfo = { spellID = ns.CdmOwn and ns.CdmOwn.SpellOf(id) } end
+    CD.ColourBase(f, f.bar, f.parts, Data.PieceLook(set, id, "color"), p, Data.PieceLook(set, id, "barStops"))
+    local mode, v = CD.BackOf(p, { back = Data.PieceLook(set, id, "back"),
+        backColor = Data.PieceLook(set, id, "backColor"), backGradient = Data.PieceLook(set, id, "backGradient") })
+    CD.PaintBack(f.parts.back, mode, v)
+    CD.TrackFx(f, f.bar, f.parts, true)
+end
+
+-- The icon's swipe, cooldown numbers and count as the spell's real icon shows them.
+local function paintIconLook(f, set, id, p)
+    local CD, Fx, Own = ns.Cooldowns, ns.CdmEffects, ns.CdmOwn
+    ns.Skin.StyleSwipe(f.cd)
+    local buffOnly = Own and Own.Track(id, p) == "buff"
+    local hide = Fx.Get(p, "noSwipe") == true or (buffOnly and Fx.Get(p, "noDurationSwipe") == true)
+    f.cd:SetDrawSwipe(not hide)
+    f.cd:SetReverse(Fx.Get(p, "reverse") == true)
+    local t = CD.TextLook({ iconText = Data.TextOf(set, id) })
+    f.textLook = t
+    f.numbers = CD.StyleNumbers(f.cd, t)
+    -- Only a spell that holds a count gets a sample one.
+    local counts = Own and Own.Stacks(id)
+    if counts then
+        DUI.Style.DressText(f.count, t.countSize, { slot = ns.MEDIA.font })
+        CD.Ink(f.count, t.countColor)
+        CD.PlaceCount(f.count, f, t.countSpot)
+        f.count:SetText("2")
+    end
+    f.count:SetShown(counts and true or false)
 end
 
 local function paintPiece(f, set, id, b)
@@ -969,16 +1047,15 @@ local function paintPiece(f, set, id, b)
         local Fx = ns.CdmEffects
         ns.Cooldowns.PlaceName(f.name, f.bar, Fx.Get(p, "showName") ~= false, Fx.Get(p, "nameAlign") == "center")
         f.time:SetShown(look("time") ~= false)
-        DUI.Style.SetBarColor(f.bar, DUI.Style.ClassColor(select(2, UnitClass("player"))))
-        -- A dark empty part, like the real bars.
-        local back, c = DUI.Style.BarBack(f.bar), DUI.Style.BACKGROUND
-        if back then back:SetVertexColor(c[1], c[2], c[3], DUI.Style.BAR_BACK_ALPHA) end
+        paintBarFill(f, set, id, p)
         f.cd:Hide()
         f.key:Hide()
+        f.count:Hide()
     else
         f.icon:SetShown(true)
         f.icon:SetAllPoints(f)
         f.cd:Show()
+        paintIconLook(f, set, id, p)
         -- The key that casts it, as the real icon will show it.
         local CD = ns.Cooldowns
         local text, t = CD.KeyText({ iconText = Data.TextOf(set, id) }, Ed.SpellName(id))
@@ -987,6 +1064,14 @@ local function paintPiece(f, set, id, b)
         f.key:Show()
     end
     f.aura = ns.CdmOwn and (ns.CdmOwn.Entry(id) or {}).aura or false
+end
+
+-- "Color when almost ready" on the sample: the numbers turn for the last seconds.
+local function lowSample(f, left)
+    local t, fs = f.textLook, f.numbers
+    if not (t and type(fs) == "table" and fs.SetTextColor) then return end
+    local c = (t.low and left <= t.lowAt) and t.lowColor or t.cdColor
+    fs:SetTextColor(c[1], c[2], c[3], 1)
 end
 
 -- Steps the sample timers every Ed.TICK while Live preview is on.
@@ -1004,6 +1089,7 @@ local function tickSamples()
                     f.cd:SetCooldown(now - t, dur)
                     f.cdUntil = now - t + dur
                 end
+                lowSample(f, dur - t)
             elseif f.cdUntil then
                 f.cd:Clear()
                 f.cdUntil = nil
@@ -1232,6 +1318,87 @@ local function drawGroup(set, boxes)
 end
 function Ed.GroupOutline() return ui and ui.groupLine end
 
+-- RevealFrame(key, on) asks the ringed lead to show itself.
+local LEAD_TAG_GAP = 2
+
+local function leadToShow(set)
+    local id = selected
+    if id == nil or not set.pieces[id] then return nil end
+    local key, leadFrame = ns.CdmTether.MeasuredFromLead(set, id)
+    if not (key and ns.CdmTether.HasArea(leadFrame)) then return nil end
+    return key, leadFrame
+end
+
+local function reveal(key)
+    if ui.revealed == key then return end
+    if ui.revealed then DUI.Fire("RevealFrame", ui.revealed, false) end
+    ui.revealed = key
+    if key then DUI.Fire("RevealFrame", key, true) end
+end
+
+-- Outline pieces are sized only when lit.
+local function relayRingToItsSize(ring)
+    if ring:IsShown() then ring.lit(true) end
+end
+
+local function leadRing()
+    local ring = ui.leadRing
+    if ring then return ring end
+    ring = CreateFrame("Frame", nil, ui.overlay)
+    ring:SetFrameLevel(ui.overlay:GetFrameLevel() + 5)
+    ring:EnableMouse(false)
+    ring.lit = outline(ring, 2, true)
+    ring:SetScript("OnSizeChanged", relayRingToItsSize)
+    ring.tag = DUI.Style.Text(ring, DUI.Style.SIZE.small, "LEFT")
+    ring.tag:SetPoint("BOTTOMLEFT", ring, "TOPLEFT", 0, LEAD_TAG_GAP)
+    ring:Hide()
+    ui.leadRing = ring
+    return ring
+end
+
+-- Placed from the lead's corners, never anchored to it: a lead can be protected.
+local function placeLeadRing(ring)
+    local left, top = ns.CdmTether.PointAt(ring.lead, "TOPLEFT")
+    local right, bottom = ns.CdmTether.PointAt(ring.lead, "BOTTOMRIGHT")
+    if not (left and right) then return end
+    if ring.left == left and ring.top == top and ring.right == right and ring.bottom == bottom then return end
+    ring.left, ring.top, ring.right, ring.bottom = left, top, right, bottom
+    local pad = Ed.GROUP_PAD
+    ring:ClearAllPoints()
+    ring:SetPoint("TOPLEFT", ui.overlay, "CENTER", left - pad, top + pad)
+    ring:SetPoint("BOTTOMRIGHT", ui.overlay, "CENTER", right + pad, bottom - pad)
+end
+
+local function showLeadRing(key, leadFrame)
+    local ring = leadRing()
+    ring.lead, ring.left = leadFrame, nil
+    placeLeadRing(ring)
+    DUI.Style.PaintAccentText(ring.tag, ns.CdmTether.Label(key))
+    DUI.Motion.AlphaTo(ring, 1, DUI.Motion.FAST)
+    ring.lit(true)
+end
+
+local function hideLeadRing()
+    if ui.leadRing then DUI.Motion.AlphaTo(ui.leadRing, 0, DUI.Motion.FAST, true) end
+end
+
+local function drawLeadRing(set)
+    local key, leadFrame = leadToShow(set)
+    if key == ui.leadShown and leadFrame == ui.leadShownFrame then return end
+    ui.leadShown, ui.leadShownFrame = key, leadFrame
+    if key then showLeadRing(key, leadFrame) else hideLeadRing() end
+    reveal(key)
+end
+
+function endLeadHighlight()
+    reveal(nil)
+    hideLeadRing()
+    ui.leadShown, ui.leadShownFrame = nil, nil
+end
+
+function Ed.LeadRing() return ui and ui.leadRing end
+function Ed.LeadShown() return ui and ui.leadShown end
+
 local function drawPieces()
     local set = Ed.Set()
     local boxes = Data.Layout(set)
@@ -1261,6 +1428,7 @@ local function drawPieces()
     end
     ui.glide, ui.from, ui.born = nil, nil, nil
     drawGroup(set, boxes)
+    drawLeadRing(set)
     -- A tray spell on its way up: its icon follows the cursor.
     local carry = drag and drag.tray and drag.moved
     ui.carry:SetShown(carry and true or false)
@@ -1281,10 +1449,21 @@ function Ed.DrawPieces()
     if ui and isOpen then drawPieces() end
 end
 
+local function leadOfPickedGroup(set)
+    if selected == nil or not set.pieces[selected] then return nil end
+    return (ns.CdmTether.MeasuredFromLead(set, selected))
+end
+
+-- A lead can gain or lose its rectangle with nothing else changing.
+local function pickedGroupsLeadChanged()
+    return leadOfPickedGroup(Ed.Set()) ~= ui.drawnLeadOfPickedGroup
+end
+
 -- Redraws everything. A drag only redraws the pieces (Ed.DrawPieces).
 function Ed.Draw()
     if not (ui and isOpen) then return end
     local set = drawPieces()
+    ui.drawnLeadOfPickedGroup = leadOfPickedGroup(set)
     drawBanner(set)
     drawPill()
     drawTray()
@@ -1368,6 +1547,11 @@ function build()
                 Ed.DragTo(Ed.Cursor())
             end
         end
+        if ns.CdmTether.Follow(Ed.Set(), drag and drag.id) then
+            Ed.DrawPieces()
+        end
+        if not drag and pickedGroupsLeadChanged() then Ed.Draw() end
+        if ui.leadShown then placeLeadRing(ui.leadRing) end
         acc = acc + (elapsed or 0)
         if acc >= Ed.TICK then
             acc = 0
@@ -1580,6 +1764,15 @@ DUI.Movers.AddBarButton(L["Cooldown Manager"], function() Ed.Open() end,
     function() return ns.Cooldowns.enabled and true or false end,
     L["Edit your cooldown layout right on the screen. Type /cdm to open it any time."])
 
+-- The Escape menu's Cooldown Manager button (core GameMenu.lua) opens this editor
+-- while Daylight UI's Cooldown Manager is on, as /cdm does; off, it opens the
+-- game's own settings.
+function DUI.OpenCooldownManager()
+    if not ns.Cooldowns.enabled then return false end
+    Ed.Open()
+    return true
+end
+
 DUI.RegisterEvent("PLAYER_REGEN_DISABLED", function()
     if not isOpen then return end
     Ed.Close()
@@ -1589,6 +1782,7 @@ DUI.RegisterEvent("ACTIVE_TALENT_GROUP_CHANGED", function()
     if not isOpen then return end
     Data.SetViewing(nil)
     selected, attach, pending = nil, nil, nil
+    catchUpWithLeads(Ed.Set())
     Ed.Draw()
 end)
 DUI.RegisterEvent("SPELLS_CHANGED", function() Ed.Draw() end)

@@ -168,11 +168,13 @@ end
 
 -- Someone's link: the game's frame shows first, before any of their data has come
 -- in (the game's IsDataSourceChanging may or may not say so, since a list can also
--- just be empty). PW.LinkArrives brings it (TRADE_SKILL_LIST_UPDATE).
-function PW.LinkOpens(changing)
+-- just be empty). PW.LinkArrives brings it (TRADE_SKILL_LIST_UPDATE). stale: until
+-- then the game still answers with the profession that was open before.
+function PW.LinkOpens(changing, stale)
     asGame(function()
         local f = frame()
-        S().open, S().linked, S().changing = nil, false, changing == true
+        S().open = stale and S().open or nil
+        S().linked, S().changing = false, changing == true
         f.BookPage:Hide()
         f.CraftingPage:Show()
         stub.FireEvent("TRADE_SKILL_SHOW")
@@ -526,7 +528,10 @@ local function install()
             return out
         end,
         OpenRecipe = function(id) record("OpenRecipe", id) end,
-        HasNoReagentCost = function(id) local r = recipe(id); return r ~= nil and #r.mats == 0 end,
+        -- A recipe with free = true keeps its materials listed but costs none (a rogue's
+        -- poisons with the Reagent Economy Legacy perk): GetCraftableCount still counts
+        -- the bags, as a guess; the game's own window never asks it.
+        HasNoReagentCost = function(id) local r = recipe(id); return r ~= nil and (#r.mats == 0 or r.free == true) end,
     }
 end
 

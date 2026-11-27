@@ -335,7 +335,8 @@ T.test("elites and rares get the dragon round the normal ring; without a portrai
     T.truthy(p.elite:IsShown())
     T.truthy(p.ring:IsShown(), "the very ring every portrait has stays, the dragon behind it")
     T.eq(p.elite.__texture, ns.UF.DRAGON_FILE)
-    T.near(p.elite:GetWidth(), p.ring:GetWidth() / ns.UF.DRAGON_RING, 0.01, "drawn bigger so its ring lines up")
+    T.near(p.elite:GetWidth(), p.ring:GetWidth() / ns.UF.DRAGON_RING, DUI.Pixel.Unit(f) + 0.01,
+        "drawn bigger so its ring lines up (rounded to whole pixels)")
     T.eq(p.elite.__texCoord[1], 0, "the target's ring is on the right: the dragon wraps it as drawn")
     T.rgb(p.elite.__vertex, ns.UF.ELITE_RING_COLORS.gold, "gold")
     T.falsy(f.crest:IsShown(), "no badge while the ring shows it")
@@ -1554,7 +1555,10 @@ T.test("socket: by default the ring's outer band is part of the frame's border",
     local S = ns.Socket
     local Rb = DaylightUI.Pixel.Snap(f, f:GetHeight() * UF.PORTRAIT_SIZE * S.SIZE / 2)
     local outside = (S.PICTURE + S.HAIR) * Rb / S.RING_WIDTHS.normal
-    T.near(p.mask:GetWidth() / 2, S.PICTURE * Rb, 1e-6, "the picture is Classic's size, 0.755 of its radius")
+    -- Classic's size, 0.755 of its radius, less what keeps the black gap
+    -- inside the line whole pixels wide.
+    local picture = math.min(S.PICTURE * Rb, (S.PICTURE + S.HAIR) * Rb - Pixel.Px(f, S.GAP_PX))
+    T.near(p.mask:GetWidth() / 2, picture, 1e-6, "the picture")
     T.near(p.ring:GetWidth() * S.RING_OUTER / 2, outside, 1e-6, "the line's outside")
     T.near(outside - (S.PICTURE + S.HAIR) * Rb, 0.09 * Rb, 0.002 * Rb, "the line is 0.09 of the radius thick")
     T.near(p:GetWidth() / 2, outside + T_, 1e-6, "then the frame's whole border")
@@ -1736,7 +1740,8 @@ T.test("socket: the level badge sits where the ring meets the bar's bottom edge"
     T.eq(badge.__texture, ns.UF.LEVEL_TAG_FILE, "a slanted tag")
     T.near(badge:GetWidth(), 0.7 * R, 1e-6); T.near(badge:GetHeight(), 0.4 * R, 1e-6)
     local Rb = f.portrait.mask:GetWidth() / 2 / ns.Socket.PICTURE
-    T.near(x, 0.7 * R - Rb * ns.UF.PORTRAIT_OUT, 1e-6, "0.7 of the radius past the ring's middle")
+    local off = DUI.Pixel.Snap(f, Rb * ns.UF.PORTRAIT_OUT)
+    T.near(x, 0.7 * R - off, 1e-6, "0.7 of the radius past the ring's middle (on a whole pixel)")
     T.rgb(badge.__vertex, { 1, 1, 1 }, "its own colors, untinted")
     DUI:Set("UnitFrames", "player.portraitLook", "classic")
     stub.RunTimers()
@@ -2018,7 +2023,7 @@ T.test("socket: with a border as thin as the mock-up's the measurements are its 
     local p, S = f.portrait, ns.Socket
     local Rb = DUI.Pixel.Snap(f, f:GetHeight() * ns.UF.PORTRAIT_SIZE * S.SIZE / 2)
     local one = DUI.Pixel.Px(f, 1)
-    T.near(p.mask:GetWidth() / 2, 0.755 * Rb, 1e-6, "the picture")
+    T.near(p.mask:GetWidth() / 2, math.min(0.755 * Rb, 0.785 * Rb - DUI.Pixel.Px(f, S.GAP_PX)), 1e-6, "the picture")
     T.near(p.ring:GetWidth() * S.RING_OUTER / 2, 0.875 * Rb, 0.002 * Rb, "the line's outside")
     local T_ = DUI.Pixel.Px(f, DUI.Style.BorderPx(f))
     T.near(p:GetWidth() / 2, 0.875 * Rb + T_, 0.002 * Rb, "the line, then the frame's whole border")
@@ -2070,4 +2075,296 @@ T.test("socket: square, no lit line on the bar to end at the square's side", fun
     DUI:Set("UnitFrames", "player.portraitLook", "classic")
     stub.RunTimers()
     T.truthy(DUI.Style.GetShell(f).lit:IsShown(), "Classic keeps the frame's lit line")
+end)
+
+T.test("target of target, focus target and pet: a portrait when picked, off by default", function()
+    local DUI, ns = login(function()
+        stub.units.player = { name = "Stabby", isPlayer = true, class = "HUNTER", health = 5, maxHealth = 10 }
+        stub.units.target = { name = "Wolf", isPlayer = false, reaction = 2, health = 5, maxHealth = 10 }
+        stub.units.targettarget = { name = "Stabby", isPlayer = true, class = "HUNTER", health = 5, maxHealth = 10 }
+        stub.units.pet = { name = "Cat", isPlayer = false, reaction = 5, health = 5, maxHealth = 10 }
+    end)
+    for _, unit in ipairs({ "targettarget", "focustarget", "pet" }) do
+        local f = ns.frames[unit]
+        T.truthy(f.portrait, unit .. " has the pieces")
+        T.eq(DUI:Get("UnitFrames", unit .. ".portrait"), "none", unit .. " off by default")
+        T.falsy(DUI:Get("UnitFrames", unit .. ".showLevel"), "no level badge out of the blue")
+    end
+    local tot, pet = ns.frames.targettarget, ns.frames.pet
+    ns.UF.UpdateAll(tot, true); ns.UF.UpdateAll(pet, true)
+    T.falsy(tot.portrait:IsShown()); T.falsy(pet.portrait:IsShown())
+    DUI:Set("UnitFrames", "targettarget.portrait", "class")
+    DUI:Set("UnitFrames", "pet.portrait", "2d")
+    stub.RunTimers()
+    ns.UF.UpdateAll(tot, true); ns.UF.UpdateAll(pet, true)
+    T.truthy(tot.portrait:IsShown(), "the class icon ring on the target of target")
+    T.eq(tot.portrait.icon.__texture, DUI.MEDIA .. "class\\hunter.tga")
+    T.truthy(pet.portrait:IsShown(), "the pet's face")
+    T.truthy(tot.__hitRect[1] < 0 or tot.__hitRect[2] < 0, "the ring is clickable")
+end)
+
+-- At a UI scale like 0.71 on a 1080-line screen, the ring's middle sat half a
+-- pixel off and its picture an odd number of pixels wide at some Portrait
+-- sizes (100, 105, 110 %), so one side drew a pixel wider than the other.
+T.test("the ring's middle and picture land on whole pixels at any portrait size and UI scale", function()
+    local DUI, ns = login(function()
+        stub.physW, stub.physH = 2560, 1080
+        stub.units.player = { name = "Stabby", isPlayer = true, class = "ROGUE", health = 5, maxHealth = 10 }
+    end)
+    local UF, Pixel = ns.UF, DUI.Pixel
+    Pixel.Refresh()
+    UIParent:SetScale(0.71)
+    local f = ns.frames.player
+    local p = f.portrait
+    local function whole(v, what)
+        local px = v / Pixel.Unit(f)
+        T.near(px, math.floor(px + 0.5), 1e-3, what .. " is " .. px .. " px")
+    end
+    for _, look in ipairs({ "classic", "socket" }) do
+        DUI:Set("UnitFrames", "player.portraitLook", look)
+        for _, scale in ipairs({ 0.95, 1, 1.05, 1.1, 1.15, 1.2 }) do
+            DUI:Set("UnitFrames", "player.portraitScale", scale)
+            stub.RunTimers()
+            UF.UpdateAll(f, true)
+            local _, _, _, x, y = p:GetPoint(1)
+            local label = look .. " at " .. scale
+            whole(x, label .. ": the middle across")
+            whole(y, label .. ": the middle up")
+            -- Centered on a whole pixel, the ring's picture draws the same on both sides.
+            local rp, rrel, rrp, rx, ry = p.ring:GetPoint(1)
+            T.eq(rp, "CENTER"); T.eq(rrel, p); T.eq(rrp, "CENTER"); T.eq(rx, 0); T.eq(ry, 0)
+        end
+    end
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- Seen in game on elites, rares and bosses: a thin sliver of the dragon showed
+-- between the portrait ring and its glow on one side. The dragon's opening
+-- must sit exactly on the ring's outer edge, on the same whole pixels, at any
+-- Portrait size and UI scale. Rounding the dragon's own size moves its opening
+-- off the ring by a fraction of a pixel.
+T.test("the dragon's opening lands on the ring's own whole pixels at any size and UI scale", function()
+    local DUI, ns = login(function()
+        stub.physW, stub.physH = 2560, 1080
+        stub.units.player = { name = "Stabby", isPlayer = true, class = "ROGUE", health = 5, maxHealth = 10 }
+    end)
+    local UF, Pixel = ns.UF, DUI.Pixel
+    local f = ns.frames.player
+    local p = f.portrait
+    DUI:Set("UnitFrames", "player.portraitDragon", true)
+    for _, ui in ipairs({ 0.64, 0.71, 0.8, 0.9, 1 }) do
+        UIParent:SetScale(ui)
+        Pixel.Refresh()
+        for _, look in ipairs({ "classic", "socket" }) do
+            DUI:Set("UnitFrames", "player.portraitLook", look)
+            for _, scale in ipairs({ 0.8, 0.9, 0.95, 1, 1.05, 1.1, 1.15, 1.2, 1.3 }) do
+                DUI:Set("UnitFrames", "player.portraitScale", scale)
+                stub.RunTimers()
+                UF.UpdateAll(f, true)
+                local label = look .. " at " .. scale .. ", UI scale " .. ui
+                T.truthy(p.elite:IsShown(), label .. ": the dragon shows")
+                -- Both pictures are centered on the portrait's middle.
+                local ep, erel, erp, ex, ey = p.elite:GetPoint(1)
+                T.eq(ep, "CENTER"); T.eq(erel, p); T.eq(erp, "CENTER"); T.eq(ex, 0); T.eq(ey, 0)
+                local u = Pixel.Unit(f)
+                local ring = p.ring:GetWidth() * UF.RING_OUTER / 2 / u
+                local opening = p.elite:GetWidth() * UF.DRAGON_RING * UF.RING_OUTER / 2 / u
+                T.near(opening, ring, 1e-3, label .. ": the dragon's opening is " .. opening
+                    .. " px from the middle, the ring's edge " .. ring .. " px")
+                if look == "classic" then
+                    T.near(ring, math.floor(ring + 0.5), 1e-3, label .. ": the ring's edge on a whole pixel")
+                end
+            end
+        end
+    end
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- Seen in game: specks of bright color sat in the socket's black gap round
+-- many class icons. The gap was a share of the ring's size, under one screen
+-- pixel at normal sizes, so the picture's soft cut edge lay over it and the
+-- bright parts of the art showed there. The gap must be whole pixels wide.
+T.test("socket: the picture keeps two screen pixels of black from the ring's line", function()
+    local DUI, ns = login(function()
+        stub.physW, stub.physH = 2560, 1080
+        stub.units.player = { name = "Stabby", isPlayer = true, class = "ROGUE", health = 5, maxHealth = 10 }
+    end)
+    local UF, Pixel, Socket = ns.UF, DUI.Pixel, ns.Socket
+    Pixel.Refresh()
+    local function gapPx(f, what)
+        local p = f.portrait
+        T.truthy(f.socketOn, what .. ": the socket look is on")
+        local s = p.shapeArt and UF.SQUARE or 1
+        local ratio = Socket.RING_WIDTHS[DUI:Get("UnitFrames", "player.portraitRingWidth")]
+        local lineInside = p.ring:GetWidth() / 2 * UF.RING_OUTER * ratio * s
+        local picture = p.mask:GetWidth() / 2
+        local gap = (lineInside - picture) / Pixel.Unit(f)
+        T.truthy(gap >= 2 - 1e-3, what .. ": the black gap is " .. gap .. " px")
+        -- Seen in game after that: a ring of bright specks still sat on the
+        -- picture's edge. The dark shading over the picture was cut by the
+        -- same round mask, so the picture's soft edge pixels were shaded
+        -- less than the pixels just inside them. The shading reaches past the
+        -- picture's edge into the black, and never onto the line.
+        local shade = p.vignetteMask:GetWidth() / 2
+        T.near(p.vignette:GetWidth() / 2, shade, 1e-6, what .. ": the shading fills its mask")
+        local past = (shade - picture) / Pixel.Unit(f)
+        T.truthy(past >= 2 - 1e-3, what .. ": the shading reaches " .. past .. " px past the picture")
+        T.truthy(shade <= lineInside + 1e-6, what .. ": the shading stays inside the line")
+    end
+    for _, ui in ipairs({ 0.71, 1 }) do
+        UIParent:SetScale(ui)
+        for _, shape in ipairs({ "round", "square" }) do
+            for _, width in ipairs({ "thin", "normal", "thick" }) do
+                for _, size in ipairs({ 0.6, 1, 1.5 }) do
+                    DUI:Set("UnitFrames", "player.portraitShape", shape)
+                    DUI:Set("UnitFrames", "player.portraitRingWidth", width)
+                    DUI:Set("UnitFrames", "player.portraitScale", size)
+                    stub.RunTimers()
+                    local f = ns.frames.player
+                    UF.UpdateAll(f, true)
+                    gapPx(f, "player, " .. shape .. ", " .. width .. " at " .. size .. ", UI scale " .. ui)
+                end
+            end
+        end
+    end
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- A player's ask: with the portrait on its own, a right click on it opened
+-- nothing; only the health bar opened the unit's menu.
+T.test("a portrait on its own targets and opens the unit's menu, and follows its holder", function()
+    local DUI, ns = login()
+    stub.RunTimers()
+    local f = ns.frames.target
+    T.isnil(f.portraitClick, "nothing made while the portrait sits on the frame")
+    DUI:Set("UnitFrames", "target.portraitAt", "free")
+    stub.RunTimers()
+    local b, h = f.portraitClick, f.portraitHolder
+    T.truthy(b, "a click button over the portrait")
+    T.eq(b:GetParent(), f, "inside the secure frame, so it shows with the unit")
+    T.truthy(b:IsProtected())
+    T.eq(b:GetAttribute("useparent-unit"), true)
+    T.eq(b:GetAttribute("*type1"), "target")
+    T.eq(b:GetAttribute("*type2"), "togglemenu")
+    local _, rel = b:GetPoint(1)
+    T.truthy(rel ~= h, "never anchored to the holder")
+    T.near(b:GetWidth() * b:GetEffectiveScale(), h:GetWidth() * h:GetEffectiveScale())
+    -- Moved in unlock mode: the click goes along.
+    DUI.DB.Positions()[ns.UF.PORTRAIT_FREE.target] = { 300, -50 }
+    DUI.Movers.Apply(ns.UF.PORTRAIT_FREE.target)
+    stub.RunTimers()
+    local hp, hrel, hrp, hx, hy = h:GetPoint(1)
+    local bp, brel, brp, bx, by = b:GetPoint(1)
+    T.eq(bp, hp); T.eq(brel, hrel); T.eq(brp, hrp)
+    local k = h:GetEffectiveScale() / b:GetEffectiveScale()
+    T.near(bx, hx * k); T.near(by, hy * k)
+    -- In a fight a move waits, nothing protected is touched.
+    stub.EnterCombat()
+    DUI.DB.Positions()[ns.UF.PORTRAIT_FREE.target] = { 100, 0 }
+    DUI.Movers.Apply(ns.UF.PORTRAIT_FREE.target)
+    stub.LeaveCombat()
+    stub.RunTimers()
+    _, _, _, bx = b:GetPoint(1)
+    T.near(bx, (select(4, h:GetPoint(1))) * k)  -- caught up after the fight
+    DUI:Set("UnitFrames", "target.portraitAt", "frame")
+    stub.RunTimers()
+    T.falsy(b:IsShown(), "back on the frame, the frame's own click is enough")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- How far in from the frame's outer end a bar's side starts, following its
+-- anchors back to the frame (the target's health hangs off the separator).
+local function sideGap(f, region, side)
+    for i = 1, region:GetNumPoints() do
+        local pt, rel, rp, x = region:GetPoint(i)
+        if pt:find(side) and rp:find(side) then
+            local gap = side == "LEFT" and x or -x
+            if rel == f then return gap end
+            return gap + sideGap(f, rel, side)
+        end
+    end
+    error("no " .. side .. " point")
+end
+
+-- The ring's outline, measured from the frame's outer end, on the row y up from
+-- the frame's bottom. A square or angled portrait has a straight inner side.
+local function ringEdge(f, y, square)
+    local half = (f.ringInset + f.ringReach) / 2
+    local off = (f.ringReach - f.ringInset) / 2
+    local dy = math.abs(y - (f:GetHeight() / 2 + (f.portraitY or 0)))
+    if dy >= half then return 0 end
+    if square then return half - off end
+    return math.sqrt(half * half - dy * dy) - off
+end
+
+T.test("a portrait never hides the end of the health or power bar", function()
+    local DUI, ns = login(function()
+        stub.units.player = { name = "Stabby", isPlayer = true, class = "ROGUE", health = 5, maxHealth = 10 }
+        stub.units.target = { name = "Wolf", reaction = 2, health = 5, maxHealth = 10, power = 1, maxPower = 2 }
+        stub.units.focus = { name = "Wolf", reaction = 2, health = 5, maxHealth = 10, power = 1, maxPower = 2 }
+    end)
+    for _, look in ipairs({ "socket", "classic" }) do
+        for _, shape in ipairs({ "round", "square", "angled" }) do
+            for _, id in ipairs({ "player", "target", "focus" }) do
+                DUI:Set("UnitFrames", id .. ".portraitLook", look)
+                DUI:Set("UnitFrames", id .. ".portraitShape", shape)
+                DUI:Set("UnitFrames", id .. ".healthTextPos", "center")
+                stub.RunTimers()
+                local f = ns.frames[id]
+                local what = look .. " " .. shape .. " " .. id
+                T.truthy(f.portrait:IsShown() and f.ringInset > 0, what .. ": the ring sits on the frame")
+                local side = f.spec.slant == "left" and "RIGHT" or "LEFT"
+                local H, T0 = f:GetHeight(), -select(5, f.health:GetPoint(1))
+                local ph = f.power:GetHeight() + f.separator:GetHeight()
+                -- Each bar starts where the ring's outline crosses the bar's
+                -- edge farthest from the ring's middle: its empty end is the
+                -- first thing past the ring, and a full bar still meets it.
+                local sq = shape ~= "round"
+                local function starts(y0, y1)
+                    return math.max(T0, math.min(ringEdge(f, y0, sq), ringEdge(f, y1, sq)))
+                end
+                T.near(sideGap(f, f.health, side), starts(T0 + ph, H - T0), 0.6,
+                    what .. ": the health bar starts at the ring")
+                T.near(sideGap(f, f.power, side), starts(T0, T0 + f.power:GetHeight()), 0.6,
+                    what .. ": the power bar starts at the ring")
+                -- Less than a few pixels of either bar is left under the ring.
+                T.truthy(ringEdge(f, (T0 + ph + H - T0) / 2, sq) - sideGap(f, f.health, side) < 4.5,
+                    what .. ": next to nothing of the health bar hides under the ring")
+                -- Centered health text sits on the bar, so it is centered on
+                -- what shows.
+                local pt, rel = f.percentText:GetPoint(1)
+                T.eq(pt, "CENTER"); T.eq(rel, f.health)
+                -- The empty part still reaches the border under the ring, so
+                -- the frame looks as it did.
+                T.near(sideGap(f, DUI.Style.BarBack(f.health), side), T0, 0.01,
+                    what .. ": the health bar's empty part runs on under the ring")
+                T.near(sideGap(f, f.separator, side), T0, 0.01, what .. ": the line between the bars runs on under the ring")
+            end
+        end
+    end
+    -- Ribbon: the ring covers the power line under the frame too.
+    DUI:Set("UnitFrames", "player.portraitLook", "socket")
+    DUI:Set("UnitFrames", "player.portraitShape", "round")
+    ns.SetStyle("look.style", "ribbon")
+    stub.RunTimers()
+    local f = ns.frames.player
+    local line = f.line
+    T.truthy(line:IsShown(), "Ribbon hangs the power line")
+    local _, _, _, lx, ly = line.set.power:GetPoint(1)
+    -- The line hangs gap below the frame: its top and bottom rows in the frame's terms.
+    local gap = -select(5, line:GetPoint(1))
+    local edge = math.min(ringEdge(f, -gap + ly, false), ringEdge(f, -gap - line:GetHeight() - ly, false))
+    T.truthy(edge > -ly, "the ring reaches over the line's end")
+    T.near(lx, edge, 0.6, "Ribbon's power line starts at the ring")
+    local T0 = -select(5, f.health:GetPoint(1))
+    T.near(sideGap(f, f.health, "LEFT"), math.min(ringEdge(f, f:GetHeight() - T0, false), ringEdge(f, T0, false)), 0.6,
+        "Ribbon's health starts at the ring")
+    T.near(sideGap(f, DUI.Style.BarBack(line.set.power), "LEFT"), -ly, 0.01, "the line's empty part runs on under the ring")
+    ns.SetStyle("look.style", "daylight")
+    stub.RunTimers()
+    -- On its own, the portrait leaves the bars their whole length.
+    DUI:Set("UnitFrames", "player.portraitAt", "free")
+    stub.RunTimers()
+    T.near(sideGap(f, f.health, "LEFT"), -select(5, f.health:GetPoint(1)), 0.01, "a portrait on its own")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)

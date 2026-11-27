@@ -405,7 +405,14 @@ function DB.Pick(spec)
     local function real(n) return type(n) == "string" and type(sv.profileData[n]) == "table" and n or nil end
     local name
     if DB.PadUI() then name = real(c.padProfile) end
-    if not name and DB.DualSpec() and type(c.specProfiles) == "table" then name = real(c.specProfiles[spec or DB.SpecGroup()]) end
+    -- Profiles chosen per talent set are only made with two sets, and a character
+    -- never loses its second, so they count even while the game still says one
+    -- (early at login): the character's own choice would win, then the talents
+    -- would ask to switch on every login.
+    local perSet = type(c.specProfiles) == "table" and next(c.specProfiles) ~= nil
+    if not name and (DB.DualSpec() or perSet) and type(c.specProfiles) == "table" then
+        name = real(c.specProfiles[spec or DB.SpecGroup()])
+    end
     return name or real(c.profile) or DB.Fallback()
 end
 
@@ -708,6 +715,41 @@ function DB.KeepSimpleTips(p)
     if p.modules.Tooltip.style == nil then p.modules.Tooltip.style = "simple" end
 end
 
+-- Proc Alerts came after these profiles were made: they start off, and the
+-- welcome offers them with a preview. One already switched on stays on.
+function DB.ProcsOff(p)
+    if type(p.modules) ~= "table" then p.modules = {} end
+    if type(p.modules.Procs) ~= "table" then p.modules.Procs = {} end
+    if p.modules.Procs.enabled == nil then p.modules.Procs.enabled = false end
+end
+
+-- Nameplates used to sit 14 px above the game's spot, which left names floating
+-- well over heads. New profiles start lower; one from before keeps the height
+-- it had, so nobody's plates move under them.
+function DB.KeepPlateHeight(p)
+    if type(p.modules) ~= "table" then p.modules = {} end
+    if type(p.modules.Nameplates) ~= "table" then p.modules.Nameplates = {} end
+    if p.modules.Nameplates.offsetY == nil then p.modules.Nameplates.offsetY = 14 end
+end
+
+-- Bar ends became one setting per end. Where one switch covered both ends,
+-- the saved choice is split so each end looks as it did: the data bar's
+-- angled (now its left end) gives its right end the same, and the loot
+-- feed's lootFeedSlant / lootFeedSlantSide become lootFeedLeft / lootFeedRight.
+function DB.SplitBarEnds(p)
+    local mods = type(p.modules) == "table" and p.modules or nil
+    local info = mods and type(mods.InfoPanel) == "table" and mods.InfoPanel or nil
+    local bar = info and type(info.databar) == "table" and info.databar or nil
+    if bar and bar.angled == false and bar.angledRight == nil then bar.angledRight = false end
+    local qol = mods and type(mods.QoL) == "table" and mods.QoL or nil
+    if qol and (qol.lootFeedSlant ~= nil or qol.lootFeedSlantSide ~= nil) then
+        local on, side = qol.lootFeedSlant ~= false, qol.lootFeedSlantSide
+        if not on or side == "right" then qol.lootFeedLeft = false end
+        if not on or side == "left" then qol.lootFeedRight = false end
+        qol.lootFeedSlant, qol.lootFeedSlantSide = nil, nil
+    end
+end
+
 local function migrate(sv)
     if type(sv.profileData) ~= "table" then sv.profileData = {} end
     local pd = sv.profileData
@@ -764,6 +806,18 @@ local function migrate(sv)
         if type(p) == "table" and not p.tipStyle1 then
             p.tipStyle1 = true
             DB.KeepSimpleTips(p)
+        end
+        if type(p) == "table" and not p.procsOff1 then
+            p.procsOff1 = true
+            DB.ProcsOff(p)
+        end
+        if type(p) == "table" and not p.plateLow1 then
+            p.plateLow1 = true
+            DB.KeepPlateHeight(p)
+        end
+        if type(p) == "table" and not p.barEnds1 then
+            p.barEnds1 = true
+            DB.SplitBarEnds(p)
         end
         if type(p) == "table" and not p.localFont1 then
             p.localFont1 = true
@@ -849,7 +903,7 @@ local function point()
     if type(pd[DB.activeName]) ~= "table" then DB.activeName = DB.Fallback() end
     if type(pd[DB.activeName]) ~= "table" then
         -- The account's first profile. Whatever the setup guide saves comes from this.
-        pd[DB.activeName] = { gradients1 = true, localFont1 = true, hiddenBars1 = true, backs1 = true, tagLetters1 = true, tipStyle1 = true, unsaved = true,
+        pd[DB.activeName] = { gradients1 = true, localFont1 = true, hiddenBars1 = true, backs1 = true, tagLetters1 = true, tipStyle1 = true, procsOff1 = true, plateLow1 = true, unsaved = true,
                               general = {},
                               modules = DB.StandardStart() }
         pd[DB.activeName].general.localFont = DB.NonLatinClient() or nil

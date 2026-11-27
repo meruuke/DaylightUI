@@ -194,29 +194,45 @@ local function cancel(frame)
     if DUI.Pad then DUI.Pad.Returning(frame) end
 end
 
--- Wires one of Daylight UI's windows once: it Appears on show (with a `rise` px lift,
--- or fade only), and Escape fades it out. Escape goes through a tiny hidden
--- stand-in frame in UISpecialFrames, shown while the window is. The game
--- hides the stand-in and its OnHide fades the window. With ownEscape the
--- window handles Escape itself (the setup guide), so there's no stand-in.
+-- A tiny hidden stand-in in UISpecialFrames for one of Daylight UI's windows.
+-- The game's Escape hides every shown frame on that list, and so does losing
+-- control of the character (fear, a stun), in a fight too, when a window's own
+-- keys are off. Shown while the window is open; its OnHide calls close() when
+-- the game hid it. Motion.EscapeShown(esc, false) hides it without closing.
 local escapes = 0
+function Motion.EscapeFor(close)
+    escapes = escapes + 1
+    local name = "DaylightUIEscape" .. escapes
+    local esc = CreateFrame("Frame", name, UIParent)
+    esc:SetSize(1, 1)
+    esc:EnableMouse(false)
+    esc:Hide()
+    -- Hidden along with its parent (Alt+Z hides the whole UI) isn't Escape.
+    esc:SetScript("OnHide", function(self)
+        if not self:IsShown() and not self.quiet then close() end
+    end)
+    tinsert(UISpecialFrames, name)
+    return esc
+end
+
+function Motion.EscapeShown(esc, on)
+    if on then esc:Show(); return end
+    esc.quiet = true
+    esc:Hide()
+    esc.quiet = nil
+end
+
+-- Wires one of Daylight UI's windows once: it Appears on show (with a `rise` px lift,
+-- or fade only), and Escape fades it out through a stand-in (Motion.EscapeFor).
+-- With ownEscape the window handles Escape itself (the setup guide), so there's
+-- no stand-in.
 function Motion.Window(frame, rise, ownEscape)
     if frame.__duiWired then return end
     frame.__duiWired = true
     local esc
     if not ownEscape then
-        escapes = escapes + 1
-        local name = "DaylightUIEscape" .. escapes
-        esc = CreateFrame("Frame", name, UIParent)
-        esc:SetSize(1, 1)
-        esc:EnableMouse(false)
-        esc:Hide()
-        -- Hidden along with its parent (Alt+Z hides the whole UI) isn't Escape.
-        esc:SetScript("OnHide", function(self)
-            if not self:IsShown() then Motion.Vanish(frame) end
-        end)
+        esc = Motion.EscapeFor(function() Motion.Vanish(frame) end)
         frame.__duiEsc = esc
-        tinsert(UISpecialFrames, name)
         if frame:IsShown() then esc:Show() end
     end
     if DUI.Pad then DUI.Pad.Follow(frame, function() Motion.Vanish(frame) end) end
@@ -423,6 +439,27 @@ end
 
 -- The shared tween driver (nil until the first tween). Tests run it.
 function Motion.Driver() return driver end
+
+-- A rock: step(v) is handed v tipping out to amp over FAST, swinging back a
+-- third past level over SLOW, then settling at 0 over SLOW, like water
+-- sloshing back. Asked again for the same key, it starts from where it is.
+-- With motion off it goes straight to level.
+Motion.ROCK_BACK = 0.35
+local rockAt = {}
+function Motion.Rock(key, amp, step)
+    if not Motion.On() then
+        rockAt[key] = nil
+        Motion.Tween(key, 0, 0, 0, step)
+        return
+    end
+    local function set(v) rockAt[key] = v; step(v) end
+    local back = -Motion.ROCK_BACK * amp
+    Motion.Tween(key, rockAt[key] or 0, amp, Motion.FAST, set, function()
+        Motion.Tween(key, amp, back, Motion.SLOW, set, function()
+            Motion.Tween(key, back, 0, Motion.SLOW, set, function() rockAt[key] = nil end)
+        end)
+    end)
+end
 
 -- Eases one of Daylight UI's regions to an alpha from wherever it is, stepped by hand
 -- (no animation group, so nothing else's alpha on it is lost). Going up from

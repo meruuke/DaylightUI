@@ -21,6 +21,12 @@ DUI.Media.RegisterSlot(Plate.MEDIA.fonts.threatPct, "Nameplates", "media.threatP
 -- Level font: "general" uses the health text's too.
 Plate.MEDIA.fonts.level = "plates.font.level"
 DUI.Media.RegisterSlot(Plate.MEDIA.fonts.level, "Nameplates", "media.levelFont", "font", Plate.MEDIA.fonts.health)
+-- The mob's target's font: "general" uses the name's.
+Plate.MEDIA.fonts.mobTarget = "plates.font.mobTarget"
+DUI.Media.RegisterSlot(Plate.MEDIA.fonts.mobTarget, "Nameplates", "media.mobTargetFont", "font", Plate.MEDIA.fonts.name)
+-- The execute range's own bar texture (its "Bar texture" fill).
+Plate.MEDIA.bars.execute = "plates.execute"
+DUI.Media.RegisterSlot(Plate.MEDIA.bars.execute, "Nameplates", "media.execute", "bar")
 
 -- Never thicker than half the bar's own height, or a thin bar (friendly ones by
 -- default) is all border and no visible fill.
@@ -104,11 +110,18 @@ Plate.EXECUTE_CLASSES = {
 }
 Plate.EXECUTE_ICON = 5308 -- the icon for "Always" on a class with no finisher (Execute's)
 Plate.EXECUTE_ICON_SIZE = 1.25 -- the icon, in bar heights
-Plate.EXECUTE_REST = 0.1 -- the band while the unit is above it (executeRest)
 Plate.EXECUTE_LINE = 0.85 -- the line at its edge (executeLineSize px)
 -- "pulse": the lit band dims down to low, seconds per brighten or dim (the threat
 -- pulse's slow speed).
 Plate.EXECUTE_PULSE = { low = 0.35, time = 0.7 }
+-- Its own fills (tools/make_execute_textures.py). Stripes tile at their own pixel
+-- size so they keep their width on any bar; the neon tube stretches.
+Plate.EXECUTE_FILES = { stripes = DUI.MEDIA .. "exec-stripes.png", neon = DUI.MEDIA .. "exec-neon.png" }
+Plate.EXECUTE_TILED = { stripes = true }
+-- The spark on the line (executeSpark), in bar heights, and the glow round the
+-- bar (executeGlow), which takes the target glow's reach.
+Plate.EXECUTE_SPARK = { width = 1.4, height = 2.6 }
+Plate.EXECUTE_GLOW = 0.8
 
 local isSecret = DUI.IsSecret
 local NONE, WHITE = {}, { 1, 1, 1 } -- never written
@@ -195,9 +208,70 @@ function Plate.UpdateCorpse(p)
     if ns.Manager then ns.Manager.OwnClicks(p) end -- a corpse's plate can't be clicked, as in the game
 end
 
--- Name-only plates: game objects, and friendly plates while friendly bars are off.
+-- Friendly bars can wait for a reason to show (friendly.barWhen): "combat"
+-- keeps the plate name-only until you're in a fight; "hurt" keeps the bar laid
+-- out but see-through at full health out of a fight (Plate.UpdateHurtBar),
+-- since health is always secret and can't be compared.
+Plate.inFight = false
+
+local function waitsForFight(p, c)
+    local f = c.friendly
+    return p.friendly and f.enabled and f.barWhen == "combat" and not Plate.inFight and not p.isSample
+end
+
+-- Name-only plates: game objects, and friendly plates while friendly bars are off
+-- or waiting for a fight.
 function Plate.NameOnly(p, c)
-    return p.object or (p.friendly and not c.friendly.enabled) or false
+    return p.object or (p.friendly and not c.friendly.enabled) or waitsForFight(p, c) or false
+end
+
+-- What goes with the bar when "hurt" hides it: your target's outline (and its
+-- light), its glow, the target arrows and the group focus mark. All draw on
+-- the plate, not the bar.
+local function setHeldAlpha(p, a)
+    DUI.SafeCall(p.hp.SetAlpha, p.hp, a)
+    DUI.SafeCall(p.outline.SetAlpha, p.outline, a)
+    DUI.SafeCall(p.glow.SetAlpha, p.glow, a)
+    if p.arrowHost then DUI.SafeCall(p.arrowHost.SetAlpha, p.arrowHost, a) end
+end
+
+-- "hurt": out of a fight the bar's alpha comes from the full-health curve,
+-- 1 below full and 0 at full, handed straight to SetAlpha.
+function Plate.UpdateHurtBar(p, c)
+    c = c or Plate.Cfg(p)
+    local f = c.friendly
+    local hold = p.friendly and f.enabled and f.barWhen == "hurt" and not Plate.inFight and not p.isSample and p.unit
+    if not hold then
+        if p.hurtHeld then
+            p.hurtHeld = nil
+            setHeldAlpha(p, 1)
+        end
+        return
+    end
+    p.hurtHeld = true
+    local a, curve = 1, DUI.Health.FullCurve()
+    if curve and UnitHealthPercent then
+        local ok, v = DUI.SafeReturn(UnitHealthPercent, p.unit, true, curve)
+        if ok and type(v) ~= "nil" then a = v end
+    end
+    setHeldAlpha(p, a)
+end
+
+-- A fight started or ended: friendly plates that wait for one change.
+function Plate.FightChanged(inFight)
+    Plate.inFight = inFight
+    if not (ns.Manager and ns.cfg.friendly and ns.cfg.friendly.enabled) then return end
+    local when = ns.cfg.friendly.barWhen
+    if when ~= "combat" and when ~= "hurt" then return end
+    ns.Manager.Each(function(p)
+        if not (p.unit and p.friendly) then return end
+        if when == "combat" then
+            Plate.Layout(p)
+            Plate.UpdateAll(p)
+        else
+            Plate.UpdateHurtBar(p)
+        end
+    end)
 end
 
 -- Whether the plate shows its name. A name-only plate keeps it, or it would be empty.
@@ -385,6 +459,9 @@ function Plate.Create(parent, sample)
     -- Your threat on the mob as a % (threatPct), see Plate.UpdateThreatPct.
     p.threatPct = Style.Text(over, 10, "CENTER", Plate.MEDIA.fonts.threatPct)
     p.threatPct:Hide()
+    -- Who the mob is attacking (mobTarget), see Plate.UpdateMobTarget.
+    p.mobTarget = Style.Text(over, 10, "CENTER", Plate.MEDIA.fonts.mobTarget)
+    p.mobTarget:Hide()
 
     -- Name and guild line on their own frame above everything on the bar (fill,
     -- target outline, border corner caps), so a name placed on the bar reads over it.
@@ -448,9 +525,13 @@ function Plate.Create(parent, sample)
     p.marker:SetTexture(Plate.MARKER_SHEET)
     p.marker:SetSize(Plate.MARKER, Plate.MARKER)
     p.marker:Hide()
+    -- The arrows and the group focus mark sit on their own frame so a hidden
+    -- friendly bar can take them along (Plate.UpdateHurtBar) without fighting their own fades.
+    p.arrowHost = CreateFrame("Frame", nil, p)
+    p.arrowHost:SetAllPoints(p)
     p.arrows = {}
     for key, turn in pairs(Plate.ARROW_TURN) do
-        local a = p:CreateTexture(nil, "OVERLAY")
+        local a = p.arrowHost:CreateTexture(nil, "OVERLAY")
         a:SetTexture(Plate.ARROW_ART)
         a:SetRotation(turn)
         a:Hide()
@@ -458,7 +539,7 @@ function Plate.Create(parent, sample)
     end
     p.focusMark = {}
     for i = 1, 2 do
-        local a = p:CreateTexture(nil, "OVERLAY")
+        local a = p.arrowHost:CreateTexture(nil, "OVERLAY")
         a:SetTexture(Plate.ARROW_ART)
         a:SetRotation(Plate.ARROW_TURN.top)
         a:SetAlpha(0)
@@ -858,6 +939,9 @@ function Plate.Layout(p)
     local ts = c.threatPctSize or 0
     Style.SetTextSize(p.threatPct, ts > 0 and ts or math.max(8, math.floor(h * 0.8 + 0.5)))
     if not p.threatPctOn then p.threatPct:Hide() end
+    p.mobTargetOn = c.mobTarget == true and not friendly and not nameOnly and not kind
+    Style.SetTextSize(p.mobTarget, Plate.MobTargetSize(p, c))
+    if not p.mobTargetOn then p.mobTarget:Hide() end
 
     Style.SetTextSize(p.name, nameSize)
     Style.SetTextSize(p.nameEdge, nameSize)
@@ -929,6 +1013,7 @@ function Plate.UpdateHealth(p, instant)
     -- something of your DoTs shows (~1,000 health events a second in a fight).
     if p.dotVeil:IsShown() or p.dotSkull:IsShown() then Plate.UpdateDots(p) end
     if p.execOn then Plate.UpdateExecute(p) end
+    if p.friendly or p.hurtHeld then Plate.UpdateHurtBar(p, c) end
 end
 
 local function amount(fn, u)
@@ -1015,6 +1100,13 @@ function Plate.NewExecute(bar)
     e.line = e:CreateTexture(nil, "OVERLAY")
     for _, t in ipairs({ e.band, e.lit, e.line }) do t:SetTexture(Plate.LINE) end
     e.lit:SetAlpha(0)
+    -- The spark rides the line, over everything on the bar, and breathes with the
+    -- band (it sits on e.hot).
+    e.spark = e.hot:CreateTexture(nil, "OVERLAY", nil, 2)
+    e.spark:SetTexture(Plate.GLOW, "CLAMP", "CLAMP")
+    e.spark:SetBlendMode("ADD")
+    e.spark:SetAlpha(0)
+    e.spark:Hide()
     e.pulse = e.hot:CreateAnimationGroup()
     e.pulseAnim = e.pulse:CreateAnimation("Alpha")
     e.pulseAnim:SetFromAlpha(1)
@@ -1044,19 +1136,20 @@ end
 
 -- Execute color: the accent (its pair for a gradient accent, read at paint time)
 -- or the player's own. fade: from transparent at the bar's low end to full at the line.
-function Plate.PaintExecute(tex, alpha, c, fade)
-    local lo, hi
+function Plate.ExecuteColors(c)
     if c.executeAccent ~= false then
-        lo, hi = Style.AccentPair()
-        if not lo then
-            local r, g, b = Style.Accent()
-            lo = { r, g, b }
-            hi = lo
-        end
-    else
-        local own = type(c.executeColor) == "table" and c.executeColor or ns.DEFAULTS.executeColor
-        lo, hi = own, own
+        local lo, hi = Style.AccentPair()
+        if lo then return lo, hi end
+        local r, g, b = Style.Accent()
+        lo = { r, g, b }
+        return lo, lo
     end
+    local own = type(c.executeColor) == "table" and c.executeColor or ns.DEFAULTS.executeColor
+    return own, own
+end
+
+function Plate.PaintExecute(tex, alpha, c, fade)
+    local lo, hi = Plate.ExecuteColors(c)
     if (fade or lo ~= hi) and tex.SetGradient and CreateColor then
         tex:SetVertexColor(1, 1, 1, alpha)
         tex:SetGradient("HORIZONTAL", CreateColor(lo[1], lo[2], lo[3], fade and 0 or alpha), CreateColor(hi[1], hi[2], hi[3], alpha))
@@ -1219,14 +1312,14 @@ function Plate.LayoutExecute(p, show)
     local side, cut = Style.GetFillAngle(bar)
     local lean = side == "right" and cut or side == "left" and -cut or 0
     lean = math.min(lean, x)
-    local file = c.executeTexture == "bar" and Style.BarFile("fill") or Plate.LINE
+    local file, tiled = Plate.ExecuteFile(c)
     local fade = c.executeTexture == "fade"
     for _, t in ipairs({ e.band, e.lit }) do
         t:ClearAllPoints()
         t:SetPoint("TOPLEFT", bar, "TOPLEFT", 0, 0)
         t:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", 0, 0)
         t:SetWidth(math.max(x, 1))
-        t:SetTexture(file)
+        Plate.SetExecuteTexture(t, file, tiled)
         if t.SetVertexOffset then DUI.SafeCall(t.SetVertexOffset, t, 4, -lean, 0) end
     end
     local l = e.line
@@ -1243,13 +1336,13 @@ function Plate.LayoutExecute(p, show)
     local strength = tonumber(c.executeStrength) or 0.45
     local lined = style == "line" or style == "icon"
     e.band:SetShown(not lined and c.executeRest ~= false)
-    Plate.PaintExecute(e.band, Plate.EXECUTE_REST, c, fade)
+    Plate.PaintExecute(e.band, tonumber(c.executeRestStrength) or ns.DEFAULTS.executeRestStrength, c, fade)
     Plate.PaintExecute(e.line, Plate.EXECUTE_LINE, c, false)
     -- The piece that lights: the band or the whole fill; none for "line".
     local hot
     if style == "bar" then
         hot = Plate.ExecuteFill(p)
-        hot:SetTexture(file)
+        Plate.SetExecuteTexture(hot, file, tiled)
         e.lit:Hide()
     elseif not lined then
         hot = e.lit
@@ -1271,25 +1364,73 @@ function Plate.LayoutExecute(p, show)
     else
         e.pulse:Stop()
     end
+    -- The extras that light with it, in any style: a glow round the bar and a
+    -- spark on the line.
+    local h = bar:GetHeight()
+    local lights = e.lights or {}
+    e.lights = lights
+    for i = #lights, 1, -1 do lights[i] = nil end
+    if e.hotTex then lights[1] = e.hotTex end
+    local _, hi = Plate.ExecuteColors(c)
+    if c.executeGlow == true then
+        e.glow = e.glow or Plate.Ring(e.hot, p.hp, Plate.GLOW, "ADD", "BACKGROUND")
+        Plate.LayoutRing(e.glow, p.hp, Plate.GLOW_REACH, 0, p.cut or 0)
+        for _, t in pairs(e.glow.pieces) do t:SetVertexColor(hi[1], hi[2], hi[3], Plate.EXECUTE_GLOW) end
+        e.glow:Show()
+        lights[#lights + 1] = e.glow
+    elseif e.glow then
+        e.glow:Hide()
+    end
+    if c.executeSpark == true then
+        local S, sp = Plate.EXECUTE_SPARK, e.spark
+        sp:ClearAllPoints()
+        sp:SetSize(math.max(6, h * S.width), math.max(8, h * S.height))
+        sp:SetPoint("CENTER", bar, "LEFT", x - lean / 2, 0)
+        sp:SetVertexColor(hi[1], hi[2], hi[3], 1)
+        sp:Show()
+        lights[#lights + 1] = sp
+    else
+        e.spark:Hide()
+    end
     e.curve = Plate.ExecuteCurve(pct)
     e:Show()
     if p.unit then Plate.UpdateExecute(p) end
+end
+
+-- The execute range's fill: the picked bar texture ("bar", its own media slot),
+-- one of its own (Plate.EXECUTE_FILES), or plain. Returns the file and whether it tiles.
+function Plate.ExecuteFile(c)
+    local kind = c.executeTexture
+    if kind == "bar" then return Style.BarFile("fill", Plate.MEDIA.bars.execute), false end
+    local own = Plate.EXECUTE_FILES[kind]
+    if own then return own, Plate.EXECUTE_TILED[kind] == true end
+    return Plate.LINE, false
+end
+
+function Plate.SetExecuteTexture(t, file, tiled)
+    if tiled then
+        t:SetTexture(file, "REPEAT", "REPEAT")
+    else
+        t:SetTexture(file)
+    end
+    if t.SetHorizTile then
+        t:SetHorizTile(tiled)
+        t:SetVertTile(tiled)
+    end
 end
 
 -- Lights it while the unit is in range. The curve's result (maybe secret) goes
 -- straight to SetAlpha, never tested.
 function Plate.UpdateExecute(p)
     local e = p.exec
-    local hot = e.hotTex
-    if not hot then return end
+    local lights = e.lights
+    if not lights or not lights[1] then return end
+    local a = 0
     if e.curve and UnitHealthPercent then
-        local ok, a = pcall(UnitHealthPercent, p.unit, true, e.curve)
-        if ok then
-            hot:SetAlpha(a)
-            return
-        end
+        local ok, got = pcall(UnitHealthPercent, p.unit, true, e.curve)
+        if ok then a = got end
     end
-    hot:SetAlpha(0)
+    for i = 1, #lights do lights[i]:SetAlpha(a) end
 end
 
 -- Your DoTs on this plate's unit (DUI.Dots): enemies only, each piece by its switch.
@@ -1576,6 +1717,50 @@ function Plate.ThreatBreath(state)
     if state == "warn" then return P.warn end
     if state == (DUI.Threat.IsTank() and "lost" or "aggro") then return P.aggro end
     return nil
+end
+
+-- Who the mob is attacking (mobTarget, enemy plates with a bar): its target's
+-- name, by default a player's in their class color and anyone else's white, so
+-- you see at a glance who each mob is on. In a PvP match the name and class can
+-- be secret: the name goes whole to SetText and a secret class reads as unknown.
+-- Redrawn on the mob's own UNIT_TARGET only, so nothing runs while it holds.
+function Plate.MobTargetSize(p, c)
+    local own = tonumber(c.mobTargetSize) or 0
+    if own > 0 then return own end
+    return math.max(8, math.floor(Plate.NameSize(p, c) * Plate.SUB_SCALE + 0.5))
+end
+
+-- mobTargetColor: "class" (players by class, others white), "white", "accent", "custom".
+function Plate.PaintMobTarget(fs, unit)
+    local c = cfg()
+    local mode = c.mobTargetColor or "class"
+    if mode == "accent" then return Style.InkText(fs, "pop") end
+    if mode == "custom" and type(c.mobTargetCustom) == "table" then
+        local t = c.mobTargetCustom
+        return fs:SetTextColor(t[1], t[2], t[3])
+    end
+    if mode == "class" and plain(UnitIsPlayer, unit) == true then
+        return fs:SetTextColor(Style.ClassTextColor(plain(UnitClassBase, unit)))
+    end
+    Style.InkText(fs, "VALUE")
+end
+
+function Plate.UpdateMobTarget(p)
+    local fs = p.mobTarget
+    if not (fs and p.mobTargetOn and p.unit) then
+        if fs then fs:Hide() end
+        return
+    end
+    local tu = p.unit .. "target"
+    local name = plain(UnitExists, tu) == true and DUI.UnitName(tu, "nameplates") or nil
+    if type(name) == "nil" then
+        fs:SetText("")
+        fs:Hide()
+        return
+    end
+    fs:SetText(name)
+    Plate.PaintMobTarget(fs, tu)
+    fs:Show()
 end
 
 -- Your threat on the mob as a % (threatPct, enemy plates only): the game's scaled
@@ -1920,9 +2105,39 @@ function Plate.UpdateLevel(p)
     Plate.PaintLevel(p, lvl, plain(UnitClassification, u), u)
 end
 
+-- A friendly unit's level says nothing about danger, so it never takes the
+-- difficulty colors (a low-level friend read gray). Class and reaction like the
+-- name, white, the accent or one color. The preview has no unit, only its
+-- sample's class and reaction.
+function Plate.PaintFriendLevel(p, unit, sample)
+    local c = Plate.Cfg(p)
+    local mode, t = c.levelColor, c.levelCustom
+    if mode == "white" then
+        Style.InkText(p.level, "VALUE")
+    elseif mode == "accent" then
+        Style.InkText(p.level, "pop")
+    elseif mode == "custom" and type(t) == "table" then
+        p.level:SetTextColor(t[1], t[2], t[3])
+    else
+        local token, reaction
+        if sample then
+            token, reaction = sample.class, sample.reaction
+        elseif unit then
+            if plain(UnitIsPlayer, unit) == true then token = select(2, UnitClass(unit)) end
+            reaction = plain(UnitReaction, unit, "player")
+        end
+        if token then
+            p.level:SetTextColor(Style.ClassTextColor(token))
+        else
+            local r, g, b = Style.ReactionColor(reaction)
+            p.level:SetTextColor(Style.Lighten(r, g, b, Plate.NAME_LIGHTEN))
+        end
+    end
+end
+
 -- A plain level and classification ("elite"...) into the level text. Also used by
--- the preview's sample, which has no unit token, just its level.
-function Plate.PaintLevel(p, lvl, classification, unit)
+-- the preview's sample, which has no unit token, just its level and the sample.
+function Plate.PaintLevel(p, lvl, classification, unit, sample)
     local text, r, g, b
     if lvl <= 0 then
         text = "??"
@@ -1935,7 +2150,10 @@ function Plate.PaintLevel(p, lvl, classification, unit)
     end
     p.level:SetText(text)
     -- A plugin's level (DaylightUI.API's Paint) keeps its color.
-    if not Plate.Owned("level") then
+    local owned = Plate.Owned("level")
+    if not owned and p.friendly then
+        Plate.PaintFriendLevel(p, unit, sample)
+    elseif not owned then
         -- "??" keeps its skull red whatever the setting: danger is what the glance needs.
         local mode = lvl > 0 and Plate.Cfg(p).levelColor or "difficulty"
         local t = mode == "custom" and Plate.Cfg(p).levelCustom
@@ -2013,7 +2231,8 @@ end
 -- already placed beside the bar. It still goes before the skull, which steps
 -- back over the rows' room.
 Plate.SPOT_ORDER = { "name", "quest", "marker", "debuffs", "helps", "buffs", "cc" }
-Plate.SPOT_LAST = { "percent", "level", "threatPct", "execIcon", "defensives", "skull" }
+-- The mob's target came after them all, so turning it on moves nothing already placed.
+Plate.SPOT_LAST = { "percent", "level", "threatPct", "execIcon", "defensives", "skull", "mobTarget" }
 Plate.SPOT_KEYS = {
     name = { spot = "namePos", x = "nameX", y = "nameY" },
     quest = { spot = "questPos", x = "questX", y = "questY" },
@@ -2028,6 +2247,7 @@ Plate.SPOT_KEYS = {
     threatPct = { spot = "threatPctPos", x = "threatPctX", y = "threatPctY" },
     skull = { spot = "dotSkullPos", x = "dotSkullX", y = "dotSkullY" },
     execIcon = { spot = "executeIconPos", x = "executeIconX", y = "executeIconY" },
+    mobTarget = { spot = "mobTargetPos", x = "mobTargetX", y = "mobTargetY" },
 }
 Plate.ROWS = { debuffs = true, helps = true, buffs = true, cc = true, defensives = true } -- outside spots only
 Plate.OUTSIDE = {}
@@ -2036,14 +2256,14 @@ Plate.ABOVE = { above = true, outtopleft = true, outtopright = true }
 -- Distance from the bar's end to the first piece beside it (where the marks always
 -- were), and between pieces sharing a spot.
 Plate.BESIDE_GAP = { name = 2, quest = 3, marker = 4, debuffs = 4, helps = 4, buffs = 4, cc = 4, defensives = 4,
-                     percent = 3, level = 3, threatPct = 3, skull = 3, execIcon = 3 }
+                     percent = 3, level = 3, threatPct = 3, skull = 3, execIcon = 3, mobTarget = 3 }
 Plate.CHAIN_GAP = 2
 
 local Spots = DUI.Spots
 local BESIDE = { outleft = true, outright = true }
 -- Pieces that are a single region of the plate.
 local SINGLE = { marker = "marker", percent = "percent", level = "level", threatPct = "threatPct", skull = "dotSkull",
-                 execIcon = "execIcon" }
+                 execIcon = "execIcon", mobTarget = "mobTarget" }
 local BAR_TEXT = { percent = true, level = true, threatPct = true }
 
 -- A piece's spot, grow direction (an aura row's own; the name and marks follow
@@ -2344,6 +2564,11 @@ local function room(p, piece, c, w, h)
             or (piece == "level" and (c.levelSize or 0)) or 0
         if size <= 0 then size = math.max(8, math.floor(h * 0.8 + 0.5)) end
         return true, p.isSample and textWidth(fs, 20) or 0, size
+    elseif piece == "mobTarget" then
+        -- Its space is kept while switched on, a target or not, so nothing moves as the
+        -- mob picks one up and drops it.
+        if not p.mobTargetOn then return false end
+        return true, p.isSample and textWidth(p.mobTarget, 40) or 0, Plate.MobTargetSize(p, c)
     elseif piece == "execIcon" then
         -- Its space is kept while the style is on, lit or not, so nothing moves as the
         -- enemy drops into range (its alpha may be secret).
@@ -2374,7 +2599,7 @@ end
 -- The name and its guild or title line as one block: above the bar the line sits
 -- closest to it, anywhere else under the name. Justified to the spot's side; on
 -- the bar as wide as the space there.
-local function placeName(p, L, rel, spot, nameOnly, w)
+local function placeName(p, L, rel, spot, nameOnly, nx, ny)
     local name, sub = p.name, p.sub
     name:ClearAllPoints()
     sub:ClearAllPoints()
@@ -2386,7 +2611,7 @@ local function placeName(p, L, rel, spot, nameOnly, w)
         p.nameJustify = "CENTER"
         name:SetJustifyH("CENTER")
         sub:SetJustifyH("CENTER")
-        name:SetPoint("CENTER", p, "CENTER", 0, 0)
+        name:SetPoint("CENTER", p, "CENTER", nx, ny)
         sub:SetPoint("TOP", name, "BOTTOM", 0, -1)
         if p.groupMarkOn then Plate.PlaceGroupMark(p) end
         if p.classIconOn then Plate.PlaceClassIcon(p) end
@@ -2437,7 +2662,13 @@ end
 
 local function place(p, x, piece)
     local spot, grow, nx, ny = Plate.SpotOf(p, piece)
-    if piece == "name" and x.nameOnly then spot, grow, nx, ny = "above", "center", 0, 0 end
+    -- A name-only plate has no bar to place the name around, so it stays centered,
+    -- but a friendly plate's name nudges still move it: the game puts the plate high
+    -- over some models.
+    if piece == "name" and x.nameOnly then
+        spot, grow = "above", "center"
+        if not p.friendly then nx, ny = 0, 0 end
+    end
     local on, across, up = room(p, piece, x.c, x.w, x.h)
     local box = x.box
     box.above, box.below, box.outL, box.outR = 0, 0, 0, 0
@@ -2466,7 +2697,7 @@ local function place(p, x, piece)
                                               line = Plate.ROWS[piece] and x.w or nil })
     box.cutR = cutR
     if piece == "name" then
-        placeName(p, L, rel, spot, x.nameOnly, x.w)
+        placeName(p, L, rel, spot, x.nameOnly, nx, ny)
     elseif piece == "quest" then
         placeQuest(p, L, rel)
     elseif SINGLE[piece] then
@@ -2508,8 +2739,8 @@ local function place(p, x, piece)
             -- A name-only plate's name sits on the plate's middle, not over the bar: the
             -- class icon reaches up from it, the guild line down.
             local half = Plate.NameSize(p, x.c) / 2 - x.h / 2
-            r.up = math.max(r.up, half + Plate.ClassIconRoom(p, x.c, "above"))
-            r.down = math.max(r.down, half + (p.sub:IsShown() and 1 + p.subPx or 0))
+            r.up = math.max(r.up, half + Plate.ClassIconRoom(p, x.c, "above") + math.max(0, ny))
+            r.down = math.max(r.down, half + (p.sub:IsShown() and 1 + p.subPx or 0) + math.max(0, -ny))
         elseif r then
             if Plate.ABOVE[spot] then r.up = math.max(r.up, far + math.max(0, ny))
             else r.down = math.max(r.down, far + math.max(0, -ny)) end
@@ -3139,6 +3370,7 @@ local function updateNow(p)
     Plate.UpdateColor(p)
     Plate.UpdateTarget(p)
     Plate.UpdateHover(p)
+    Plate.UpdateMobTarget(p)
     ns.Power.Refresh(p, true)
     ns.Cast.Update(p)
 end
@@ -3229,6 +3461,8 @@ Plate.UNIT_EVENTS = {
     -- (you, a party member; the game's UnitFrame.lua matches it to the frame's
     -- feedbackUnit "player"), never the mob a plate shows.
     UNIT_THREAT_LIST_UPDATE = "color",
+    -- The mob picked a new target (mobTarget).
+    UNIT_TARGET = "mobTarget",
 }
 
 local THREAT_EVENTS = { UNIT_THREAT_LIST_UPDATE = true }
@@ -3249,6 +3483,8 @@ function Plate.OnEvent(p, event, unit, ...)
         if event == "UNIT_MAXHEALTH" then Plate.UpdatePrediction(p) end
     elseif what == "predict" then
         Plate.UpdatePrediction(p)
+    elseif what == "mobTarget" then
+        Plate.UpdateMobTarget(p)
     elseif what == "portrait" then
         if p.minion or p.minionBar then ns.Minion.Update(p) end
     elseif what == "name" then
@@ -3364,6 +3600,8 @@ function Plate.Uninstall(p)
     p.questKindNow, p.questRNow = nil, nil
     p.level:SetText("")
     p.threatPct:Hide()
+    p.mobTarget:SetText("")
+    p.mobTarget:Hide()
     p.dragon:Hide()
     p.sub:SetText("")
     p.sub:Hide()
@@ -3391,6 +3629,7 @@ function Plate.Uninstall(p)
     ns.Auras.SetUnit(p, nil)
     ns.Cast.Stop(p, true)
     ns.Cast.Unkick(p)
+    DUI.BarFx.ClearReaction(p.health)
     DUI.Motion.KickTagOff(p.kickTag)
     ns.Minion.Clear(p)
     DUI.Motion.Tween(p, 1, 1, 0) -- stops a fade in progress

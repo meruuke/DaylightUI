@@ -47,6 +47,16 @@ local function spotItems(name, k, outside, dis, desc)
     return items
 end
 
+-- The friendly name's spot only means something around the health bar, but its
+-- nudges also move the name of a plate shown without one.
+local function friendlyNameItems()
+    local items = spotItems("Friendly name", { spot = "friendly.namePos", x = "friendly.nameX", y = "friendly.nameY" },
+        false, off("friendly.enabled"),
+        "Over, under, beside or on a friendly plate's health bar. Without the health bar the name stays centered, and the nudges below still move it.")
+    for i = 2, #items do items[i].disabled = nil end
+    return items
+end
+
 -- items, each marked new in version.
 local function since(version, items)
     for _, item in ipairs(items) do item.since = version end
@@ -87,7 +97,7 @@ ns.OPTIONS = { pages = {
         { label = "Size and look", items = {
             { type = "slider", key = "scale", label = "Nameplate scale", min = 0.5, max = 2, step = 0.05, unit = "x",
               desc = "Size of every plate, friendly and enemy. Plates keep this size at any distance." },
-            { type = "slider", key = "offsetY", label = "Plates up / down", min = -20, max = 40, step = 1, unit = "px",
+            { type = "slider", key = "offsetY", label = "Plates up / down", min = -50, max = 40, step = 1, unit = "px",
               desc = "Moves plates up or down from where the game puts them. Higher plates can end up where the game's damage numbers start, and those always draw behind plates." },
             { type = "slider", key = "range", label = "View distance", min = 20, max = 60, step = 1,
               desc = "How far away plates show, in yards. 60 is the most the game allows." },
@@ -308,6 +318,24 @@ ns.OPTIONS = { pages = {
               desc = "How big the NPC job line is. Set to 0 to follow the name size.",
               disabled = lineOff("role") },
         })) },
+        { label = "Enemy's target", items = since("2.2.6", with({
+            { type = "toggle", key = "mobTarget", label = "Enemy's target",
+              desc = "The name of whoever each enemy is attacking, by its health bar, so you can see at a glance who every mob is on." },
+            { type = "dropdown", key = "mobTargetColor", label = "Enemy's target color",
+              values = { class = "Class color", white = "White", accent = "Accent color", custom = "One color" },
+              order = { "class", "white", "accent", "custom" },
+              desc = "Class color: players in their class color, pets and NPCs in white. Or always white, your accent color, or one color you pick.",
+              disabled = off("mobTarget") },
+            { type = "color", key = "mobTargetCustom", label = "Custom enemy's target color",
+              desc = "The name's color when Enemy's target color is One color.",
+              disabled = function(get) return get("mobTarget") ~= true or get("mobTargetColor") ~= "custom" end },
+            { type = "slider", key = "mobTargetSize", label = "Enemy's target size", min = 0, max = 24, step = 1,
+              desc = "How big the name is. Set to 0 to follow the name size, a little smaller.",
+              disabled = off("mobTarget") },
+            DaylightUI.Options.MediaPick("font", "media.mobTargetFont", "Enemy's target font",
+                "The enemy's target's name on the nameplates. General uses the name font.",
+                { disabled = off("mobTarget"), follows = { slot = "plates.font.name", label = "Name" } }),
+        }, spotItems("Enemy's target", { spot = "mobTargetPos", x = "mobTargetX", y = "mobTargetY" }, false, off("mobTarget")))) },
         { label = "Quest mark", tab = "Marks", items = with({
             { type = "toggle", key = "quest", label = "Quest mark",
               desc = "A mark by the bar of anything your quests still need. Not inside instances." },
@@ -388,10 +416,13 @@ ns.OPTIONS = { pages = {
               desc = "The color the execute range lights up in.",
               disabled = function(get) return execOff(get) or get("executeAccent") == true end },
             { type = "dropdown", key = "executeTexture", label = "Execute range texture",
-              values = { flat = "Flat", bar = "Bar texture", fade = "Fade in" },
-              order = { "flat", "bar", "fade" },
-              desc = "Flat: one even color. Bar texture: the bar texture from Appearance. Fade in: faint at the bar's end, full at the line.",
+              values = { flat = "Flat", bar = "Bar texture", fade = "Fade in", stripes = "Stripes", neon = "Neon" },
+              order = { "flat", "fade", "stripes", "neon", "bar" },
+              desc = "Flat: one even color. Fade in: faint at the bar's end, full at the line. Stripes: bold warning stripes. Neon: a glowing tube. Bar texture: any bar texture, picked below.",
               disabled = function(get) return execOff(get) or noBand(get) end },
+            DaylightUI.Options.MediaPick("bar", "media.execute", "Execute range bar texture",
+                "The bar texture the execute range uses with Bar texture picked above. General uses the bar texture on General > Appearance.",
+                { since = "2.2.5", disabled = function(get) return execOff(get) or noBand(get) or get("executeTexture") ~= "bar" end }),
             { type = "slider", key = "executeStrength", label = "Execute range brightness", min = 0.1, max = 1, step = 0.05, unit = "%",
               desc = "How strongly it lights up once the enemy is in range.",
               disabled = function(get) return execOff(get) or noBand(get) end },
@@ -400,6 +431,15 @@ ns.OPTIONS = { pages = {
             { type = "toggle", key = "executeRest", label = "Execute range: faint band",
               desc = "Shows where the range is before the enemy gets there, faintly.",
               disabled = function(get) return execOff(get) or noBand(get) end },
+            { type = "slider", key = "executeRestStrength", label = "Faint band brightness", min = 0.05, max = 1, step = 0.05, unit = "%", since = "2.2.5",
+              desc = "How bright the band is before the enemy gets in range. Turn it all the way up to see the range clearly all the time.",
+              disabled = function(get) return execOff(get) or noBand(get) or get("executeRest") == false end },
+            { type = "toggle", key = "executeGlow", label = "Execute range: glow", since = "2.2.5",
+              desc = "A soft glow around the whole health bar once the enemy is in range, so it stands out in a crowd.",
+              disabled = execOff },
+            { type = "toggle", key = "executeSpark", label = "Execute range: spark", since = "2.2.5",
+              desc = "A bright spark on the line once the enemy is in range.",
+              disabled = execOff },
         } },
         { label = "Execute icon", items = since("1.7.2", spotItems("Execute icon",
             { spot = "executeIconPos", x = "executeIconX", y = "executeIconY" }, false,
@@ -606,10 +646,30 @@ ns.OPTIONS = { pages = {
               desc = "No plates over friendly players and NPCs in dungeons, raids, battlegrounds and arenas. They come back as you leave." },
             { type = "toggle", key = "friendly.totems", label = "Totems as badges", since = "1.8.0",
               desc = "A friendly totem shows as a small round badge with its picture, ringed in its element's color, instead of its long name." },
+            { type = "slider", key = "friendly.totemSize", since = "2.2.4", label = "Totem badge size", min = 0, max = 60, step = 1, unit = "px",
+              desc = "How big your group's totem badges are. 0 keeps the size of enemy pet and totem badges.",
+              disabled = off("friendly.totems") },
+            { type = "dropdown", key = "friendly.totemIcon", since = "2.2.4", label = "Totem picture",
+              values = { portrait = "The totem", spell = "Its spell's icon", element = "Its element" },
+              order = { "portrait", "spell", "element" },
+              desc = "What the badge shows: the totem itself, the icon of the spell that put it down, so each totem is easy to tell apart, or one picture per element.",
+              disabled = off("friendly.totems") },
+            { type = "dropdown", key = "friendly.totemShape", since = "2.2.4", label = "Totem badge shape",
+              values = { round = "Round", square = "Square" }, order = { "round", "square" },
+              desc = "A round badge with a ring, or a square one with a thin edge.",
+              disabled = off("friendly.totems") },
+            { type = "toggle", key = "friendly.totemBorder", since = "2.2.4", label = "Totem badge border",
+              desc = "The ring or edge in the totem's element color. When off, the picture alone shows.",
+              disabled = off("friendly.totems") },
         } },
         { label = "Health bar", items = with({
             { type = "toggle", key = "friendly.enabled", label = "Friendly health bar",
               desc = "A thin bar under the name." },
+            { type = "dropdown", key = "friendly.barWhen", since = "2.2.4", label = "Show the health bar",
+              values = { always = "Always", combat = "In a fight", hurt = "In a fight or when hurt" },
+              order = { "always", "combat", "hurt" },
+              desc = "When friendly plates show their health bar. The rest of the time they show only the name, so towns stay calm.",
+              disabled = off("friendly.enabled") },
             { type = "slider", key = "friendly.height", label = "Friendly health bar height", min = 2, max = 24, step = 1, unit = "px",
               desc = "How tall a friendly plate's health bar is.",
               disabled = off("friendly.enabled") },
@@ -633,6 +693,16 @@ ns.OPTIONS = { pages = {
               disabled = function(get) return not get("friendly.enabled") or not get("friendly.percent") end },
             { type = "toggle", key = "friendly.level", label = "Friendly level", disabled = off("friendly.enabled"),
               desc = "Their level by the bar." },
+            { type = "dropdown", key = "friendly.levelColor", label = "Friendly level color", since = "2.4.1",
+              values = { class = "Class and reaction", white = "White", accent = "Accent color", custom = "One color" },
+              order = { "class", "white", "accent", "custom" },
+              desc = "Players' levels in their class color and NPCs' in their reaction color, like their names. Or always white, your accent color, or one color you pick.",
+              disabled = function(get) return not get("friendly.enabled") or not get("friendly.level") end },
+            { type = "color", key = "friendly.levelCustom", label = "Custom friendly level color", since = "2.4.1",
+              desc = "The friendly level's color when Friendly level color is One color.",
+              disabled = function(get)
+                  return not get("friendly.enabled") or not get("friendly.level") or get("friendly.levelColor") ~= "custom"
+              end },
             { type = "toggle", key = "friendly.power", label = "Friendly power bar", since = "1.6.6", disabled = off("friendly.enabled"),
               desc = "Their mana, rage or energy as a thin bar under the health bar: see a healer running low. Who gets one, its size and color follow Health & Names > Power bar." },
             { type = "dropdown", key = "friendly.healthColor", label = "Friendly health bar color",
@@ -685,9 +755,7 @@ ns.OPTIONS = { pages = {
             { type = "slider", key = "friendly.classIconScale", label = "Class icon size", min = 0.5, max = 2.5, step = 0.05, unit = "%",
               desc = "How big the class icon is next to the name. It grows and shrinks with the name size.",
               disabled = function(get) return get("friendly.classIcon") == "none" end },
-        }), spotItems("Friendly name", { spot = "friendly.namePos", x = "friendly.nameX", y = "friendly.nameY" }, false,
-            off("friendly.enabled"),
-            "Over, under, beside or on a friendly plate's health bar. Without the health bar the name stays centered.")))) },
+        }), friendlyNameItems()))) },
         { label = "Guild names", items = with({
             { type = "toggle", key = "friendly.guild", label = "Friendly guild names",
               desc = "A friendly player's <guild> under their name, smaller." },

@@ -314,7 +314,11 @@ local function makeUseButton()
     -- Both presses: the game acts on the down or the up one depending on
     -- ActionButtonUseKeyDown (SecureActionButton_OnClick), and ignores the other.
     useButton:RegisterForClicks("RightButtonDown", "RightButtonUp")
-    useButton:SetAttribute("type2", "item")
+    -- A /use macro, not the "item" action: that one equips anything wearable by
+    -- name first, so a quest item you can also wear was put on instead of
+    -- starting its quest. /use on a bag slot is UseContainerItem, the bag's own
+    -- right click.
+    useButton:SetAttribute("type2", "macro")
     if useButton.SetPassThroughButtons then
         useButton:SetPassThroughButtons("LeftButton", "MiddleButton", "Button4", "Button5")
     end
@@ -371,7 +375,7 @@ function Items.UseOver(slotButton, fromEvent)
         return Items.UseOff(true)
     end
     local button = makeUseButton()
-    button:SetAttribute("item", bag .. " " .. slot)
+    button:SetAttribute("macrotext", "/use " .. bag .. " " .. slot)
     button:ClearAllPoints()
     button:SetAllPoints(slotButton)
     button:SetFrameStrata(strataAbove(slotButton:GetFrameStrata()))
@@ -468,6 +472,17 @@ function Items.Hover(btn, on, snap)
     end)
 end
 
+-- The game's new-item glows on a slot. Its store glow (BattlepayItemTexture, a
+-- blue square) starts out shown, and the game's UpdateNewItem shows it for a new
+-- store item. Blue squares were seen staying in emptied slots after selling.
+local GLOWS = { "flash", "NewItemTexture", "BattlepayItemTexture" }
+local function hideGlows(btn)
+    for _, key in ipairs(GLOWS) do
+        local t = btn[key]
+        if type(t) == "table" and t.Hide then t:Hide() end
+    end
+end
+
 -- Restyles a new button (once).
 function Items.Dress(btn)
     if dressed[btn] then return dressed[btn] end
@@ -479,6 +494,7 @@ function Items.Dress(btn)
     p.well:SetColorTexture(w[1], w[2], w[3], 1)
     p.well:Hide()
     hideGameArt(btn)
+    hideGlows(btn)
     -- Original size of each piece of the game's art (Items.ScaleArt).
     p.art = {}
     for _, key in ipairs(Items.GAME_SIZED) do
@@ -557,16 +573,22 @@ function Items.Dress(btn)
     local pushed = btn.GetPushedTexture and btn:GetPushedTexture()
     if pushed then pushed:SetColorTexture(0, 0, 0, 0.3) end
     -- Alt-right-click picks this item's group (the game does nothing with that
-    -- click on a bag item). A plain right click at the Auction House also puts
-    -- the item on the Sell tab of Daylight UI's auction window when it's open.
+    -- click on a bag item). A plain right click or an Alt-left-click at the
+    -- Auction House puts the item on the Sell tab of Daylight UI's auction
+    -- window; the auction addon decides which of the two its setting takes.
     btn:HookScript("OnClick", function(self, button)
-        if button ~= "RightButton" then return end
-        if IsAltKeyDown and IsAltKeyDown() and ns.Categories then
-            ns.Categories.Menu(self)
-        elseif DUI.AuctionHouseSell and not (IsModifierKeyDown and IsModifierKeyDown()) then
-            local bag, slot = bagAndSlotOf(self)
-            if type(bag) == "number" and type(slot) == "number" then DUI.AuctionHouseSell(bag, slot) end
+        local alt = IsAltKeyDown and IsAltKeyDown()
+        local other = (IsShiftKeyDown and IsShiftKeyDown()) or (IsControlKeyDown and IsControlKeyDown())
+        if button == "RightButton" and alt then
+            if ns.Categories then ns.Categories.Menu(self) end
+            return
         end
+        if not DUI.AuctionHouseSell or other then return end
+        local click = (button == "RightButton" and not alt and "right")
+            or (button == "LeftButton" and alt and "alt") or nil
+        if not click then return end
+        local bag, slot = bagAndSlotOf(self)
+        if type(bag) == "number" and type(slot) == "number" then DUI.AuctionHouseSell(bag, slot, click) end
     end)
     -- A locked item's slot takes no clicks at a vendor or while Disenchant is targeting.
     -- Looking at a new item clears its dot.
@@ -1000,16 +1022,25 @@ local function notAboutUse(text)
     return prefix ~= nil and prefix ~= "" and text:sub(1, #prefix) == prefix
 end
 
+-- One of the game's format strings as an anchored pattern that reads its line
+-- back, each number captured. Other languages number the holes (%1$d) and
+-- write plurals as |4one:many;, so those are folded before escaping.
+function Items.Pattern(fmt)
+    if type(fmt) ~= "string" then return nil end
+    local f = fmt:gsub("|4[^;]*;", "\1")
+    f = f:gsub("%%%d*%$?([ds])", function(kind) return kind == "d" and "\2" or "\1" end)
+    f = f:gsub("%%%%", "%%")
+    f = f:gsub("([%%%^%$%(%)%.%[%]%*%+%-%?])", "%%%1")
+    f = f:gsub("\1", ".-"):gsub("\2", "(%%d+)")
+    return "^" .. f .. "$"
+end
+
 -- The game's "Requires Cooking (110)" line as a pattern, built once from its
 -- own words so it reads in every language.
 local skillLine
 local function skillPattern()
     if skillLine == nil then
-        skillLine = false
-        if type(ITEM_MIN_SKILL) == "string" then
-            local p = ITEM_MIN_SKILL:gsub("([%(%)%.%[%]%+%-%*%?%^%$])", "%%%1")
-            skillLine = "^" .. p:gsub("%%s", ".+"):gsub("%%d", "%%d+") .. "$"
-        end
+        skillLine = Items.Pattern(ITEM_MIN_SKILL) or false
     end
     return skillLine or nil
 end
@@ -1269,12 +1300,12 @@ function Items.Fill(btn, tooltipOwner)
     call(btn, "UpdateQuestItem", q.isQuestItem, q.questID, q.isActive)
     call(btn, "UpdateNewItem", quality)
     -- No shimmer and no glow frame: stop the sweep and pulse the game just started and
-    -- hide its glow (white on common items, a second frame around the ring). New loot is
-    -- marked by the Recent group and the small new-item dot instead.
+    -- hide its glows (white on common items, a second frame around the ring; the store
+    -- item's blue square too). New loot is marked by the Recent group and the small
+    -- new-item dot instead.
     if type(btn.flashAnim) == "table" and btn.flashAnim.Stop then btn.flashAnim:Stop() end
     if type(btn.newitemglowAnim) == "table" and btn.newitemglowAnim.Stop then btn.newitemglowAnim:Stop() end
-    if type(btn.flash) == "table" and btn.flash.Hide then btn.flash:Hide() end
-    if type(btn.NewItemTexture) == "table" and btn.NewItemTexture.Hide then btn.NewItemTexture:Hide() end
+    hideGlows(btn)
     -- An item marked as junk by hand gets the game's junk coin like a gray one.
     local marked = info and ns.Categories.IsMarkedJunk(info.itemID)
     call(btn, "UpdateJunkItem", marked and 0 or quality, noValue)
@@ -1363,6 +1394,10 @@ function Items.Fits(bag, slot, info, w, quest)
     if fits and w and w == ns.window and ns.Disenchant and ns.Disenchant.on then
         fits = ns.Disenchant.Takes(bag, slot, info)
     end
+    -- At the bank: what can't go into the bank shown dims, as the game's bags do.
+    if fits and info and w and w == ns.window and ns.Bank and ns.Bank.Refuses(bag, slot) then
+        fits = false
+    end
     return fits
 end
 
@@ -1381,6 +1416,20 @@ function Items.FillLocked(btn)
     run(SetItemButtonDesaturated, btn, info and info.isLocked)
     Items.Paint(btn, info ~= nil and (info.iconFileID or btn.dluiShown) ~= nil, info and info.quality, info and info.itemID, holder:GetID())
     if btn.dluiTwin and btn.dluiTwin:IsShown() then Items.FillLocked(btn.dluiTwin) end
+end
+
+-- The game's junk coin shows only while a vendor's window is open (its
+-- UpdateJunkItem reads MerchantFrame), so it's asked again when one opens or
+-- closes. A slot filled while the bag was shut kept no coin at the vendor.
+function Items.FillJunk(btn)
+    local holder = btn:GetParent()
+    local bag = holder and holder:GetID()
+    if type(bag) ~= "number" or ns.Saved.Is(bag) then return end
+    local info = Items.InfoAt(bag, btn:GetID())
+    if not info then return end
+    local marked = ns.Categories.IsMarkedJunk(info.itemID)
+    call(btn, "UpdateJunkItem", marked and 0 or info.quality, info.hasNoValue)
+    if btn.dluiTwin and btn.dluiTwin:IsShown() then Items.FillJunk(btn.dluiTwin) end
 end
 
 -- The cooldown sweep, and the dimmed icon of an item that can't be used yet, drawn

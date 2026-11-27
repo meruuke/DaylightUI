@@ -23,14 +23,16 @@ end
 
 -- The character window's own slot names (the game's globals), so each language says what
 -- the game says; our own text is the fallback.
-Gear.LABEL = { Head = HEADSLOT or L["Head"], Neck = NECKSLOT or L["Neck"], Shoulder = SHOULDERSLOT or L["Shoulders"],
-    Back = BACKSLOT or L["Back"], Chest = CHESTSLOT or L["Chest"], Shirt = SHIRTSLOT or L["Shirt"],
-    Tabard = TABARDSLOT or L["Tabard"], Wrist = WRISTSLOT or L["Wrists"], Hands = HANDSSLOT or L["Hands"],
-    Waist = WAISTSLOT or L["Waist"], Legs = LEGSSLOT or L["Legs"], Feet = FEETSLOT or L["Feet"],
-    Finger0 = FINGER0SLOT or L["Ring"], Finger1 = FINGER1SLOT or L["Ring"],
-    Trinket0 = TRINKET0SLOT or L["Trinket"], Trinket1 = TRINKET1SLOT or L["Trinket"],
-    MainHand = MAINHANDSLOT or L["Main hand"], SecondaryHand = SECONDARYHANDSLOT or L["Off hand"],
-    Ranged = RANGEDSLOT or L["Ranged"], Ammo = AMMOSLOT or L["Ammo"] }
+DUI.WithLanguage(function()
+    Gear.LABEL = { Head = HEADSLOT or L["Head"], Neck = NECKSLOT or L["Neck"], Shoulder = SHOULDERSLOT or L["Shoulders"],
+        Back = BACKSLOT or L["Back"], Chest = CHESTSLOT or L["Chest"], Shirt = SHIRTSLOT or L["Shirt"],
+        Tabard = TABARDSLOT or L["Tabard"], Wrist = WRISTSLOT or L["Wrists"], Hands = HANDSSLOT or L["Hands"],
+        Waist = WAISTSLOT or L["Waist"], Legs = LEGSSLOT or L["Legs"], Feet = FEETSLOT or L["Feet"],
+        Finger0 = FINGER0SLOT or L["Ring"], Finger1 = FINGER1SLOT or L["Ring"],
+        Trinket0 = TRINKET0SLOT or L["Trinket"], Trinket1 = TRINKET1SLOT or L["Trinket"],
+        MainHand = MAINHANDSLOT or L["Main hand"], SecondaryHand = SECONDARYHANDSLOT or L["Off hand"],
+        Ranged = RANGEDSLOT or L["Ranged"], Ammo = AMMOSLOT or L["Ammo"] }
+end)
 
 -- Shirt and tabard say what they are instead of an item level.
 Gear.NO_LEVEL = { Shirt = true, Tabard = true }
@@ -88,6 +90,24 @@ local function bareEnchant(text)
     return text:match(pattern) or text
 end
 
+-- Slots that take a permanent enchant: enchanting's, plus head, leg and
+-- shoulder enchants.
+Gear.ENCHANTABLE = { Head = true, Shoulder = true, Back = true, Chest = true, Wrist = true, Hands = true,
+    Legs = true, Feet = true, MainHand = true, SecondaryHand = true, Ranged = true }
+
+-- Whether this item could carry an enchant it doesn't have. An off hand takes
+-- one as a weapon or a shield (not a held-in-off-hand item), a ranged slot
+-- only as a bow, gun or crossbow (a scope), never a wand, thrown or relic.
+function Gear.MissingEnchant(e)
+    if e.empty or e.enchant or not Gear.ENCHANTABLE[e.key] then return false end
+    if e.key ~= "SecondaryHand" and e.key ~= "Ranged" then return true end
+    local get = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
+    if not (e.link and get) then return false end
+    local _, _, _, _, _, class, sub = get(e.link)
+    if e.key == "Ranged" then return class == 2 and Gear.AMMO_WEAPONS[sub] == true end
+    return class == 2 or (class == 4 and sub == 6)
+end
+
 function Gear.Enchant(link, slotId, unit)
     local eid = link and string.match(link, "item:%-?%d+:(%d+)")
     if not eid or eid == "0" then return nil end
@@ -137,6 +157,7 @@ function Gear.Read(key, repairAt, unit)
     e.quality = GetInventoryItemQuality(unit, id) or e.quality
     e.icon = icon
     e.level = levelOf(link)
+    e.link = link
     e.enchant = Gear.Enchant(link, id, unit)
     local cur, max
     if unit == "player" then cur, max = GetInventoryItemDurability(id) end

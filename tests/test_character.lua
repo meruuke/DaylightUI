@@ -844,7 +844,7 @@ T.test("character slots: icons only puts the item level in the corner", function
     T.eq(head.corner:GetText(), "")
 end)
 
-T.test("character slots: an enchant shows as a third green line, read once per link", function()
+T.test("character slots: an enchant shows as a third line, read once per link", function()
     local S, ns = lentWorld({ items = {
         Head = CW.item("Lionheart Helm", { level = 66, enchantId = 2545, enchant = "+1% Dodge" }),
         Legs = CW.item("Plain Pants", { level = 50 }) } })
@@ -865,7 +865,37 @@ T.test("character slots: an enchant shows as a third green line, read once per l
     S.Layout(head, S.ICON, false)
     S.Paint(head, ns.Gear.Read("Head", 0.25), { itemLevel = true })
     T.eq(head.enchant:IsShown(), false)
-    T.eq(head.mark:IsShown(), true, "icons only: a small green mark")
+    T.eq(head.mark:IsShown(), true, "icons only: a small mark")
+end)
+
+T.test("character slots: enchants in the accent, and a soft No enchant where one could go", function()
+    local S, ns = lentWorld({ items = {
+        Head = CW.item("Lionheart Helm", { level = 66, enchantId = 2545, enchant = "+1% Dodge" }),
+        Legs = CW.item("Plain Pants", { level = 50 }),
+        Neck = CW.item("Pendant", { level = 50 }),
+        SecondaryHand = CW.item("Orb", { level = 50 }),
+        Ranged = CW.item("Totem", { level = 50 }) } })
+    local opts = { itemLevel = true, missingEnchants = true }
+    local function paint(key)
+        local h = S.frames[key]
+        S.Layout(h, 196, true)
+        S.Paint(h, ns.Gear.Read(key, 0.25), opts)
+        return h
+    end
+    local head, legs = paint("Head"), paint("Legs")
+    T.rgb({ head.enchant:GetTextColor() }, { DaylightUI.Style.Accent() }, "apart from green item names")
+    T.eq(legs.enchant:GetText(), "No enchant")
+    T.truthy(legs.enchant:IsShown())
+    T.rgb({ legs.enchant:GetTextColor() }, DaylightUI.Style.INK.OFF, "soft")
+    T.falsy(paint("Neck").enchant:IsShown(), "a neck takes none")
+    T.falsy(paint("SecondaryHand").enchant:IsShown(), "a held-in-off-hand item takes none")
+    T.falsy(paint("Ranged").enchant:IsShown(), "nor a relic")
+    opts.missingEnchants = false
+    T.falsy(paint("Legs").enchant:IsShown(), "switched off")
+    S.Layout(legs, S.ICON, false)
+    opts.missingEnchants = true
+    S.Paint(legs, ns.Gear.Read("Legs", 0.25), opts)
+    T.falsy(legs.mark:IsShown(), "icons only: no mark for a missing one")
 end)
 
 T.test("character slots: the enchant line drops the game's 'Enchanted:' in any language", function()
@@ -2220,6 +2250,16 @@ T.test("character currency: the transfer opens the game's own page, then ours co
     T.isnil(CW.state.panel.width, "no panel layout written on the way")
 end)
 
+T.test("character: the slots go back over the game's model at their own level", function()
+    local _, ns = load({ currency = currency() })
+    local page = openPage(ns, "TokenFrame")
+    T.eq(ns.Slots.lent, true)
+    page.pane.button:Click()
+    T.eq(ns.Slots.lent, false)
+    T.eq(PaperDollItemsFrame:GetFrameLevel(), 100, "the level the game gave it")
+    T.truthy(CharacterHeadSlot:GetFrameLevel() > CharacterModelScene:GetFrameLevel(), "a slot over the model")
+end)
+
 T.test("character currency: no transfer in combat", function()
     local _, ns = load({ currency = currency() })
     local page = openPage(ns, "TokenFrame")
@@ -2357,6 +2397,25 @@ T.test("character swap: picked before login, the game's window is dressed when i
     stub.RunTimers()
     T.eq(CharacterFrame:GetParent(), UIParent)
     T.truthy(stub.skins.Kit.ShellOf(CharacterFrame))
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- Seen in game with the game's window picked before login: the slots at level 4
+-- under their own holder at 100, so the model (50) took every hover.
+T.test("character swap: picked before login, the game's slots sit over its model", function()
+    load(nil, { skins = true, before = function()
+        _G.DaylightUIDB = { modules = { Character = { enabled = false } } }
+    end })
+    local head = CharacterHeadSlot
+    local ring = CreateFrame("Frame", nil, head)
+    for _, b in ipairs(PaperDollItemsFrame.EquipmentSlots) do b:SetFrameLevel(4) end
+    ring:SetFrameLevel(5)
+    stub.RunTimers()
+    ToggleCharacter("PaperDollFrame")
+    stub.RunTimers()
+    T.truthy(head:GetFrameLevel() > CharacterModelScene:GetFrameLevel(), "a slot over the model")
+    T.eq(head:GetFrameLevel(), PaperDollItemsFrame:GetFrameLevel() + 1, "one above its holder")
+    T.eq(ring:GetFrameLevel(), head:GetFrameLevel() + 1, "its own pieces move with it")
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
@@ -3319,6 +3378,7 @@ T.test("character slots: a long item name takes a second line", function()
     local P, ns = charPage({ items = { Head = CW.item("The Crown of the Mountain Kings", { quality = 4, level = 66 }),
                                         Neck = CW.item("Pendant", { quality = 3, level = 20 }) } })
     wrapMeasure()
+    DaylightUI:Set("Character", "missingEnchants", false)   -- no third line here
     local page = openChar(ns)
     local S = ns.Slots
     local long, short = S.frames.Head, S.frames.Neck
@@ -3338,6 +3398,7 @@ T.test("character slots: a long repair line takes a second row instead of ending
                                         Neck = CW.item("Pendant", { quality = 3, level = 20 }),
                                         Chest = CW.item("The Breastplate of the Long Name Mountain Kings", { quality = 4, level = 66, cur = 0, max = 100 }) } })
     wrapMeasure()
+    DaylightUI:Set("Character", "missingEnchants", false)   -- no third line here
     local page = openChar(ns)
     local S = ns.Slots
     local h, short, both = S.frames.Head, S.frames.Neck, S.frames.Chest
@@ -3359,6 +3420,7 @@ end)
 T.test("character slots: the item level in the icon's corner leaves the name its own, centered", function()
     local P, ns = charPage({ items = { Head = CW.item("Lionheart Helm", { quality = 4, level = 66 }),
                                         Chest = CW.item("Chest", { cur = 20, max = 100 }) } })
+    DaylightUI:Set("Character", "missingEnchants", false)   -- no third line here
     local page = openChar(ns)
     local h = ns.Slots.frames.Head
     T.eq(h.corner:GetText(), "", "off by default: no number in the corner")
@@ -3691,4 +3753,26 @@ T.test("character footer: the ammo you carry beside the durability, only with am
     local x = select(4, page.foot.ammo:GetPoint(1))
     T.eq(select(2, page.foot.ammo:GetPoint(1)), page.foot.dura, "right of the durability")
     T.truthy(x > 0)
+end)
+
+-- A hunter's ammo slot sits right beside the ranged icon. Its own name and
+-- count were drawn over the ranged weapon's name, seen in game.
+T.test("character slots: the ammo slot draws no words over the ranged weapon", function()
+    local S, ns = lentWorld({ usesAmmo = true, class = "HUNTER", items = {
+        Ranged = CW.item("Carapace Spine", { level = 58 }),
+        Ammo = CW.item("Jagged Arrow", { count = 3200, subType = "Arrow" }) } })
+    ns.Window.Open("character")
+    local ammo = S.frames.Ammo
+    T.eq(ammo:IsShown(), true)
+    print("PROBE", ammo.name:GetText(), ammo.name:IsShown(), ammo.line:GetText(), ammo.line:IsShown(), ammo.enchant:GetText(), ammo.enchant:IsShown(), ammo.mark and ammo.mark:IsShown(), S.frames.Ranged.name:GetText(), S.frames.Ranged.line:GetText())
+    T.falsy(ammo.line:IsVisible() and (ammo.line:GetText() or "") ~= "", "ammo count line hidden: " .. tostring(ammo.line:GetText()))
+    T.falsy(ammo.enchant:IsVisible() and (ammo.enchant:GetText() or "") ~= "", "no enchant line either")
+    -- New arrows while the window is open fade the slot's picture in, never its words.
+    CW.state.items[CW.SLOT_IDS.Ammo] = CW.item("Razor Arrow", { count = 200, subType = "Arrow" })
+    ns.Window.OnEvent(ns.window, "PLAYER_EQUIPMENT_CHANGED", 0)
+    stub.RunTimers()
+    stub.Advance(1)
+    T.eq(ammo.entry and ammo.entry.name, "Razor Arrow", "the new arrows were painted")
+    T.falsy(ammo.name:IsShown(), "ammo name stays hidden after a swap")
+    T.falsy(ammo.line:IsShown(), "ammo count stays hidden after a swap")
 end)

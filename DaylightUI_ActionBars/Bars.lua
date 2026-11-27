@@ -228,11 +228,34 @@ function Bars.RegisterFades(db)
                 return list
             end }
     end
+    -- The game's crossbar with its controller UI on. Only its alpha is set, which
+    -- the client allows on its protected bars in a fight too.
+    local pad = {}
+    DUI.Fade.Register{ key = "ActionBars.padBars", scope = "ActionBars", path = "padBarsFade", page = "ActionBars.bars",
+        frames = function()
+            local main = _G.GamepadMainActionBarFrame
+            if not (type(main) == "table" and DUI.Pad.On()) then return NONE end
+            pad[1] = main
+            return pad
+        end,
+        wake = function() return GetCursorInfo() ~= nil end }
     -- The Cooldown Manager layout.
     if ns.CdmRows then
         DUI.Fade.Register{ key = "ActionBars.cdm", scope = "ActionBars", path = "cdmFade",
             page = "ActionBars.cdm.layout", frames = ns.CdmRows.FadeFrames, paint = ns.CdmRows.PaintFade }
     end
+    -- The game's Request Stop / leave vehicle button. It has no fade of its own
+    -- (it's there when you need it), but "Fade everything on a flight path"
+    -- takes it along: the flight timer has its own stop button, and hovering
+    -- this one still brings it back.
+    local leave = {}
+    DUI.Fade.Register{ key = "ActionBars.leave", scope = "ActionBars",
+        frames = function()
+            local b = ns.Park and ns.Park.leave
+            if type(b) ~= "table" then return NONE end
+            leave[1] = b
+            return leave
+        end }
     local totems = {}
     -- The totem timers (the game's TotemFrame, placed by Totems.lua).
     DUI.Fade.Register{ key = "ActionBars.totemTimers", scope = "ActionBars", path = "totemTimersFade",
@@ -493,9 +516,6 @@ function Bars.Enable(mod)
     ns.UpgradeBars(DUI.DB.Active())      -- the login profile may differ from the one at load
     ns.module, ns.db = mod, mod.db
     ns.Migrate(mod.db)
-    for _, c in ipairs(DUI.InstallerPages.ClashesFor("ActionBars")) do
-        if c.what == "action bars" then DUI.WarnIfLoaded(c.addon, c.label, c.what) end
-    end
     ns.Skin.Wire()
     if mod.db.cooldowns then DUI.SafeCall(ns.Cooldowns.Apply) end
     -- Also with it off, so what it added to the game's layout comes back out.

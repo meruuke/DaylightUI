@@ -142,6 +142,22 @@ local function keepUnder(tip)
     if s.over then s.over:SetFrameLevel(level + 10) end
 end
 
+-- A clicked link's X, at the same spot as every window's (compact header: level
+-- with the first line). The rich card is pinned to the tooltip's corner at its
+-- own size, which can be smaller than the tooltip: the X goes on the card while
+-- it shows. A hidden card keeps its last size, so then the tooltip it is.
+-- cardShown is given by the card's own OnHide, where it may still say shown.
+function Tip.PlaceClose(tip, cardShown)
+    local close = tip.CloseButton
+    if type(close) ~= "table" then return end
+    if close.IsProtected and close:IsProtected() and InCombatLockdown() then return end
+    local card = ns.RichPanel and ns.RichPanel.Get and ns.RichPanel.Get(tip)
+    if card and cardShown == nil then cardShown = card:IsShown() end
+    if not cardShown then card = nil end
+    close:ClearAllPoints()
+    close:SetPoint("TOPRIGHT", card or tip, "TOPRIGHT", DUI.Win.CLOSE_X, DUI.Win.CloseY(true))
+end
+
 function Tip.Skin(tip)
     if type(tip) ~= "table" or skinned[tip] or type(tip.NineSlice) ~= "table" then return end
     -- Forbidden tooltips refuse any change (a forbidden CreateTexture at login,
@@ -157,7 +173,13 @@ function Tip.Skin(tip)
     skinned[tip] = s
     -- A clicked item's close button (ItemRefTooltip.CloseButton). Done here,
     -- not in Skins, since this module can run without it.
-    if type(tip.CloseButton) == "table" then DUI.Widgets.DressClose(tip.CloseButton) end
+    if type(tip.CloseButton) == "table" then
+        DUI.Widgets.DressClose(tip.CloseButton)
+        Tip.PlaceClose(tip)
+        -- The card re-places it as it comes and goes (Panel.For): a second link
+        -- clicked while the tooltip is open refills it without showing it again.
+        tip:HookScript("OnShow", function() Tip.PlaceClose(tip); C_Timer.After(0, function() Tip.PlaceClose(tip) end) end)
+    end
     -- First: a ghost still fading hands the rich card back before it's built.
     tip:HookScript("OnShow", function(self) Tip.ghostFrom[self] = ns.TipGhost.Cancel(self) end)
     tip:HookScript("OnShow", keepUnder)
@@ -537,6 +559,25 @@ end
 -- With the option on, unit tooltips only show in combat while Shift is held.
 function Tip.HideNow(tip)
     return cfg and cfg.hideInCombat and tip == GameTooltip and InCombatLockdown() and not IsShiftKeyDown()
+end
+
+-- Fishing is the one spell the game names Fishing in every rank, so the
+-- channel's name says whether the line is in.
+Tip.FISHING = 7620
+
+function Tip.Fishing()
+    local name = UnitChannelInfo("player")   -- your own channel stays plain
+    if type(name) ~= "string" or isSecret(name) then return false end
+    local fishing = C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(Tip.FISHING)
+    return type(fishing) == "string" and name == fishing
+end
+
+-- While the line is in, the only thing in the world under the mouse is
+-- almost always the bobber. Muted, never hidden: the game keeps it shown, so
+-- a click on the bobber still reels in.
+function Tip.OnObject(tip)
+    if not (cfg and cfg.hideBobber and tip == GameTooltip) then return end
+    if Tip.Fishing() then Tip.Mute(tip, "bobber") end
 end
 
 function Tip.OnUnit(tip)
@@ -997,6 +1038,112 @@ function Tip.PaintStats(text)
     return out
 end
 
+-- Food, drink, potions and bandages in a few words, the same idea as the
+-- short stats: "Use: Restores 530 health over 24 sec. Must remain seated
+-- while eating. If you spend at least 10 seconds eating you will become well
+-- fed and gain 5 Stamina for 15 min." reads "530 health over 24 sec" and
+-- "+5 Stamina (15 min)". English only, like the stats. Every sentence must
+-- be one it knows, or the line stays the game's.
+Tip.USE_RESTORES = {
+    { "^Restores ([%d,]+) health and ([%d,]+) mana over (%d+) sec$", "both" },
+    { "^Restores ([%d,]+%%?) (%a+) over (%d+) sec$", "over" },
+    { "^Restores ([%d,]+) to ([%d,]+) (%a+)$", "range" },
+    { "^Restores ([%d,]+%%?) (%a+)$", "now" },
+    { "^Heals ([%d,]+) damage over (%d+) sec$", "bandage" },
+}
+Tip.USE_SEATED = "^Must remain seated while %a+$"
+Tip.WELL_FED = L["Well Fed:"]
+Tip.USE_FED = "^If you spend at least %d+ seconds %a+ you will become well fed and gain (.+) for (%d+ %a+)$"
+
+-- A restored amount in the color of what it fills: health heal green, mana its power color.
+local function amount(n, what)
+    if what == "health" then return hex(Style.INK.GOOD) .. n .. "|r" end
+    if what == "mana" then return hex({ Style.PowerColor("MANA") }) .. n .. "|r" end
+end
+
+local function restored(sentence)
+    sentence = sentence:gsub("^Instantly r", "R")
+    for _, r in ipairs(Tip.USE_RESTORES) do
+        local a, b, c = sentence:match(r[1])
+        if a then
+            local kind = r[2]
+            if kind == "both" then
+                return string.format("%s health and %s mana over %s sec", amount(a, "health"), amount(b, "mana"), c)
+            elseif kind == "over" then
+                local n = amount(a, b)
+                return n and string.format("%s %s over %s sec", n, b, c)
+            elseif kind == "range" then
+                local n = amount(a .. "-" .. b, c)
+                return n and (n .. " " .. c)
+            elseif kind == "now" then
+                local n = amount(a, b)
+                return n and (n .. " " .. b)
+            else
+                return string.format("%s health over %s sec", amount(a, "health"), b)
+            end
+        end
+    end
+end
+
+local function titled(words)
+    return (words:gsub("(%a)([%w']*)", function(a, b) return a:upper() .. b end))
+end
+
+-- "5 Stamina and 5% increased experience from kills" -> "+5 Stamina, +5% XP",
+-- each in its color; "12 Stamina and Spirit" gives both 12. nil if any part is unknown.
+local fedParts = {}
+local function wellFed(gain, length)
+    local n, last = 0, nil
+    local list = gain:gsub(", and ", ", "):gsub(" and ", ", ")
+    for piece in list:gmatch("[^,]+") do
+        piece = piece:gsub("^%s+", ""):gsub("%s+$", "")
+        local part
+        local xp = piece:match("^(%d+)%% .*experience")
+        if xp then
+            part = hex({ Style.Pop() }) .. "+" .. xp .. "% XP|r"
+        else
+            local num, name = piece:match("^([%d,]+%%?) (%a[%a ]*)$")
+            if num then last = num else name = piece:match("^(%a[%a ]*)$") end
+            num = num or last
+            if not (num and name) then
+                for i = n, 1, -1 do fedParts[i] = nil end
+                return nil
+            end
+            name = titled(name)
+            part = hex(Tip.StatColor(name) or { Style.Pop() }) .. "+" .. num .. " " .. name .. "|r"
+        end
+        n = n + 1
+        fedParts[n] = part
+    end
+    local out = table.concat(fedParts, ", ", 1, n)
+    for i = n, 1, -1 do fedParts[i] = nil end
+    local secs = tonumber(length:match("^(%d+) sec$"))
+    if secs and secs >= 60 and secs % 60 == 0 then length = (secs / 60) .. " min" end
+    return n > 0 and (out .. " (" .. length .. ")") or nil
+end
+
+-- The words after "Use:" as (what it restores, the well fed buff or nil), or nil to leave the line.
+function Tip.ShortUse(rest)
+    if type(rest) ~= "string" then return nil end
+    local text = rest:gsub("%.%s*$", "")
+    local use, fed
+    for sentence in (text .. ". "):gmatch("(.-)%.%s+") do
+        if sentence:find(Tip.USE_SEATED) then
+            -- Said by every food and drink: dropped.
+        elseif not use and restored(sentence) then
+            use = restored(sentence)
+        else
+            local gain, length = sentence:match(Tip.USE_FED)
+            fed = not fed and gain and wellFed(gain, length) or nil
+            if not fed then return nil end
+        end
+    end
+    if use then return use, fed end
+end
+
+-- Whether item lines are shortened (the "Short, colored item stats" switch).
+function Tip.ShortsOn() return cfg and cfg.greenStats and true or false end
+
 -- An item's stat lines: green Equip sentences shortened, then those and the
 -- game's white "+10 Stamina" / "+5 Fire Resistance" lines colored.
 function Tip.ShortenStats(tip)
@@ -1009,7 +1156,16 @@ function Tip.ShortenStats(tip)
         -- first, so other lines cost no pattern match.
         local short = Tip.ShortStat(text)
         local painted = Tip.PaintStats(short or text)
-        if painted then
+        local useWord = type(ITEM_SPELL_TRIGGER_ONUSE) == "string" and ITEM_SPELL_TRIGGER_ONUSE or "Use:"
+        local use, fed
+        if not (short or painted) and type(text) == "string" and text:sub(1, #useWord) == useWord then
+            use, fed = Tip.ShortUse((text:sub(#useWord + 1):gsub("^%s+", "")))
+        end
+        if use then
+            local c = Style.INK.GOOD
+            line:SetText(useWord .. " " .. use .. (fed and ("\n" .. Tip.WELL_FED .. " " .. fed) or ""))
+            line:SetTextColor(c[1], c[2], c[3])
+        elseif painted then
             line:SetText(painted)
         elseif short then
             local c = Style.INK.GOOD
@@ -1121,10 +1277,14 @@ end
 function Tip.AddQuestPrice(tip, data)
     local price = Tip.QuestPrice(tip, data)
     if not price then return end
-    local text = ("%s: %s"):format(L["Vendor"], DUI.Widgets.Money(price))
+    local coins = DUI.Widgets.Money(price)
+    local text = ("%s: %s"):format(L["Vendor"], coins)
     if Tip.HasLine(tip, text) then return end
     local c = Style.INK.VALUE
     tip:AddLine(text, c[1], c[2], c[3])
+    -- Marked as the sell price, so the Rich card puts it at its foot by what
+    -- it is: another addon's line can start with the same word.
+    ns.Rich.Piece(tip, { kind = "row", label = L["Vendor"], value = coins, sell = true })
 end
 
 -- An item: a quest reward's sell price, its level (gear only) with Item level
@@ -2006,6 +2166,7 @@ function Tip.Build(mod)
             for _, kind in ipairs({ "Object", "Corpse" }) do
                 if types and types[kind] then
                     TDP.AddTooltipPostCall(types[kind], function(tip, data)
+                        if kind == "Object" then DUI.SafeCall(Tip.OnObject, tip) end
                         DUI.SafeCall(Tip.PluginsShown, "world", tip, data)
                     end)
                 end

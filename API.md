@@ -46,12 +46,12 @@ wrong" below).
 
 ```lua
 local API = DaylightUI.API
-print(API.major, API.minor)   -- 1, 13
+print(API.major, API.minor)   -- 1, 16
 ```
 
 - `minor` goes up when something is added. Old calls keep working.
 - `major` goes up only when something promised here changes or goes away.
-- Register as a plugin with the version you use: `needs = { 1, 13 }` for the loot roll cards (1.13), `{ 1, 12 }` for the rich tooltip pieces (1.12), `{ 1, 11 }` for quest menu rows (1.11), `{ 1, 10 }` for your own setup guide (1.10), `{ 1, 9 }` for glow styles (1.9), `{ 1, 8 }` for frame styles (1.8), `{ 1, 4 }` for Paint on nameplates and
+- Register as a plugin with the version you use: `needs = { 1, 16 }` for Proc Alerts (1.16), `{ 1, 15 }` for the Auction House prices (1.15), `{ 1, 14 }` for the Cooldown Manager's state and watchers (1.14), `{ 1, 13 }` for the loot roll cards (1.13), `{ 1, 12 }` for the rich tooltip pieces (1.12), `{ 1, 11 }` for quest menu rows (1.11), `{ 1, 10 }` for your own setup guide (1.10), `{ 1, 9 }` for glow styles (1.9), `{ 1, 8 }` for frame styles (1.8), `{ 1, 4 }` for Paint on nameplates and
   their cast bars (1.4), `{ 1, 3 }` for Paint, hooks, texts and settings (1.3), `{ 1, 2 }` for the vendor's tiles, the profession window and font rows (1.2),
   `{ 1, 1 }` for the rest. If the player's Daylight UI is too old, or a different major, your plugin
   stays off with one line in chat instead of an error.
@@ -480,6 +480,24 @@ local me = API.For("MyAddon")
 | `me.AddOptionsGroup(pageId, group, after)` | Your settings on one of Daylight UI's pages (below). |
 | `me.On(event, fn)` | `API.On` with your name filled in. |
 
+### Cooldown groups that follow your mover
+
+A frame you register with `me.RegisterMover` can be picked as a Cooldown Manager group's
+**Attach to** frame, in the Cooldown Manager's layout editor (Edit layout on its page, or `/cdm`).
+The group is then placed beside your frame whenever the Cooldown Manager lays out (on aura changes)
+and when your frame is moved in Unlock Frames. If your own code moves the frame, the group catches
+up at the next layout. Your frame is listed in Attach to under **Other**, by the label you gave it.
+
+- It can be picked only while your frame has a size on screen (a width and a height above 0).
+  Picking it while it has none does nothing. A hidden frame that has a size can be picked, and
+  groups still follow it.
+- If you anchor your mover to a Cooldown Manager piece (a frame of kind `"cdmpiece"`), or to
+  anything that hangs from one, groups attached to your mover would make a loop. They sit at their
+  saved spot instead, and picking your frame for another group does nothing.
+- While a group attached to your mover is selected in the editor, your frame gets the editor's ring
+  and name tag. Daylight UI doesn't show your frame for you if it's hidden. Only the Personal
+  Display, party and raid frames are shown while they're edited.
+
 ### Skin another addon's window
 
 ```lua
@@ -839,23 +857,44 @@ that needs one). The tour is offered after them.
 - `me.ShowInstaller()` opens it again (from a command of yours, say). General > Plugins has a
   "Setup guide" button for it too. False when the window is busy or no page can show.
 
-## The Cooldown Manager (1.7)
+## The Cooldown Manager (1.7, 1.14)
 
 | Call | What it does |
 |---|---|
-| `API.GetCooldownPiece(spellID)` | The frame of the piece showing that spell, while it's placed and shown. |
-| `API.CooldownPieceInfo(frame)` | `{ key, spellID, shape ("icon" or "bar"), drawnBy }`. |
+| `API.GetCooldownPiece(spellID)` | The frame of the piece showing that spell, while it's placed and shown. Any rank of the spell finds it, and so does the piece's key. |
+| `API.CooldownPieceInfo(frame)` | `{ key, spellID, shape ("icon" or "bar"), drawnBy, chain }`. `chain` (1.14) is the key of the first piece of its group, so pieces with the same `chain` sit together. |
+| `API.CooldownState(what)` (1.14) | What a shown piece reads right now, by its frame, a spell id (any rank) or its key. A fresh table: `key`, `spellID`, `shape`, `drawnBy`, `chain`, `ready` and `onCooldown` (a real cooldown, never the global one), `usable` (castable now), `noPower` (only short of power), `proc` (the game's spell alert is on it), `buffUp` (its buff or debuff, as the game's own Cooldown Manager sees it), `glowing` (one of Daylight UI's glows is on). `nil` for a spell with no piece on show. |
+| `API.OpenCooldownEditor()` (1.14) | Opens the layout editor, as `/cdm` does. `false` in a fight or with Daylight UI's Cooldown Manager off. |
+| `me.WatchCooldown(what, handlers)` (1.14) | One spell's moments in one call. `what` is a spell id (any rank) or a piece key. `handlers` can hold `ready`, `started`, `usable`, `buffUp`, `buffDown` (each gets spellID, key), `proc` (spellID, key, on), and `changed(state)`, called once at once with `API.CooldownState`'s table (if the piece shows) and again after each moment. Returns a handle for `API.Off`, or `nil` for an unknown moment or nothing to watch. |
 
 Each placed piece is a frame of kind `"cdmpiece"` (its `unit` is the piece's key): `FrameMade`,
 `FrameUnitChanged`, `FrameRemoved` as pieces are placed and taken away, and `API.Attach` and
-`API.Glow` work on it. Events: `CooldownStarted` and `CooldownReady` (spellID, key), the moments
-Daylight UI's own light runs. Whatever draws inside the piece (often the game's own icon) is not
-yours to change.
+`API.Glow` work on it. Whatever draws inside the piece (often the game's own icon) is not yours to
+change: draw on the `API.Attach` holder.
+
+Events, each with the spell id and the piece's key: `CooldownStarted` and `CooldownReady` (1.7),
+the moments Daylight UI's own ready light runs; and since 1.14 `CooldownUsable` (it turns castable
+while off cooldown: a block for Revenge, a low target for Execute; not just rage coming back),
+`CooldownProc` (the game's spell alert came on or went off, with `true` or `false`; few spells
+have one on WoW: Forever), `CooldownBuffUp` and `CooldownBuffDown` (as the game's own item says,
+so a debuff on your target counts, and it follows a target swap).
+
+Every answer is a plain value, never a secret one, so you can compare them and use them in an `if`
+in a fight. Where the game won't say (it keeps some values secret), the answer is `nil`, never a
+guess. A buff-only piece hides while its buff is down (unless its group shows missing buffs), so
+it has no piece on show then: `CooldownState` is `nil`, and `CooldownBuffDown` came just before.
 
 ```lua
-me.On("CooldownReady", function(spellID)
-    if spellID == 12294 then API.Glow(API.GetCooldownPiece(12294), true) end
-end)
+local me = API.For("MyPlugin")
+me.WatchCooldown(12294, {   -- Mortal Strike, any rank
+    ready = function() API.Glow(API.GetCooldownPiece(12294), true) end,
+    started = function() API.Glow(API.GetCooldownPiece(12294), false) end,
+    changed = function(state)
+        if state and state.usable and not state.onCooldown then
+            -- castable right now
+        end
+    end,
+})
 ```
 
 ## The bags (1.7)
@@ -1012,7 +1051,7 @@ with the error said once. Call `AddGlowStyle` again with the same key to change 
 
 | Call | What it does |
 |---|---|
-| `API.GetFrame(name)` | Daylight UI's big frames by a fixed name, to dock to or stay clear of: `"infopanel"`, `"minimap"`, `"meter"`, `"threat"`, `"databar"`, `"chat"`, `"questtracker"`, `"bags"`, `"bank"`, `"afk"`, `"npc"`, and since 1.13 `"rolls"` (the loot roll cards' holder) (`API.FRAME_NAMES`). `nil` while that part is off or not made yet. |
+| `API.GetFrame(name)` | Daylight UI's big frames by a fixed name, to dock to or stay clear of: `"infopanel"`, `"minimap"`, `"meter"`, `"threat"`, `"databar"`, `"chat"`, `"questtracker"`, `"bags"`, `"bank"`, `"afk"`, `"npc"`, since 1.13 `"rolls"` (the loot roll cards' holder), and since 1.16 `"procs"` (the area round the character the proc flares hang in) (`API.FRAME_NAMES`). `nil` while that part is off or not made yet. |
 | `API.GetMoverFrame(key)` | The frame placed under a mover key: `"unitframes.player"`, `"actionbars.main"`, `"infopanel"`, yours `"plugin.<name>.<key>"`. |
 | `API.IsUnlocked()` | Unlock mode is on. |
 | `me.IsPreviewing(key)` | Your part should show its sample now: unlock mode, or test mode with its test part ticked. |
@@ -1030,6 +1069,61 @@ Daylight UI's coins, inline icons cropped. To pick the pieces yourself, see [Too
 
 Event `FramePlaced(key)`: a frame was put on its spot by its mover (a profile, a move). Follow a
 frame here instead of hooking its `SetPoint`.
+
+## Auction House prices (1.15)
+
+`DaylightUI.AuctionPrices` is what the Auction House module knows, published for addons that
+price things: a profession planner, a spreadsheet, a shopping list.
+
+| Call | What it gives |
+|---|---|
+| `AuctionPrices.Item(id)` | `price, seenAt`: what one sells for, and when it was seen. The price is the newest sighting's lowest buyout while it is fresh (12 hours), the usual market value after that |
+| `AuctionPrices.Offer(id)` | `price, seenAt, quantity`: the same sighting, and how many were for sale |
+| `AuctionPrices.ScannedAt()` | When anything was last seen at the Auction House, nil before the first scan |
+| `AuctionPrices.Vendor(id)` | What a merchant sells one for, as last seen at one |
+| `AuctionPrices.Soulbound(id)` | `true` for an item that can never be sold |
+| `AuctionPrices.CUT` | The house's share of a sale: `0.05` |
+
+Each call answers `nil` for an item never seen, and none of them makes a table to read
+(`Offer` returns three numbers). `DaylightUI.On("AuctionPricesChanged", fn)` says when a
+number moved, after a scan, a search or a browse.
+
+The table is absent while the Auction House module is off, and while DaylightMogul owns the
+Auction House: check once and stay quiet without it, the way a profession's profit display
+does.
+
+## Proc Alerts (1.16)
+
+Proc Alerts lights a painted flare around the character when a proc is ready. These calls let you
+read and follow them, and show alerts of your own in the same flares.
+
+| Call | What it does |
+|---|---|
+| `API.ProcAlerts()` | The procs this character can be alerted to: its class's, then the gear ones. A fresh list of `{ key, name, spellID, itemID, design, enabled, drawnBy }`. `name` is in the player's language; `design` is the flare the player picked; `drawnBy` is `"daylight"`, or `"game"` for a buff the client shows by itself (Daylight UI never sees when one of those comes, so it has no state and no events). |
+| `API.ProcState(key)` | A flare that's up right now: `{ key, stacks, left, dur, test }`. `left` and `dur` are seconds (`nil` for a proc with no timer), `test` is `true` for a flare shown by the options, test mode or `TestProcAlert`. `nil` when it isn't up. |
+| `API.TestProcAlert(key, seconds)` | Shows a proc's flare for `seconds` (10 by default), like the options' Show button: no sound and no events. `false` for an unknown key. |
+| `me.WatchProc(key, handlers)` | One proc's moments in one call: `shown`, `renewed` (each gets key, stacks), `hidden` (key), and `changed(state)`, called once at once with `API.ProcState`'s table (or `nil`) and again after each moment. Returns a handle for `API.Off`, or `nil` for an unknown moment. |
+| `me.AddProcAlert(key, spec)` | An alert of your own. `spec`: `name`, `design` (one of the twelve: `"wings"`, `"talons"`, `"pillars"`, `"shards"`, `"flames"`, `"bolt"`, `"comet"`, `"crown"`, `"sigil"`, `"sun"`, `"ring"`, `"wave"`; `"sun"` by default), `anim` (`"strike"`, `"breathe"`, `"pulse"`, `"impact"`, `"flash"`, `"still"`; `"pulse"` by default), `stacks` (the most it can have: fewer show dimmer), `sound` (a sound file id, or `"none"`). Calling it again changes the look. Everyone else sees its key as `"<your plugin>:<key>"`. `false` for a design or animation that doesn't exist. |
+| `me.ShowProcAlert(key, info)` | Shows your alert, or updates it when it's up. `info`: `left` and `dur` (seconds: the flare shortens as time runs out), `stacks`. It plays its sound once as it lands. You decide when it goes: Daylight UI never hides it, except when the player turns Proc Alerts off. |
+| `me.HideProcAlert(key)` | Takes your alert away. `true` when it was up. |
+
+Events: `ProcShown` and `ProcRenewed` (key, stacks: renewed means its time started over or its
+stacks changed) and `ProcHidden` (key), for every flare Daylight UI shows for a real proc and for
+plugins' alerts; never for a test flare, and never when the player only changes a flare's look
+while it's up.
+
+The flares are Daylight UI's own: they're placed in lanes so two never overlap, colored by the
+player's settings, and pooled (a frame is reused for another proc), so there's no flare frame to
+hold on to. To sit beside them, use `API.GetFrame("procs")`, the area they hang in. Every call
+answers `nil` or `false` while Proc Alerts is off, and its answers are plain values, safe in a fight.
+
+```lua
+local me = API.For("MyPlugin")
+me.AddProcAlert("lust", { name = "Bloodlust", design = "crown", anim = "flash" })
+me.On("ProcShown", function(key) print(key, "is up") end)
+-- When your own trigger fires:
+me.ShowProcAlert("lust", { left = 40, dur = 40 })
+```
 
 ## A plugin of your own
 
@@ -1063,11 +1157,20 @@ AddOns list and on download sites what needs Daylight UI.
 ```
 ## Title: Raid Notes (DaylightUI Plugin)
 ## Dependencies: DaylightUI
+## Category: DaylightUI Plugins
+## Group: RaidNotes
 ```
 
 Inside Daylight UI the tag is left off (your section already sits under Plugins), so this one
 shows as "Raid Notes". A plugin without the tag still runs, but General > Plugins says its name
 doesn't follow the rule.
+
+`Category` puts every plugin under one "DaylightUI Plugins" heading in the game's AddOns list, next
+to Daylight UI's own. `Group` is your addon's folder name, spelled exactly. The game only reads
+`Category` from an addon at the top of its group, and it may tuck an addon that depends on
+DaylightUI under DaylightUI's row on its own (more so when the names look alike), where the
+heading is ignored. Naming your own folder keeps your plugin on its own row. General > Plugins
+says so when either line is missing.
 
 ## The game's rules still apply
 

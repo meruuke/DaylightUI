@@ -511,6 +511,32 @@ local function openFriends()
     if InCombatLockdown() or padUI() then return end
     call(_G.ToggleFriendsFrame)
 end
+-- The game's clock window (alarm and stopwatch). Its own minimap clock sits in
+-- the hidden minimap cluster, so Daylight UI's clocks take its click: open the
+-- window, or turn a ringing alarm off. Out of a fight that click is the game
+-- button's own (DT.WindowOver); in one, the window isn't protected, so it is
+-- opened from here, except on a controller.
+local function alarmRinging()
+    local ringing = _G.TimeManager_IsAlarmFiring
+    return type(ringing) == "function" and ringing() == true
+end
+
+function DT.ClockClick()
+    if padUI() then return end
+    if alarmRinging() then
+        DUI.Sound.Play("toggle")
+        DUI.SafeCall(_G.TimeManager_TurnOffAlarm)
+    elseif type(_G.ToggleTimeManager) == "function" then
+        DUI.SafeCall(_G.ToggleTimeManager)
+    end
+end
+
+function DT.ClockHint()
+    if padUI() and (InCombatLockdown() or not DT.OpenClick("clock")) then return end
+    gap()
+    hint(alarmRinging() and L["Click: turn the alarm off"] or L["Click: alarm and stopwatch"])
+end
+
 local function openMap()
     if InCombatLockdown() then return end
     call(api("C_Map", "OpenWorldMap"))
@@ -722,12 +748,15 @@ function DT.ReadProfessions()
     for i = 1, 7 do
         local idx = list[i]
         if idx then
-            local name, _, rank, max = call(_G.GetProfessionInfo, idx)
+            local name, _, rank, max, _, _, skillLine = call(_G.GetProfessionInfo, idx)
             if type(name) == "string" then
-                out[#out + 1] = { name = name, rank = num(rank), max = num(max), primary = i <= 2 }
+                out[#out + 1] = { name = name, rank = num(rank), max = num(max), primary = i <= 2, skillLine = num(skillLine) }
             end
         end
     end
+    -- In the order the player dragged the profession window's tabs into.
+    local Data = DUI.Craft and DUI.Craft.Data
+    if Data and Data.Ordered then DUI.SafeCall(Data.Ordered, out) end
     return out
 end
 
@@ -836,7 +865,8 @@ end
 -- runs the game's code as the player's own press, so the window opens untainted.
 -- A hidden button still takes the click (the chat hides the quick join one,
 -- which opens friends while it has no toast up).
-DT.OPENS = { character = "CharacterMicroButton", bags = "MainMenuBarBackpackButton", social = "QuickJoinToastButton" }
+DT.OPENS = { character = "CharacterMicroButton", bags = "MainMenuBarBackpackButton", social = "QuickJoinToastButton",
+             clock = "TimeManagerClockButton" }
 -- The /click for a window, or nil when the game didn't make its button.
 function DT.OpenClick(kind)
     local name = DT.OPENS[kind]
@@ -1208,7 +1238,9 @@ DT.TEXTS = {
                 local h, m = GetGameTime()
                 line(L["Server"], DT.FormatClock(h, m, twentyFour, sec))
             end
-        end },
+            DT.ClockHint()
+        end,
+        click = function() DT.ClockClick() end, opens = "clock" },
     xp = { name = "Experience", events = { "PLAYER_XP_UPDATE", "PLAYER_LEVEL_UP", "UPDATE_EXHAUSTION" },
         text = function()
             local pct = DT.ReadXP()

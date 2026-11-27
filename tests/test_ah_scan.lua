@@ -18,7 +18,7 @@ local function load(auctions, opts)
     local M = AHW.Mog({
         ruleset = opts.ruleset,
         ah = { auctions = auctions or {}, neverCache = opts.neverCache, missing = opts.missing,
-               itemSpacing = opts.itemSpacing, replicateCooldown = opts.replicateCooldown,
+               itemSpacing = opts.itemSpacing, dropAsks = opts.dropAsks, staleRows = opts.staleRows, replicateCooldown = opts.replicateCooldown,
                replicateLate = opts.replicateLate, replicateEarly = opts.replicateEarly,
                replicateBlank = opts.replicateBlank },
         before = function()
@@ -144,7 +144,9 @@ end)
 -- Items the game doesn't know yet
 -- ---------------------------------------------------------------------
 
-T.test("uncached_items_are_waited_for", function()
+T.test("uncached_gear_is_waited_for", function()
+    -- cloth can't carry a suffix: priced by its itemID at once, no load asked;
+    -- the blade can, so its link is waited for
     local M = load({
         { itemID = WOOL, count = 10, buyout = 3000, cached = false },
         { itemID = WOOL, count = 2, buyout = 500, cached = false },
@@ -156,8 +158,8 @@ T.test("uncached_items_are_waited_for", function()
     T.eq(M.Scan.Full(), true)
     AHW.Settle()
     local now = M.Game.Now()
-    T.eq(AHW.Calls("RequestLoadItemDataByID"), 2, "one load per item, not per row")
-    T.deq(M.Store.Seen(RKEY, "2592"), { min = 250, t = now, q = 12 }, "priced after the load")
+    T.eq(AHW.Calls("RequestLoadItemDataByID"), 1, "only the gear is loaded")
+    T.deq(M.Store.Seen(RKEY, "2592"), { min = 250, t = now, q = 12 }, "the cloth priced without its data")
     T.deq(M.Store.Seen(RKEY, "15210:-15"), { min = 4000, t = now, q = 1 }, "the link after the load carries the suffix")
     T.deq(M.Store.Seen(RKEY, "15210"), { min = 4000, t = now, q = 1 })
     T.deq(M.Store.Seen(RKEY, "2589"), { min = 100, t = now, q = 20 })
@@ -172,7 +174,7 @@ end)
 
 T.test("uncached_items_give_up", function()
     local M = load({
-        { itemID = WOOL, count = 10, buyout = 3000, cached = false },
+        { itemID = WOOL, count = 10, buyout = 3000, cached = false, classID = 4 },
         { itemID = LINEN, count = 20, buyout = 2000 },
     }, { neverCache = { [WOOL] = true } })
     local changes = watchChanges(M)
@@ -193,10 +195,10 @@ T.test("uncached_items_give_up", function()
     T.eq(#stub.errors, 0, table.concat(stub.errors, "\n"))
 end)
 
--- n uncached items (20001 ...), one row each at 100c.
+-- n uncached pieces of gear (20001 ...), one row each at 100c.
 local function cold(n, first)
     local out = {}
-    for i = 1, n do out[i] = { itemID = (first or 20000) + i, count = 1, buyout = 100, cached = false } end
+    for i = 1, n do out[i] = { itemID = (first or 20000) + i, count = 1, buyout = 100, cached = false, classID = 4 } end
     return out
 end
 
@@ -219,7 +221,7 @@ T.test("a_stalled_cache_gives_up_after_ten_quiet_seconds", function()
     -- four items load 6 s apart (each gap under ITEM_WAIT), the fifth never:
     -- the wait ends ITEM_WAIT after the last load, not ITEM_WAIT after the first ask
     local auctions = cold(4)
-    auctions[5] = { itemID = WOOL, count = 1, buyout = 100, cached = false }
+    auctions[5] = { itemID = WOOL, count = 1, buyout = 100, cached = false, classID = 4 }
     local M = load(auctions, { itemSpacing = 6, neverCache = { [WOOL] = true } })
     local changes = watchChanges(M)
     AHW.Open()
@@ -239,25 +241,78 @@ T.test("a_stalled_cache_gives_up_after_ten_quiet_seconds", function()
     T.eq(#stub.errors, 0, table.concat(stub.errors, "\n"))
 end)
 
-T.test("the_wait_for_items_is_capped", function()
-    -- forty items load 5 s apart (200 s): progress never stops, but the wait
-    -- ends ITEM_WAIT_MAX (120 s) after the first item was asked for
+T.test("a_long_cold_cache_is_waited_out", function()
+    -- forty pieces of gear load 5 s apart (200 s in all): loads keep coming,
+    -- so none is given up, however long it takes
     local M = load(cold(40), { itemSpacing = 5 })
-    T.eq(M.Game.ITEM_WAIT_MAX, 120)
     local changes = watchChanges(M)
     AHW.Open()
     T.eq(M.Scan.Full(), true)
     AHW.Step()
-    local t0 = GetTime()
-    AHW.Advance(t0 + M.Game.ITEM_WAIT_MAX - 0.1 - GetTime())
-    T.eq(#changes, 0, "still loading under the cap")
-    AHW.Advance(0.2)
-    T.eq(#changes, 1, "the cap ends the wait")
-    -- loads at +0.25, 5.25 ... 115.25: 24 came in time, 16 didn't
-    T.eq(T.count(items(M)), 24)
-    T.eq(said("Full scan done: 24 items priced, 16 skipped (the game hadn't loaded them; scan again later)."), 1)
+    AHW.Advance(150)
+    T.eq(#changes, 0, "still loading at 150 s")
+    AHW.Advance(60)
+    T.eq(#changes, 1)
+    T.eq(T.count(items(M)), 40, "every item priced")
+    T.eq(said("Full scan done: 40 items priced."), 1, "nothing skipped")
+    T.eq(#stub.errors, 0, table.concat(stub.errors, "\n"))
+end)
+
+T.test("a_cold_cache_of_goods_is_priced_without_loading", function()
+    -- a first scan on a big AH: 7,000 trade goods, potions and recipes the
+    -- game hasn't loaded and never will in time; none can carry a suffix,
+    -- so the row's itemID prices it and nothing is asked or skipped
+    local auctions = {}
+    local never = {}
+    for i = 1, 7000 do
+        auctions[i] = { itemID = 50000 + i, count = 5, buyout = 500, cached = false, classID = (i % 3 == 0) and 9 or 7 }
+        never[50000 + i] = true
+    end
+    local M = load(auctions, { neverCache = never })
+    AHW.Open()
+    T.eq(M.Scan.Full(), true)
     AHW.Settle()
-    T.eq(#changes, 1, "loads after the end change nothing")
+    T.eq(AHW.Calls("RequestLoadItemDataByID"), 0, "nothing to load")
+    T.eq(T.count(items(M)), 7000)
+    T.deq(M.Store.Seen(RKEY, "50001"), { min = 100, t = M.Game.Now(), q = 5 })
+    T.eq(said("Full scan done: 7,000 items priced."), 1, "nothing skipped")
+    T.eq(#stub.errors, 0, table.concat(stub.errors, "\n"))
+end)
+
+T.test("an_item_whose_load_was_let_fall_is_asked_again", function()
+    -- the client drops the first two asks for one piece of gear (Auctionator
+    -- asks again for anything still loading): it is asked again when
+    -- nothing has come for a while, and priced
+    local M = load({
+        { itemID = BLADE, count = 1, buyout = 4000, cached = false, classID = 2 },
+        { itemID = LINEN, count = 20, buyout = 2000 },
+    }, { dropAsks = { [BLADE] = 2 } })
+    AHW.Open()
+    T.eq(M.Scan.Full(), true)
+    AHW.Settle()
+    AHW.Advance(M.Game.ITEM_WAIT + 1)
+    AHW.Settle()
+    T.truthy(AHW.Calls("RequestLoadItemDataByID") >= 3, "asked again")
+    T.eq(said("Full scan done: 2 items priced."), 1, "nothing skipped")
+    T.eq(#stub.errors, 0, table.concat(stub.errors, "\n"))
+end)
+
+-- A full scan that never ended: an item arrived, its row still read as not
+-- known, so it was waited for again, asked for again two seconds later, and
+-- each answer started the quiet clock over.
+T.test("a_row_still_unknown_after_its_item_arrived_is_priced_by_its_id", function()
+    local M = load({
+        { itemID = BLADE, count = 1, buyout = 4000, cached = false, classID = 2 },
+        { itemID = LINEN, count = 20, buyout = 2000 },
+    }, { staleRows = { [BLADE] = true } })
+    AHW.Open()
+    T.eq(M.Scan.Full(), true)
+    for _ = 1, 10 do
+        AHW.Settle()
+        AHW.Advance(M.Game.ITEM_WAIT)
+    end
+    AHW.Settle()
+    T.eq(said("Full scan done: 2 items priced."), 1, "the scan ends with the blade priced")
     T.eq(#stub.errors, 0, table.concat(stub.errors, "\n"))
 end)
 
@@ -275,7 +330,7 @@ T.test("the_done_line_has_a_sentence_for_every_count", function()
         for i = 1, c[1] do auctions[#auctions + 1] = { itemID = 30000 + i, count = 1, buyout = 100 } end
         local never = {}
         for i = 1, c[2] do
-            auctions[#auctions + 1] = { itemID = 40000 + i, count = 1, buyout = 100, cached = false }
+            auctions[#auctions + 1] = { itemID = 40000 + i, count = 1, buyout = 100, cached = false, classID = 4 }
             never[40000 + i] = true
         end
         local M = load(auctions, { neverCache = never })
@@ -289,9 +344,9 @@ end)
 
 T.test("rows_of_an_item_that_cant_load_are_skipped", function()
     -- one WOOL row in the first slice, another after the game says no data is coming
-    local auctions = { { itemID = WOOL, count = 10, buyout = 3000, cached = false } }
+    local auctions = { { itemID = WOOL, count = 10, buyout = 3000, cached = false, classID = 4 } }
     for _, a in ipairs(many(300, 300)) do auctions[#auctions + 1] = a end
-    auctions[#auctions + 1] = { itemID = WOOL, count = 5, buyout = 1000, cached = false }
+    auctions[#auctions + 1] = { itemID = WOOL, count = 5, buyout = 1000, cached = false, classID = 4 }
     local M = load(auctions, { neverCache = { [WOOL] = true } })
     local changes = watchChanges(M)
     AHW.Open()
@@ -350,6 +405,27 @@ T.test("slices_per_frame", function()
         T.eq(row.key, row.base)
     end
     T.eq(AHW.Frame(), 0, "nothing scheduled after the end")
+end)
+
+-- Rows that are slow to read (an item the game has to load, a huge house):
+-- a frame stops after SLICE_MS of them, not only after SLICE rows. Reading
+-- 250 a frame whatever they cost made frames of 50 to 100 ms in game.
+T.test("a_slow_row_ends_the_frame_early", function()
+    local M = load(many(600, 300))
+    local was = _G.debugprofilestop
+    _G.debugprofilestop = function() return AHW.Calls("GetReplicateItemInfo") * 1.0 end   -- 1 ms a row
+    AHW.Open()
+    local got
+    T.eq(M.Replicate.Start(function(rows) got = rows end), true)
+    AHW.Step()   -- the list arrives, and the first frame
+    local first = AHW.Calls("GetReplicateItemInfo")
+    T.truthy(first >= 1 and first <= M.Game.SLICE_MS + 1, "about SLICE_MS rows the first frame, got " .. first)
+    AHW.Frame()
+    T.truthy(AHW.Calls("GetReplicateItemInfo") - first <= M.Game.SLICE_MS + 1, "and the next")
+    _G.debugprofilestop = was
+    AHW.Settle()
+    T.truthy(got, "every row still read")
+    T.eq(#got, 300)
 end)
 
 T.test("saving_is_sliced_too", function()
@@ -767,6 +843,70 @@ T.test("a Sell search pairs the suffix, then the scan and the tooltip price the 
     T.eq(M.Items.Key(DEFENDER), "7418:14333")
     local rows = M.Tooltip.Lines(DEFENDER, false, 1)
     T.eq(rows and rows[1][2], DaylightUI.Widgets.Money(5090), "the Defender's own 50s 90c")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- The game's tooltip for an item key, as a link with the suffix's bonus in it.
+-- Bonuses are mostly the AH number less 1580 but not always: 14300 and 14298
+-- trade places (12718 and 12720).
+local function keyTips(answer)
+    local had = _G.C_TooltipInfo
+    local asked = 0
+    _G.C_TooltipInfo = { GetItemKey = function(itemID, level, suffix)
+        asked = asked + 1
+        local bonus = answer and answer(suffix)
+        if bonus == nil then
+            bonus = (suffix == 14300 and 12718) or (suffix == 14298 and 12720) or suffix - 1580
+        end
+        if bonus == false then return nil end
+        return { hyperlink = "|cnIQ2:|Hitem:" .. itemID .. "::::::::27:1491:::1:" .. bonus .. "::::::|h[Phalanx Girdle]|h|r" }
+    end }
+    return function() _G.C_TooltipInfo = had end, function() return asked end
+end
+
+-- A suffixed green dropped and hovered in the loot window: the first time a
+-- link's suffix isn't paired, every suffix is paired through the game's item
+-- key tooltips, so the full scan files each one under its own price.
+T.test("an unpaired suffix pairs every suffix, so a looted green gets its own price", function()
+    local M = girdleLoad()
+    local undo, asked = keyTips()
+    local key = M.Items.Key(DEFENDER)
+    T.eq(key, "7418:14333", "the loot window's link is placed at once")
+    T.eq(M.DB.Table("suffixBonus")["12753"], 14333)
+    T.eq(M.DB.Table("suffixBonus")["12718"], 14300, "taken from the game, never computed")
+    T.eq(M.DB.Table("suffixBonus")["12875"], 14455)
+    local n = asked()
+    M.Items.Key("|cnIQ2:|Hitem:7418::::::::27:1491:::1:99999::::::|h[Phalanx Girdle of Nothing]|h|r")
+    T.eq(asked(), n, "asked once a session, not on every unknown bonus")
+    AHW.Open()
+    T.eq(M.Scan.Full(), true)
+    AHW.Settle()
+    T.eq(M.Store.Min(RKEY, "7418:14333"), 5090, "the Defender's own price")
+    T.eq(M.Store.Min(RKEY, "7418:14455"), 1695)
+    local rows = M.Tooltip.Lines(DEFENDER, false, 1)
+    T.eq(rows and rows[1][2], DaylightUI.Widgets.Money(5090), "the looted Defender shows 50s 90c")
+    undo()
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("item key tooltips that disagree with a known pair teach nothing", function()
+    local M = girdleLoad()
+    M.DB.Table("suffixBonus")["12875"] = 14455
+    local undo = keyTips(function(suffix) if suffix == 14455 then return 11111 end end)
+    local _, _, unplaced = M.Items.Key(DEFENDER)
+    T.eq(unplaced, true, "no price rather than a pair the game contradicted")
+    T.isnil(M.DB.Table("suffixBonus")["12753"])
+    T.isnil(M.DB.Table("suffixBonus")["11111"])
+    undo()
+end)
+
+T.test("item key tooltips that answer nothing leave the suffix unplaced", function()
+    local M = girdleLoad()
+    local undo = keyTips(function() return false end)
+    local _, _, unplaced = M.Items.Key(DEFENDER)
+    T.eq(unplaced, true)
+    T.isnil(next(M.DB.Table("suffixBonus")))
+    undo()
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 

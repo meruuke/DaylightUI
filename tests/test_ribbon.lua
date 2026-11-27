@@ -163,8 +163,10 @@ T.test("Ribbon: the ring spans the whole ribbon, centered on it", function()
     local H = f:GetHeight() + f.hitTop + f.foot
     -- Set into the frame the ring is built out from that radius (Socket.lua).
     local S = ns.Socket
-    T.near(p.mask:GetWidth() / 2, S.PICTURE * DaylightUI.Pixel.Snap(f, H * ns.STYLES.ribbon.ring * S.SIZE), 1e-6)
-    T.near(f.portraitY, (f.hitTop - f.foot) / 2)
+    local Rb = DaylightUI.Pixel.Snap(f, H * ns.STYLES.ribbon.ring * S.SIZE)
+    local gap = DaylightUI.Pixel.Px(f, S.GAP_PX)
+    T.near(p.mask:GetWidth() / 2, math.min(S.PICTURE * Rb, (S.PICTURE + S.HAIR) * Rb - gap), 1e-6)
+    T.near(f.portraitY, DaylightUI.Pixel.Snap(f, (f.hitTop - f.foot) / 2), 1e-6, "centered, on a whole pixel")
     local _, _, _, _, y = p:GetPoint(1)
     T.near(y, f.portraitY)
     local T_ = DUI.Pixel.Px(f, DUI.Style.BorderPx(f))
@@ -531,4 +533,25 @@ T.test("a backdrop style on party buttons, and as a setup guide card", function(
     local c = { inner = CreateFrame("Frame") }
     T.noerror(function() DUI.InstallerCards.Draw.frameStyle(c, "card", 140, 70) end)
     T.noerror(c.redraw)
+end)
+
+T.test("bar ends: Ribbon's power line leans back in under a flipped end, and its fill follows the end it runs toward", function()
+    local DUI, ns = login()
+    ribbon(DUI, ns)
+    DUI:Set("UnitFrames", "player.slantUnder", true)
+    stub.RunTimers()
+    local S = DaylightUI.Style
+    local f = ns.frames.player
+    local sl = S.GetSlant(f.line)
+    T.eq(sl.side, "right"); T.isnil(sl.under, "the line leans the usual way")
+    T.eq(sl.ref.drop.right, f:GetHeight(), "from the frame's bottom corner")
+    T.eq((S.GetFillAngle(f.line.set.power)), "right")
+    -- Only the outer end angled: the line follows that end alone, its fill square.
+    DUI:Set("UnitFrames", "player.slant", false)
+    DUI:Set("UnitFrames", "player.portrait", "none")
+    DUI:Set("UnitFrames", "player.slantOuter", true)
+    stub.RunTimers()
+    sl = S.GetSlant(f.line)
+    T.eq(sl.side, "left")
+    T.isnil((S.GetFillAngle(f.line.set.power)), "its fill runs toward the straight end")
 end)

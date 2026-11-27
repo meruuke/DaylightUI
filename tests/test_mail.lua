@@ -244,7 +244,7 @@ local function settle()
     end
 end
 
-T.test("inbox: every letter a line: subject, who and days, the gold, a COD, the items", function()
+T.test("inbox: every letter a line: subject, who, the gold, a COD, the items, and the days under it", function()
     local ns = load({ letters = {
         LETTERS[1], LETTERS[2],
         { sender = "Ysella Brightwind", subject = "Runecloth", cod = 60000, days = 2, items = { { name = "Runecloth", itemID = 14047, count = 20 } } },
@@ -253,10 +253,52 @@ T.test("inbox: every letter a line: subject, who and days, the gold, a COD, the 
     frame(20)
     local ls = lines(ns)
     T.eq(#ls, 3)
-    T.eq(stub.Text(ls[1].name), "Auction successful: Heavy Leather (20)")
-    T.truthy(stub.Text(ls[2].sub):find("Brannoc Ironhide", 1, true))
+    T.eq(stub.Text(ls[1].name), "Heavy Leather (20)", "the item, without the subject every house letter shares")
+    T.eq(stub.Text(ls[1].sub), "Sold", "what happened to it instead of the house's name")
+    T.eq(stub.Text(ls[2].sub), "Brannoc Ironhide")
     T.eq(stub.Text(ls[3].value), "COD")
-    T.truthy(stub.Text(ls[3].sub):find("2 days", 1, true), "days left: " .. stub.Text(ls[3].sub))
+    T.eq(stub.Text(ls[3].subValue), "2 days", "days left under the value, never cut off by the sender")
+    T.truthy(ls[3].subValue:IsShown())
+end)
+
+T.test("inbox: the house's letters show the item and what happened to it", function()
+    local ns = load({ letters = {
+        { sender = "Horde Auction House", canReply = false, subject = "Auction expired: Dervish Belt of the Eagle", items = { { name = "Dervish Belt of the Eagle", itemID = 10032 } } },
+        { sender = "Horde Auction House", canReply = false, subject = "Auction won: Pincer Bite", items = { { name = "Pincer Bite", itemID = 15409 } } },
+        { sender = "Horde Auction House", canReply = false, subject = "Auction canceled: Linen Cloth (5)", items = { { name = "Linen Cloth", itemID = 2589, count = 5 } } },
+        { sender = "Ysella Brightwind", subject = "Auction successful: my old boots" },
+    } })
+    MW.Open()
+    frame(20)
+    local ls = lines(ns)
+    T.eq(stub.Text(ls[1].name), "Dervish Belt of the Eagle"); T.eq(stub.Text(ls[1].sub), "Expired")
+    T.eq(stub.Text(ls[2].name), "Pincer Bite"); T.eq(stub.Text(ls[2].sub), "Won")
+    T.eq(stub.Text(ls[3].name), "Linen Cloth (5)"); T.eq(stub.Text(ls[3].sub), "Canceled")
+    T.eq(stub.Text(ls[4].name), "Auction successful: my old boots", "a player's letter keeps its subject")
+    T.eq(stub.Text(ls[4].sub), "Ysella Brightwind")
+    T.eq(ns.Inbox.AuctionSubject("Auction successful: Strange Dust"), "Strange Dust")
+    T.eq(ns.Inbox.AuctionSubject("Hello"), nil)
+end)
+
+-- koKR gives sold and won the same subject: the invoice tells them apart.
+T.test("inbox: a language with one subject for sold and won goes by the invoice", function()
+    local sold, won = _G.AUCTION_SOLD_MAIL_SUBJECT, _G.AUCTION_WON_MAIL_SUBJECT
+    _G.AUCTION_SOLD_MAIL_SUBJECT, _G.AUCTION_WON_MAIL_SUBJECT = "Auction closed: %s", "Auction closed: %s"
+    local ok, err = pcall(function()
+        local ns = load({ letters = {
+            { sender = "Horde Auction House", subject = "Auction closed: Pincer Bite", items = { { name = "Pincer Bite", itemID = 15409 } },
+              invoice = { type = "buyer", item = "Pincer Bite", player = "Ysella Brightwind", bid = 3000, count = 1 } },
+            { sender = "Horde Auction House", subject = "Auction closed: Strange Dust", money = 2500,
+              invoice = { type = "seller", item = "Strange Dust", player = "Brannoc Ironhide", bid = 2600, deposit = 10, cut = 110, count = 1 } },
+        } })
+        MW.Open()
+        frame(20)
+        local ls = lines(ns)
+        T.eq(stub.Text(ls[1].name), "Pincer Bite"); T.eq(stub.Text(ls[1].sub), "Won")
+        T.eq(stub.Text(ls[2].name), "Strange Dust"); T.eq(stub.Text(ls[2].sub), "Sold")
+    end)
+    _G.AUCTION_SOLD_MAIL_SUBJECT, _G.AUCTION_WON_MAIL_SUBJECT = sold, won
+    if not ok then error(err, 0) end
 end)
 
 T.test("inbox: search and the chips narrow the list; an empty one says so", function()
@@ -1249,4 +1291,51 @@ T.test("inbox: a receipt uses the game's invoice words, and a COD letter says CO
         T.truthy(all:find("Comprador", 1, true) and all:find("Precio de venta", 1, true) and all:find("Cantidad recibida", 1, true) and not all:find("Comprador:", 1, true) and not all:find("Precio de venta:", 1, true), all)
         T.falsy(all:find("Sold for", 1, true), "ours is only the fallback")
     end)
+end)
+
+-- The NPC window's dialogue keys reach the mailbox: Space collects, as the button's
+-- hint says. It never steals Space from the game when the keys are off, on the Send
+-- page, or in a fight.
+T.test("inbox: Space collects all with dialogue keys on, and only then", function()
+    local ns = load({ money = 0, letters = { LETTERS[1], LETTERS[2] } })
+    MW.Open()
+    frame(20)
+    local f = ns.Window.frame
+    local k = f.keys
+    T.truthy(k and k:IsKeyboardEnabled(), "the mailbox listens for keys while open")
+    T.truthy(stub.Text(button(ns, "Collect all").text):find("Space", 1, true), "the button shows its key")
+    k:GetScript("OnKeyDown")(k, "SPACE")
+    T.eq(k:GetPropagateKeyboardInput(), false, "Space is taken, so the character doesn't jump")
+    settle()
+    T.eq(GetMoney(), 48500 + 15000, "Space collected everything")
+    k:GetScript("OnKeyUp")(k, "SPACE")
+    k:GetScript("OnKeyDown")(k, "W")
+    T.eq(k:GetPropagateKeyboardInput(), true, "other keys stay the game's")
+
+    ns.Window.ShowTab("send")
+    k:GetScript("OnKeyDown")(k, "SPACE")
+    T.eq(k:GetPropagateKeyboardInput(), true, "on the Send page Space is the game's")
+    ns.Window.ShowTab("inbox")
+
+    DaylightUI:Set("NPC", "keys", false)
+    MW.Leave(); frame(20); MW.Open(); frame(20)
+    k:GetScript("OnKeyDown")(k, "SPACE")
+    T.eq(k:GetPropagateKeyboardInput(), true, "keys off: Space is the game's")
+    T.falsy(stub.Text(button(ns, "Collect all").text):find("Space", 1, true), "and no hint")
+    DaylightUI:Set("NPC", "keys", true)
+end)
+
+T.test("inbox: Space after a fight starts goes to the game, and closing gives keys back", function()
+    local ns = load({ money = 0, letters = { LETTERS[1] } })
+    MW.Open()
+    frame(20)
+    local k = ns.Window.frame.keys
+    stub.EnterCombat()
+    k:GetScript("OnKeyDown")(k, "SPACE")
+    frame(5)
+    T.falsy(ns.Inbox.state.collecting, "nothing collected by a key in combat")
+    stub.LeaveCombat()
+    MW.Leave()
+    frame(20)
+    T.falsy(k:IsKeyboardEnabled(), "closed: no keys held")
 end)

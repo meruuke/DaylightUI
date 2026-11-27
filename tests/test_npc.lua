@@ -274,7 +274,7 @@ T.test("npc: a quest from a poster (no NPC unit) shows the game's quest book, ne
     local N = load()
     NW.Quest("DETAIL", NW.Candles())
     frame()
-    T.eq(N.frame.portrait.__portraitUnit, "npc")
+    T.eq(N.frame.portrait.__portraitUnit, "questnpc", "the quest window's unit, as QuestFrame_SetPortrait")
     T.eq(N.frame.portrait:IsShown(), true)
     N.Close(); settle()
     stub.SetUnits({ player = { name = "Daylight", class = "WARRIOR", level = 60, isPlayer = true } })
@@ -2036,4 +2036,582 @@ T.test("npc: with Immersion talking to NPCs, gossip and quests are left to it; t
     T.truthy(DaylightUI.Win.IsOpen(N.frame), "a vendor still opens Daylight UI's window")
     T.eq(N.state.mode, "merchant")
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+
+-- The game's own vendor (Mainline/MerchantFrame.lua), behavior by behavior.
+
+local function tilesOf(N)
+    local out = {}
+    for _, p in ipairs(shop(N).pieces) do if p.spec and p.spec.shopItem then out[#out + 1] = p end end
+    return out
+end
+
+-- The game's tooltip (the NPC world has none of its own).
+local function gameTip()
+    if not _G.GameTooltip then
+        local tip = stub.CompareTooltip("GameTooltip")
+        function tip:SetOwner(o) self.__owner = o end
+        function tip:GetOwner() return self.__owner end
+        function tip:IsOwned(o) return self.__owner == o end
+        _G.GameTooltip = tip
+    end
+    return _G.GameTooltip
+end
+
+-- What a hover writes on GameTooltip, as one string.
+local function hoverText(b)
+    gameTip()
+    local lines, was = {}, { GameTooltip.AddLine, GameTooltip.AddDoubleLine }
+    GameTooltip.AddLine = function(_, t) lines[#lines + 1] = tostring(t) end
+    GameTooltip.AddDoubleLine = function(_, a, c) lines[#lines + 1] = tostring(a) .. " " .. tostring(c) end
+    b:GetScript("OnEnter")(b)
+    GameTooltip.AddLine, GameTooltip.AddDoubleLine = was[1], was[2]
+    local shown = GameTooltip:IsShown()
+    b:GetScript("OnLeave")(b)
+    return table.concat(lines, " / "), shown
+end
+
+-- MerchantItemButton_OnClick picks the shelf item up with PickupMerchantItem, which
+-- sells what the cursor holds; the frame's OnMouseUp and OnReceiveDrag do the same
+-- with PickupMerchantItem(0). Held aside, the game's frame can't be reached.
+T.test("npc shop game: a click or drop with a bag item on the cursor sells it, never buys", function()
+    local N = load()
+    NW.Merchant()
+    frame(); settle()
+    local water = tilesOf(N)[1]
+    stub.cursor = { "item", 2589 }
+    water:Click("LeftButton")
+    T.eq(#NW.Calls("BuyMerchantItem"), 0, "holding an item, a click on a tile doesn't buy")
+    T.deq(NW.Calls("PickupMerchantItem"), { { 0 } }, "it sells what's held")
+    water:GetScript("OnReceiveDrag")(water)
+    T.eq(#NW.Calls("PickupMerchantItem"), 2, "dropped on a tile")
+    local page = shop(N)
+    T.truthy(page:GetScript("OnReceiveDrag"), "the page takes a drop")
+    page:GetScript("OnReceiveDrag")(page)
+    page:GetScript("OnMouseUp")(page, "LeftButton")
+    T.eq(#NW.Calls("PickupMerchantItem"), 4, "dropped or clicked anywhere on the shop")
+    stub.cursor = { "spell", 133 }
+    page:GetScript("OnMouseUp")(page, "LeftButton")
+    T.eq(#NW.Calls("PickupMerchantItem"), 4, "a spell on the cursor isn't sold")
+    stub.cursor = nil
+    water:Click("LeftButton")
+    T.deq(NW.Calls("BuyMerchantItem"), { { 1 } }, "an empty cursor buys as before")
+end)
+
+-- A refundable item is the game's own business (its bags ask before refunding).
+T.test("npc shop game: a refundable item on the cursor isn't sold by a drop", function()
+    local N = load()
+    NW.Merchant()
+    frame(); settle()
+    MerchantFrame.refundItem = 5
+    stub.cursor = { "item", 2589 }
+    tilesOf(N)[1]:Click("LeftButton")
+    MerchantFrame.refundItem = nil
+    stub.cursor = nil
+    T.eq(#NW.Calls("PickupMerchantItem"), 0)
+    T.eq(#NW.Calls("BuyMerchantItem"), 0)
+end)
+
+-- MerchantItemButton_OnEnter: SetMerchantItem, then GameTooltip_ShowCompareItem with no
+-- Shift (it compares whatever the tooltip shows). The Buy back tab doesn't compare.
+T.test("npc shop game: the shelf's items compare with what you wear, no Shift needed", function()
+    local N = load()
+    NW.Merchant({ buyback = { { name = "Broken Fang", price = 12 } } })
+    frame(); settle()
+    gameTip()
+    local was = { _G.GameTooltip_ShowCompareItem, _G.IsModifiedClick, GameTooltip.SetMerchantItem, GameTooltip.SetBuybackItem }
+    local compared = 0
+    _G.GameTooltip_ShowCompareItem = function() compared = compared + 1 end
+    _G.IsModifiedClick = function() return false end
+    GameTooltip.SetMerchantItem = function() end
+    GameTooltip.SetBuybackItem = function() end
+    local t = tilesOf(N)[1]
+    t:GetScript("OnEnter")(t)
+    T.eq(compared, 1, "compared at once")
+    t:UpdateTooltip()
+    T.eq(compared, 1, "the tooltip's tick doesn't draw it again: the compare stays up")
+    t:GetScript("OnLeave")(t)
+    shop(N).tabBack:Click()
+    frame()
+    local b = tilesOf(N)[1]
+    b:GetScript("OnEnter")(b)
+    T.eq(compared, 1, "a buy-back item doesn't, as the game's")
+    b:GetScript("OnLeave")(b)
+    _G.GameTooltip_ShowCompareItem, _G.IsModifiedClick, GameTooltip.SetMerchantItem, GameTooltip.SetBuybackItem = unpack(was)
+end)
+
+local function footButton(N, word)
+    for _, b in ipairs(shop(N).foot.buttons) do
+        if b:IsShown() and b.text:GetText():find(word, 1, true) then return b end
+    end
+end
+
+-- MerchantRepairItemButton_OnClick: the repair cursor for one item, a second press puts it away.
+T.test("npc shop game: right-click Repair repairs one item; its hover says so", function()
+    local N = load()
+    NW.Merchant({ repair = 160 })
+    frame(); settle()
+    local b = footButton(N, "Repair")
+    b:Click("RightButton")
+    T.eq(#NW.Calls("ShowRepairCursor"), 1, "the game's repair cursor")
+    T.eq(#NW.Calls("RepairAllItems"), 0, "not a repair-all")
+    b:Click("RightButton")
+    T.eq(#NW.Calls("HideRepairCursor"), 1, "a second right-click puts it away")
+    local text, shown = hoverText(b)
+    T.truthy(shown, "a hover")
+    T.truthy(text:find("repair one item", 1, true), "it says so: " .. text)
+    T.truthy(text:find(DaylightUI.MoneyString(160), 1, true), "and what it all costs: " .. text)
+end)
+
+-- MerchantGuildBankRepairButton: shown while the guild pays, RepairAllItems(true).
+T.test("npc shop game: Guild repair shows only when the guild pays, and repairs with its money", function()
+    local N = load()
+    NW.Merchant({ repair = 160 })
+    frame(); settle()
+    T.falsy(footButton(N, "Guild repair"), "no guild: no button")
+    NW.Merchant({ repair = 160, guild = { allowance = 100, money = 5000 } })
+    frame(); settle()
+    local b = footButton(N, "Guild repair")
+    T.truthy(b, "the guild pays")
+    local words = {}
+    for _, x in ipairs(shop(N).foot.buttons) do
+        if x:IsShown() then words[#words + 1] = x.text:GetText():match("^(%a[%a ]-)%s*[·|]") or x.text:GetText() end
+    end
+    T.deq(words, { "Sell junk", "Repair", "Guild repair", "Goodbye" }, "beside Repair, as in the picked mock-up")
+    b:Click("LeftButton")
+    T.deq(NW.Calls("RepairAllItems"), { { true } })
+    local text = hoverText(b)
+    T.truthy(text:find(DaylightUI.MoneyString(100), 1, true), "the hover tells what the guild covers: " .. text)
+    T.truthy(text:find(DaylightUI.MoneyString(60), 1, true), "and what you pay on top: " .. text)
+end)
+
+-- MerchantFrame_OnSellAllJunkButtonClicked asks first (SELL_ALL_JUNK_ITEMS_POPUP).
+T.test("npc shop game: Sell junk asks a second click first", function()
+    local N = load()
+    NW.Merchant({ junk = 2, bags = { [0] = { { quality = 0, sell = 30 }, { quality = 0, sell = 20 } } } })
+    frame(); settle()
+    local b = footButton(N, "Sell junk")
+    T.truthy(b and not b.spec.off, "there's junk")
+    b:Click("LeftButton")
+    T.eq(#NW.Calls("SellAllJunkItems"), 0, "the first click only asks")
+    T.truthy(footButton(N, "Click again"), "and says so")
+    footButton(N, "Click again"):Click("LeftButton")
+    T.eq(#NW.Calls("SellAllJunkItems"), 0, "a double-click isn't the answer")
+    stub.Advance(DaylightUI.Widgets.CONFIRM_GAP + 0.05)
+    footButton(N, "Click again"):Click("LeftButton")
+    T.eq(#NW.Calls("SellAllJunkItems"), 1, "the second click sells")
+    b = footButton(N, "Sell junk")
+    b:Click("LeftButton")
+    stub.Advance(DaylightUI.Widgets.CONFIRM + 0.1)
+    stub.RunTimers()
+    T.truthy(footButton(N, "Sell junk"), "asking ends on its own")
+end)
+
+T.test("npc shop game: Sell junk's value leaves out bags set to ignore Sell Junk; hidden when the game turns it off", function()
+    local N = load()
+    NW.Merchant({ junk = 2, bags = { [0] = { { quality = 0, sell = 30 } }, [1] = { { quality = 0, sell = 500 } } }, skip = { [1] = true } })
+    frame(); settle()
+    local b = footButton(N, "Sell junk")
+    T.eq(b.text:GetText(), string.format(DaylightUI.L["Sell junk · %s"], DaylightUI.MoneyString(30)), "only the backpack's")
+    NW.Merchant({ junk = 2, sellAllJunk = false, bags = { [0] = { { quality = 0, sell = 30 } } } })
+    frame(); settle()
+    T.falsy(footButton(N, "Sell junk"), "the game hides it, so does Daylight UI")
+end)
+
+T.test("npc shop game: a quest-starting item wears the !, one you can't buy is red, a sold-out one grayed", function()
+    local N = load()
+    NW.Merchant({ items = { { name = "Old Map", price = 10, quest = true }, { name = "Locked Box", price = 10, purchasable = false },
+        { name = "Smallfish", price = 10, available = 0 }, { name = "Jerky", price = 10 } } })
+    frame(); settle()
+    local t = tilesOf(N)
+    T.truthy(t[1].quest and t[1].quest:IsShown(), "the quest mark")
+    T.falsy(t[4].quest and t[4].quest:IsShown(), "only there")
+    local r, g = t[2].icon:GetVertexColor()
+    T.truthy(r > 0.85 and g < 0.25, "not purchasable: red like not usable")
+    local sr, sg, sb = t[3].icon:GetVertexColor()
+    T.truthy(sr < 0.7 and sg < 0.7 and sb < 0.7 and sr - sg < 0.1, "sold out: dimmed, not red")
+    t[3]:Click("LeftButton")
+    T.eq(#NW.Calls("BuyMerchantItem"), 0, "and a click doesn't try")
+end)
+
+T.test("npc shop game: a currency sold in a container shows the container", function()
+    local N = load()
+    NW.Merchant({ items = { { name = "Raw", price = 10, currencyID = 42, container = { name = "Pouch of Marks", texture = 99, amount = 3 } } } })
+    frame(); settle()
+    T.eq(tilesOf(N)[1].name:GetText(), "Pouch of Marks")
+end)
+
+-- MerchantFrame_ShowCurrencyTooltip: each currency at the bottom has its tooltip.
+T.test("npc shop game: hovering what you hold of a cost shows its tooltip", function()
+    local N = load()
+    local count = C_Item.GetItemCount
+    C_Item.GetItemCount = function() return 7 end
+    NW.Merchant({ items = { { name = "Pattern", price = 0, extended = true,
+        costs = { { texture = 132889, value = 3, link = "|Hitem:2589|h[Linen Cloth]|h" } } } } })
+    frame(); settle()
+    C_Item.GetItemCount = count
+    gameTip()
+    local hits = N.frame.walletHits or {}
+    T.truthy(hits[1] and hits[1]:IsShown(), "a hover spot over the piece")
+    local was, linked = GameTooltip.SetHyperlink, nil
+    GameTooltip.SetHyperlink = function(_, l) linked = l end
+    hits[1]:GetScript("OnEnter")(hits[1])
+    GameTooltip.SetHyperlink = was
+    T.eq(linked, "|Hitem:2589|h[Linen Cloth]|h")
+    hits[1]:GetScript("OnLeave")(hits[1])
+end)
+
+T.test("npc shop game: dragging a buy-back item buys it back", function()
+    local N = load()
+    NW.Merchant({ buyback = { { name = "Broken Fang", price = 12 } } })
+    frame(); settle()
+    shop(N).tabBack:Click()
+    frame()
+    local b = tilesOf(N)[1]
+    b:GetScript("OnDragStart")(b)
+    T.deq(NW.Calls("BuybackItem"), { { 1 } })
+end)
+
+T.test("npc shop game: a gear change refills the shelf (UNIT_INVENTORY_CHANGED)", function()
+    local N = load()
+    NW.Merchant()
+    frame(); settle()
+    NW.state.merchant.items[1].usable = false
+    stub.FireEvent("UNIT_INVENTORY_CHANGED", "player")
+    frame()
+    local r, g = tilesOf(N)[1].icon:GetVertexColor()
+    T.truthy(r > 0.85 and g < 0.25, "the water now reads unusable")
+end)
+
+T.test("npc shop game: on a controller LB and RB switch Shop and Buy back", function()
+    local N = load()
+    NW.Merchant({ buyback = { { name = "Broken Fang", price = 12 } } })
+    frame(); settle()
+    T.eq(type(N.frame.padTabs), "function", "the window lists its tabs")
+    local list, at = N.frame.padTabs()
+    T.eq(#list, 2)
+    T.eq(at, 1)
+    list[2]:Click()
+    T.eq(stub.npc.Shop.state.tab, "back")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("npc shop game: setting a bag to ignore Sell Junk at the vendor updates the value at once", function()
+    local N = load()
+    NW.Merchant({ junk = 2, bags = { [0] = { { quality = 0, sell = 30 } }, [1] = { { quality = 0, sell = 500 } } } })
+    frame(); settle()
+    NW.state.merchant.skip = { [1] = true }
+    stub.FireEvent("BAG_SLOT_FLAGS_UPDATED", 1)
+    frame()
+    T.eq(footButton(N, "Sell junk").text:GetText(), string.format(DaylightUI.L["Sell junk · %s"], DaylightUI.MoneyString(30)))
+end)
+
+-- ---------------------------------------------------------------------
+-- Talk and quest pages: what the game's own GossipFrame, QuestFrame and
+-- QuestInfo.lua do (audit S4)
+-- ---------------------------------------------------------------------
+
+local function talk(N) return N.frame.pages.talk end
+-- Every piece of the talk page: its words (a text, a tile's name) and the piece.
+local function talkPieces(N)
+    local out = {}
+    for _, p in ipairs(talk(N).pieces or {}) do
+        local fs = p.name or p.text
+        out[#out + 1] = { text = fs and fs.GetText and fs:GetText() or "", piece = p }
+    end
+    return out
+end
+local function talkFind(N, word)
+    for _, e in ipairs(talkPieces(N)) do
+        if e.text:find(word, 1, true) then return e.piece, e.text end
+    end
+end
+local function talkButton(N, word)
+    for _, b in ipairs(talk(N).foot.buttons) do
+        if b:IsShown() and b.text:GetText():find(word, 1, true) then return b end
+    end
+end
+
+-- QuestInfoRewardItemMixin:OnEnter and QuestItemTemplate call GameTooltip_ShowCompareItem
+-- on every item hover, Shift or not; a currency never compares.
+T.test("npc talk game: reward and required items compare with your gear without Shift", function()
+    local N = load()
+    gameTip()
+    local was = { _G.GameTooltip_ShowCompareItem, _G.IsModifiedClick, GameTooltip.SetQuestItem, GameTooltip.SetQuestCurrency }
+    local compared = 0
+    _G.GameTooltip_ShowCompareItem = function() compared = compared + 1 end
+    _G.IsModifiedClick = function() return false end
+    GameTooltip.SetQuestItem = function() end
+    GameTooltip.SetQuestCurrency = function() end
+    NW.Quest("COMPLETE", NW.Candles({ currencies = { { name = "Marks of Honor", count = 2 } } }))
+    frame(); settle()
+    local boots = talkFind(N, "Walking Boots")
+    boots:GetScript("OnEnter")(boots)
+    T.eq(compared, 1, "a reward compares at once")
+    boots:GetScript("OnLeave")(boots)
+    local marks = talkFind(N, "Marks of Honor")
+    marks:GetScript("OnEnter")(marks)
+    T.eq(compared, 1, "a currency doesn't")
+    marks:GetScript("OnLeave")(marks)
+    NW.Quest("PROGRESS", NW.Candles())
+    frame(); settle()
+    local candle = talkFind(N, "Large Candle")
+    candle:GetScript("OnEnter")(candle)
+    T.eq(compared, 2, "a required item does too")
+    candle:GetScript("OnLeave")(candle)
+    _G.GameTooltip_ShowCompareItem, _G.IsModifiedClick, GameTooltip.SetQuestItem, GameTooltip.SetQuestCurrency = unpack(was)
+end)
+
+-- QuestInfo_ShowRewards: spells the quest teaches or casts (not ones you know), a title,
+-- skill points and honor all show; a spell's hover is SetSpellByID, Shift links it.
+T.test("npc talk game: a quest that teaches a spell shows it, with its hover and Shift link", function()
+    local N = load()
+    local q = NW.Candles({ choices = {}, money = 0, xp = 0, spells = {
+        { spellID = 1066, name = "Aquatic Form", type = 5 },
+        { spellID = 9999, name = "Already Known", type = 5, known = true },
+        { spellID = 2000, name = "Blessing of the Grove", type = 4 } } })
+    NW.Quest("DETAIL", q)
+    frame(); settle()
+    local form = talkFind(N, "Aquatic Form")
+    T.truthy(form, "the spell is on the offer")
+    T.isnil(talkFind(N, "Already Known"), "a spell you know isn't, as the game's")
+    T.truthy(talkFind(N, "Blessing of the Grove"), "a spell cast on you is")
+    gameTip()
+    local spell
+    local wasSet = GameTooltip.SetSpellByID
+    GameTooltip.SetSpellByID = function(_, id) spell = id end
+    form:GetScript("OnEnter")(form)
+    T.eq(spell, 1066, "its hover is the spell's tooltip")
+    form:GetScript("OnLeave")(form)
+    GameTooltip.SetSpellByID = wasSet
+    local linked
+    local was = { _G.IsModifiedClick, _G.HandleModifiedItemClick }
+    _G.IsModifiedClick = function(m) return m == "CHATLINK" end
+    _G.HandleModifiedItemClick = function(link) linked = link; return true end
+    form:Click()
+    T.truthy(linked and linked:find("spell:1066", 1, true), "Shift-click links the spell")
+    _G.IsModifiedClick, _G.HandleModifiedItemClick = was[1], was[2]
+    NW.Quest("COMPLETE", q)
+    frame(); settle()
+    T.truthy(talkFind(N, "Aquatic Form"), "and on the hand-in")
+end)
+
+T.test("npc talk game: a title, skill points and honor show among the rewards", function()
+    local N = load()
+    NW.Quest("COMPLETE", NW.Candles({ choices = {}, rewardTitle = "the Patient", honor = 150,
+        skill = { name = "Fishing", icon = 136245, points = 5 } }))
+    frame(); settle()
+    T.truthy(talkFind(N, "the Patient"), "the title")
+    T.truthy(talkFind(N, "Fishing"), "the skill points")
+    local honor = talkFind(N, HONOR or DaylightUI.L["Honor"])
+    T.truthy(honor, "the honor")
+    T.eq(honor and honor.count:GetText(), "150")
+end)
+
+T.test("npc talk game: a spell learned meanwhile drops off the offer (LEARNED_SPELL_IN_SKILL_LINE)", function()
+    local N = load()
+    local q = NW.Candles({ spells = { { spellID = 1066, name = "Aquatic Form", type = 5 } } })
+    NW.Quest("DETAIL", q)
+    frame(); settle()
+    T.truthy(talkFind(N, "Aquatic Form"))
+    q.spells[1].known = true
+    stub.FireEvent("LEARNED_SPELL_IN_SKILL_LINE", 1066)
+    frame(2)
+    T.isnil(talkFind(N, "Aquatic Form"), "gone once known")
+end)
+
+-- QuestInfo_ShowGroupSize and QuestInfo_ShowSpecialObjectives on the offer.
+T.test("npc talk game: the offer says how many players it suggests and a spell to learn", function()
+    local N = load()
+    NW.Quest("DETAIL", NW.Candles({ group = 3, criteria = { spellID = 818, name = "Basic Campfire" } }))
+    frame(); settle()
+    local want = string.format(QUEST_SUGGESTED_GROUP_NUM or DaylightUI.L["Suggested players: %d"], 3)
+    T.truthy(talkFind(N, want), "suggested players")
+    T.truthy(talkFind(N, "Basic Campfire"), "the spell to learn")
+end)
+
+-- QuestFrameProgressItems_Update: required currencies, the offer's hide flag, an item
+-- whose name hasn't come yet still has its slot, the money red when you're short.
+T.test("npc talk game: the turn-in page lists required currencies with their tooltip", function()
+    local N = load()
+    NW.Quest("PROGRESS", NW.Candles({ requiredCurrencies = { { name = "Timbermaw Token", count = 4 } } }))
+    frame(); settle()
+    local token = talkFind(N, "Timbermaw Token")
+    T.truthy(token, "the currency is listed")
+    gameTip()
+    local asked
+    local was = GameTooltip.SetQuestCurrency
+    GameTooltip.SetQuestCurrency = function(_, kind, i) asked = kind .. i end
+    if token then
+        token:GetScript("OnEnter")(token)
+        token:GetScript("OnLeave")(token)
+    end
+    GameTooltip.SetQuestCurrency = was
+    T.eq(asked, "required1")
+end)
+
+T.test("npc talk game: required items stay hidden when the offer hides them", function()
+    local N = load()
+    NW.Quest("PROGRESS", NW.Candles({ hideRequired = true }))
+    frame(); settle()
+    T.isnil(talkFind(N, "Large Candle"))
+end)
+
+T.test("npc talk game: a required item still loading keeps its slot", function()
+    local N = load()
+    NW.Quest("PROGRESS", NW.Candles({ required = { { name = "Large Candle", loading = true, count = 8, itemID = 77 } } }))
+    frame(); settle()
+    T.truthy(talkFind(N, RETRIEVING_ITEM_INFO or DaylightUI.L["Loading..."]), "a loading tile")
+end)
+
+T.test("npc talk game: required money is red when you can't pay it", function()
+    local N = load()
+    local was = _G.GetMoney
+    _G.GetMoney = function() return 50 end
+    NW.Quest("PROGRESS", NW.Candles({ required = {}, cost = 500 }))
+    frame(); settle()
+    local _, text = talkFind(N, DaylightUI.MoneyString(500))
+    T.truthy(text, "the money shows")
+    T.truthy(text and text:find(DaylightUI.Win.Parts.Hex(DaylightUI.Style.INK.BAD), 1, true), "in red")
+    _G.GetMoney = was
+end)
+
+-- QuestFrame_OnHide hides QuestFrame.dialog: the PvP question leaves with the window,
+-- and never sends DeclineQuest after the talk is over.
+T.test("npc talk game: the PvP question goes away with the window", function()
+    local N = load()
+    NW.Quest("DETAIL", NW.Candles({ pvp = true }))
+    frame(); settle()
+    talkButton(N, DaylightUI.L["Accept"]):Click()
+    T.truthy(DaylightUI.Widgets.Asking(), "it asks")
+    NW.Escape()
+    frame(3)
+    T.isnil(DaylightUI.Widgets.Asking(), "gone with the window")
+    T.eq(#NW.Calls("DeclineQuest"), 0, "and never declines afterwards")
+end)
+
+-- QuestFrame_SetPortrait: the quest pages are "questnpc": a quest a party member shares.
+T.test("npc talk game: a quest page names who gives it (questnpc)", function()
+    stub.Load({ before = NW.world({ npc = { questnpc = { name = "Ardent Friend", reaction = 5 } } }) })
+    local N = stub.npc.Window
+    NW.Quest("DETAIL", NW.Candles())
+    frame(); settle()
+    T.eq(N.frame.title:GetText(), "Ardent Friend")
+end)
+
+-- QuestFrame_OnEvent and the portrait template listen for UNIT_PORTRAIT_UPDATE.
+T.test("npc talk game: the portrait is drawn again when the NPC's portrait loads", function()
+    load()
+    NW.Gossip(GOSSIP)
+    frame(); settle()
+    local drawn = 0
+    local was = _G.SetPortraitTexture
+    _G.SetPortraitTexture = function(...) drawn = drawn + 1; return was(...) end
+    stub.FireEvent("UNIT_PORTRAIT_UPDATE", "npc")
+    frame()
+    _G.SetPortraitTexture = was
+    T.truthy(drawn > 0, "drawn again")
+end)
+
+-- QuestFrame_OnEvent: QUEST_LOG_UPDATE refreshes the greeting; GossipFrame only
+-- refreshes on it while it lists quests.
+T.test("npc talk game: the quest greeting refreshes when your quest log changes", function()
+    local N = load()
+    NW.Quest("GREETING", { text = "Hail.", active = { { title = "Kobold Candles", questID = 60 } } })
+    frame(); settle()
+    NW.state.greeting.active[1].isComplete = true
+    stub.FireEvent("QUEST_LOG_UPDATE")
+    frame(2)
+    T.eq(N.state.data.quests[1].complete, true, "ready now")
+end)
+
+T.test("npc talk game: a gossip without quests doesn't redraw on every quest log update", function()
+    local N = load()
+    NW.Gossip({ text = "Hello.", options = { { name = "Make this inn your home.", icon = 1 } } })
+    frame(); settle()
+    local before = N.state.data
+    stub.FireEvent("QUEST_LOG_UPDATE")
+    frame(2)
+    T.eq(N.state.data, before, "not read again")
+end)
+
+-- QuestUtil.ApplyQuestIconOfferToTextureForQuestID: a repeatable quest wears the blue "!".
+T.test("npc talk game: a repeatable quest wears the game's repeatable mark, a trivial one is dimmed", function()
+    local N = load()
+    NW.Gossip({ text = "Hi.", available = { { title = "Again", questID = 70, repeatable = true },
+        { title = "Easy", questID = 71, isTrivial = true }, { title = "Plain", questID = 72 } } })
+    frame(); settle()
+    T.eq(N.rows[1].icon.__texture, "Interface/GossipFrame/DailyActiveQuestIcon", "repeatable")
+    local r = N.rows[2].icon:GetVertexColor()
+    T.truthy(r < 1, "trivial dimmed")
+    T.eq(N.rows[3].icon.__atlas, "QuestNormal", "a plain one keeps the gold !")
+end)
+
+-- GossipOptionButtonMixin:Setup: GOSSIP_OPTION_PREPEND with QUEST_PREPEND and PLAY_MOVIE_PREPEND.
+T.test("npc talk game: a gossip option marked as a quest or a movie says so, both when both", function()
+    local was = { _G.GOSSIP_OPTION_PREPEND, _G.QUEST_PREPEND, _G.PLAY_MOVIE_PREPEND }
+    _G.GOSSIP_OPTION_PREPEND, _G.QUEST_PREPEND, _G.PLAY_MOVIE_PREPEND = "%s %s", "(Quest)", "(Movie)"
+    local N = load()
+    local wasFlags = Enum.GossipOptionRecFlags
+    Enum.GossipOptionRecFlags = { QuestLabelPrepend = 1, PlayMovieLabelPrepend = 2 }
+    NW.Gossip({ text = "Hi.", options = { { name = "Tell me more.", icon = 1, flags = 1 }, { name = "Watch it.", icon = 2, flags = 3 } } })
+    frame(); settle()
+    local t = texts(N)
+    T.eq(t[1], "(Quest) Tell me more.")
+    T.eq(t[2], "(Quest) (Movie) Watch it.")
+    _G.GOSSIP_OPTION_PREPEND, _G.QUEST_PREPEND, _G.PLAY_MOVIE_PREPEND = unpack(was)
+    Enum.GossipOptionRecFlags = wasFlags
+end)
+
+-- Under the game's window sounds the talk window plays QuestFrame's kits: the quest list
+-- opening and closing, IG_QUEST_CANCEL on Decline, IG_QUEST_LIST_SELECT on a greeting
+-- quest, IG_QUEST_LIST_OPEN on Continue.
+T.test("npc talk game: under the game's sounds the talk window plays the quest window's", function()
+    local N = load()
+    DaylightUI:Set("general", "soundKinds.windows", "game")
+    DaylightUI:Set("general", "soundKinds.clicks", "game")
+    stub.RunTimers()
+    local kits = {}
+    _G.SOUNDKIT = { IG_CHARACTER_INFO_OPEN = 1, IG_CHARACTER_INFO_CLOSE = 2, IG_MAINMENU_OPTION = 3,
+        IG_QUEST_LIST_OPEN = 10, IG_QUEST_LIST_CLOSE = 11, IG_QUEST_CANCEL = 12, IG_QUEST_LIST_SELECT = 13 }
+    _G.PlaySound = function(kit) kits[#kits + 1] = kit end
+    local function heard(k) for _, x in ipairs(kits) do if x == k then return true end end return false end
+    stub.Advance(1)
+    NW.Quest("GREETING", { text = "Hail.", available = { { title = "Kobold Candles", questID = 60 } } })
+    frame(); settle()
+    T.truthy(heard(10), "the quest list opens")
+    T.truthy(not heard(1), "not the character window's")
+    stub.Advance(1)
+    N.rows[1]:Click()
+    T.truthy(heard(13), "picking a quest")
+    stub.Advance(1)
+    NW.Quest("PROGRESS", NW.Candles())
+    frame(); settle()
+    kits = {}
+    talkButton(N, CONTINUE or DaylightUI.L["Continue"]):Click()
+    T.truthy(heard(10), "Continue")
+    stub.Advance(1)
+    NW.Quest("DETAIL", NW.Candles())
+    frame(); settle()
+    kits = {}
+    talkButton(N, DaylightUI.L["Decline"]):Click()
+    frame(); settle()
+    T.truthy(heard(12), "Decline")
+    T.truthy(heard(11), "the quest list closes")
+    T.truthy(not heard(2), "not the character window's")
+    _G.SOUNDKIT, _G.PlaySound = nil, nil
+end)
+
+-- QuestFrame_OnHide: an auto-accepted quest's window closing plays PlayAutoAcceptQuestSound.
+T.test("npc talk game: an auto-accepted quest plays the game's sound as it closes", function()
+    local N = load()
+    local played = 0
+    _G.PlayAutoAcceptQuestSound = function() played = played + 1 end
+    NW.Quest("DETAIL", NW.Candles({ auto = true }))
+    frame(); settle()
+    talkButton(N, OKAY or DaylightUI.L["Okay"]):Click()
+    frame(3)
+    T.eq(played, 1)
+    _G.PlayAutoAcceptQuestSound = nil
 end)

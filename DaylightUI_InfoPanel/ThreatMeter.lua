@@ -349,7 +349,7 @@ end
 -- window, the side facing the screen's middle.
 function TM.Side(h)
     local P = ns.Panel
-    if h ~= nil and h == P.panel then return P.side == "right" and "right" or "left" end
+    if h ~= nil and h == P.panel then return P.across == "right" and "right" or "left" end
     if h ~= nil and h == P.meterFrame then
         local x = DUI.Movers.Position("infopanel.meter")
         if type(x) == "number" and x < 0 then return "right" end
@@ -392,7 +392,7 @@ function TM.Layout()
     local rowH, gap = cfg.rowHeight, ns.Meter.SPACING
     local headH = TM.HeadHeight()
     local n = TM.RowCount()
-    local W = below and ns.module.db.meter.width or cfg.width
+    local W = below and (ns.Panel.meterWidth or ns.module.db.meter.width) or cfg.width
     local H = 2 * inset + headH + n * (rowH + gap) - gap
     win:SetSize(W, H)
     Style.LayoutShell(s)
@@ -573,7 +573,7 @@ function TM.ApplySlide()
     -- Pushed out past a short window it floated in the open.
     local P = ns.Panel
     if h == P.panel and P.arrow then
-        local tabTop = (P.panel:GetHeight() - ns.Panel.TAB[2]) / 2
+        local tabTop = P.ArrowTop()
         local covered = (TM.height or g.H) + TM.ARROW_CLEAR > tabTop
         P.PlaceArrow(covered and out or 0)
     end
@@ -692,8 +692,11 @@ function TM.Build(mod)
         local h = TM.host
         local reach = TM.TAB[1] + 10
         local left = TM.side ~= "right"
+        -- The whole panel counts only while the tab hangs off it: off a separate
+        -- meter window it sits elsewhere, and the panel's gold text woke it.
+        local onPanel = h ~= nil and h == ns.Panel.panel
         local now = (h and h:IsMouseOver(0, 0, left and -reach or 0, left and 0 or reach))
-            or ns.Panel.holder:IsMouseOver() or TM.MouseNear() or false
+            or (onPanel and ns.Panel.holder:IsMouseOver()) or TM.MouseNear() or false
         now = now == true
         if now ~= near or snap then
             near = now

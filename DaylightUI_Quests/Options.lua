@@ -14,7 +14,8 @@ local function clickPick(key, label, desc)
     return { type = "dropdown", key = "clicks." .. key, label = label, values = CLICK_ACTIONS, order = CLICK_ORDER, desc = desc }
 end
 local FILTERS = { all = "All tracked quests", zone = "This zone only", log = "Every quest in your log" }
-local SORTS = { recent = "Most recent progress", zone = "Zone order", level = "Level", near = "Nearest first", ready = "Ready first" }
+local SORTS = { recent = "Most recent progress", zone = "Zone order", level = "Level", levelAll = "Level, across zones",
+                near = "Nearest first", ready = "Ready first" }
 local INSTANCE_MODES = { zone = "This zone only", fold = "Fold to the header", hide = "Hide", none = "Leave as it is" }
 local JOURNAL_SORTS = { log = "Quest log order", level = "Level", ready = "Ready first", watched = "Tracked first" }
 local TIP_KINDS = { short = "Objectives", details = "Full quest details" }
@@ -101,12 +102,18 @@ ns.OPTIONS = { pages = {
               hidden = function() return not (ns.Bridge and ns.Bridge.Loaded()) end },
             { type = "dropdown", key = "filter", label = "Quests to show", values = FILTERS, order = { "all", "zone", "log" },
               desc = "Every tracked quest, only the zone you're in, or every quest in your log without tracking them. The controls over the list switch the first two." },
-            { type = "dropdown", key = "sort", label = "Quest order", values = SORTS, order = { "recent", "zone", "level", "near", "ready" },
-              desc = "The order of the quests within each zone. Most recent progress moves a quest and its zone to the top when a kill, item or objective counts. Nearest first looks again every few seconds as you move, never in a fight or a dungeon. Nothing moves in a fight." },
+            { type = "toggle", key = "filterRow", label = "Filter under the title",
+              desc = "Shows All and This zone as words under the Quests title, always there, instead of buttons on its line that appear when you hover the list. The tracker grows by one line." },
+            { type = "dropdown", key = "sort", label = "Quest order", values = SORTS, order = { "recent", "zone", "level", "levelAll", "near", "ready" },
+              desc = "The order of the quests within each zone. Most recent progress moves a quest and its zone to the top when a kill, item or objective counts. Level, across zones also puts the zone with the lowest quest first, and with zone names off makes one list by level. Nearest first looks again every few seconds as you move, never in a fight or a dungeon. Nothing moves in a fight. Drag a zone's name to put the zones in your own order, or right-click Quests to sort them A to Z or by level: your order then wins over this one." },
+            { type = "toggle", key = "hereFirst", label = "Zone you're in at the top",
+              desc = "The quests of the zone you're in stay at the top of the list, whatever the order, and the list follows you as you travel. Nothing moves in a fight." },
             { type = "toggle", key = "foldReady", label = "Fold ready quests",
               desc = "A quest ready to hand in shows its title alone. A timed quest never folds." },
             { type = "toggle", key = "readyLast", label = "Ready quests at the bottom",
               desc = "Quests ready to hand in leave their zones and gather in a Ready to turn in section under the rest, so the quests still to do stay on top. Nothing moves in a fight." },
+            { type = "toggle", key = "fightFocus", label = "Only the priority quest in a fight",
+              desc = "When a fight starts the list folds down to your priority quest and opens again once it ends. Quests with an item button stay, since their buttons can't move in a fight." },
             { type = "dropdown", key = "instances", label = "Tracker in dungeons and raids", values = INSTANCE_MODES, order = { "zone", "fold", "hide", "none" },
               desc = "What the tracker does when you enter a dungeon, raid or battleground. It comes back as you leave. This zone only keeps the quests for where you are; the All button over the list shows the rest until you leave." },
             { type = "toggle", key = "hoverDim", label = "Dim other quests on hover",

@@ -108,6 +108,9 @@ Pad.KEYS = {
     Y = { "GAMEPAD_FACE_TOP", "PAD4" },
     MENU_LEFT = { "GAMEPAD_MENU_LEFT", "PADBACK" },
     MENU_RIGHT = { "GAMEPAD_MENU_RIGHT", "PADFORWARD" },
+    -- D-pad left, only as a follow entry: a box inside a game window whose own
+    -- footer takes the D-pad (the quest journal over the world map's log).
+    LEFT = { "GAMEPAD_DPAD_LEFT", "PADDLEFT" },
 }
 local function keyOf(name) return key(Pad.KEYS[name][1], Pad.KEYS[name][2]) end
 Pad.KeyOf = keyOf   -- "X" -> the game's key name for it ("PAD3")
@@ -556,8 +559,6 @@ function Pad.ShowHints(f)
     hints:ClearAllPoints()
     if type(f.padHintsPlace) == "function" then
         f.padHintsPlace(hints)
-    elseif f.padHintsAbove then
-        hints:SetPoint("BOTTOMLEFT", f, "TOPLEFT", 0, Pad.HINT_GAP)
     else
         hints:SetPoint("TOP", f, "BOTTOM", 0, -Pad.HINT_GAP)
     end
@@ -988,11 +989,11 @@ local function focusGained(self)
     end
 end
 
--- A Daylight UI box the game gives the controller to by itself (the chat's typing
--- box, which the game focuses through its own chat frame): its hints show and
+-- A Daylight UI box the game gives the controller to by itself (the quest
+-- journal, which the game focuses through its world map): its hints show and
 -- its keys bind while it's taken, then whichever window has the focus gets them
 -- back. f is a Daylight UI frame with padHints and, if it binds any, padKeys /
--- padTabs; f.padHintsAbove puts the bar over it.
+-- padTabs; f.padHintsPlace places the bar.
 function Pad.Take(f)
     if not manager() or fight or InCombatLockdown() or Pad.prompt then return end
     Pad.taken = f
@@ -1174,6 +1175,16 @@ local function settle()
     end
 end
 
+-- Puts the D-pad on b now, in whichever window has it (the game's own call for
+-- this, SetTargetButtonForFrame). Out of combat only.
+function Pad.Aim(b)
+    local nav = _G.SmartNavigation
+    if not manager() or fight or InCombatLockdown() or type(nav) ~= "table"
+        or not (nav.SetTargetButtonForFrame and nav.GetActiveFrame) then return end
+    local f = nav:GetActiveFrame()
+    if f and type(b) == "table" and b:IsVisible() then nav:SetTargetButtonForFrame(f, b) end
+end
+
 function Pad.Settle(aim)
     if not manager() then return end
     aimAt = aim or aimAt
@@ -1197,9 +1208,18 @@ end
 
 -- A small list over a window (a dropdown) takes the D-pad, and closing it
 -- gives the D-pad back to the window it opened from. Not in combat.
+-- A popup with keys of its own (frame.padKeys, such as a secure A on a row that
+-- casts) binds them while it has the D-pad, as a window does, but only while
+-- frame.padWanted() says this opening needs them: other dropdowns stay as they are.
 function Pad.Popup(frame, close)
     if close then
         frame.SmartNavigationCloseHandler = function() close(); return true end
+    end
+    if frame.padKeys then
+        frame.FocusGamepad = function(self)
+            if not self.padWanted or self.padWanted() then focusGained(self) end
+        end
+        frame.UnfocusGamepad = focusLost
     end
     frame:HookScript("OnShow", function(self)
         local m = manager()
@@ -1348,13 +1368,15 @@ end)
 
 -- Whispers and links
 
--- Opening the game's chat box from addon code (OpenChat, SendTell) hands its
--- controller focus Daylight UI's taint when the controller UI is on: the chat's
--- buttons go on the game's binding stack tainted, and from then on the game
--- refuses its own SetPreferredGamepadInteractTarget, so the pad stops working
--- until a reload. On a controller these two never open the box: a whisper is
--- typed in Daylight UI's own box and sent from there, and a link goes into a
--- box that's already open or straight to the channel picked.
+-- Daylight UI never opens the game's chat box from its own code. Doing so wrote
+-- the game's active and last chat box under Daylight UI's taint, and the game's
+-- chat code reads them first every time the box opens, so the taint stayed for
+-- the rest of the session: once a reply to a whisperer with a hidden name stuck,
+-- every Enter errored in the game's UpdateHeader. With the controller UI on, the
+-- pad also stopped working until a reload. So a whisper goes to the Daylight
+-- chat's card (DUI.ChatWhisper, when the Chat module can show one) or is typed in
+-- Daylight UI's own box and sent from there, and a link goes into a box that's
+-- already open or straight to the channel picked.
 
 local function locked()
     local C = C_ChatInfo
@@ -1369,15 +1391,7 @@ end
 -- name = their account name }.
 function Pad.Whisper(who)
     if type(who) ~= "table" or type(who.name) ~= "string" or who.name == "" then return end
-    local U = type(ChatFrameUtil) == "table" and ChatFrameUtil or nil
-    if not Pad.On() then
-        if who.bn then
-            if U and type(U.SendBNetTell) == "function" then U.SendBNetTell(who.name)
-            elseif type(ChatFrame_SendBNetTell) == "function" then ChatFrame_SendBNetTell(who.name) end
-        elseif U and type(U.SendTell) == "function" then U.SendTell(who.name)
-        elseif type(ChatFrame_SendTell) == "function" then ChatFrame_SendTell(who.name) end
-        return
-    end
+    if not Pad.On() and type(DUI.ChatWhisper) == "function" and DUI.ChatWhisper(who) then return end
     DUI.Widgets.Prompt(string.format(L["Whisper %s"], who.name), "", function(text)
         if locked() then return end
         if who.bn then
@@ -1404,19 +1418,13 @@ local function channels()
 end
 Pad.Channels = channels
 
--- Puts a link in the open chat box; with none open, a mouse player gets a new
--- box with it, as the game does, and a controller player picks a channel.
--- owner is what the channel menu opens beside.
+-- Puts a link in the open chat box; with none open, a channel is picked from a
+-- menu beside owner (at the mouse without one).
 function Pad.Share(link, owner)
     if type(link) ~= "string" or link == "" then return end
     local U = type(ChatFrameUtil) == "table" and ChatFrameUtil or nil
     local insert = U and U.InsertLink or ChatEdit_InsertLink
     if type(insert) == "function" and insert(link) then return end
-    if not Pad.On() then
-        local open = U and U.OpenChat or ChatFrame_OpenChat
-        if type(open) == "function" then open(link) end
-        return
-    end
     local keys, values = channels()
     DUI.Widgets.OpenMenu(owner or UIParent, keys, values, nil, function(chatType)
         if locked() then return end

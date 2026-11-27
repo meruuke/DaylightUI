@@ -28,10 +28,46 @@ local function color(fs)
     return r, g, b
 end
 
+-- Which drawn line a data line's own text sits on, or nil. The game stamps
+-- each data line with NumLines after adding its text, so a line with no text
+-- (a recipe's empty spacer, the SellPrice line) carries the stamp of the line
+-- above it. The SellPrice line's post-call then adds the coins line, so that
+-- one is its own, one below the stamp. Read as its stamp, the line above (a
+-- ring's last stat, a level requirement) was taken for the sell price.
+local SELL = Enum and Enum.TooltipDataLineType and Enum.TooltipDataLineType.SellPrice or 11
+local function hasWords(v) return isSecret(v) or (type(v) == "string" and v ~= "") end
+function Read.Landed(line)
+    if type(line) ~= "table" then return nil end
+    local at = line.lineIndex
+    if isSecret(at) or type(at) ~= "number" then return nil end
+    if hasWords(line.leftText) or hasWords(line.rightText) then return at end
+    local kind = line.type
+    if not isSecret(kind) and kind == SELL then return at + 1 end
+    return nil
+end
+
+-- Which data line landed on each drawn line (Read.Landed). Empty when the
+-- data has no indexes: then they're matched by position.
+local landed = {}
+local function mapLanded(data)
+    for k in pairs(landed) do landed[k] = nil end
+    local list = type(data) == "table" and data.lines
+    if type(list) ~= "table" then return end
+    for _, line in ipairs(list) do
+        local at = Read.Landed(line)
+        if at then landed[at] = line end
+    end
+end
+
 -- The data's line type and id (a quest title's quest), by line, when plain.
 local function typeOf(data, i)
     local list = type(data) == "table" and data.lines
-    local line = type(list) == "table" and list[i]
+    local line
+    if next(landed) then
+        line = landed[i]
+    else
+        line = type(list) == "table" and list[i]
+    end
     if type(line) ~= "table" then return nil end
     local t, id = line.type, line.id
     if isSecret(t) then t = nil end
@@ -47,6 +83,7 @@ function Read.Lines(tip, data)
     local n = tip.NumLines and tip:NumLines()
     if isSecret(n) then return 0, lines, true end
     if type(n) ~= "number" then n = 0 end
+    mapLanded(data)
     for i = 1, n do
         local left, right = Tip.Line(tip, i), Tip.Line(tip, i, "Right")
         local lt, rt = text(left), text(right)

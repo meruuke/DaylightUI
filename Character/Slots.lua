@@ -22,7 +22,6 @@ Slots.GAP = 10            -- icon to name
 Slots.NAME_SIZE, Slots.LINE_SIZE, Slots.CORNER_SIZE = Style.SIZE.body, Style.SIZE.small, Style.SIZE.tiny
 Slots.CORNER_BG_ALPHA, Slots.CORNER_BG_PAD = 0.65, 1   -- the dark square behind the corner's number
 Slots.ENCHANT_SIZE = Style.SIZE.small
-Slots.ENCHANT = DUI.Style.INK.GOOD            -- enchant line
 Slots.MARK = 5                                -- enchant marker size in icons-only mode
 Slots.DOT = 7
 Slots.DIM = DUI.Style.INK.LABEL     -- line under a name
@@ -172,12 +171,10 @@ function Slots.Make(parent, key, side, size, into)
     h.line:SetWordWrap(false)
     h.enchant = Style.Text(h, Slots.ENCHANT_SIZE, justify)
     h.enchant:SetWordWrap(false)
-    h.enchant:SetTextColor(Slots.ENCHANT[1], Slots.ENCHANT[2], Slots.ENCHANT[3])
     h.mark = h.icon:CreateTexture(nil, "OVERLAY")
     h.mark:SetTexture(Slots.WHITE)
     h.mark:SetSize(Slots.MARK, Slots.MARK)
     h.mark:SetPoint("TOPLEFT", h.icon, "TOPLEFT", 2, -2)
-    h.mark:SetVertexColor(Slots.ENCHANT[1], Slots.ENCHANT[2], Slots.ENCHANT[3], 1)
     h.mark:Hide()
     local kept = into or Slots.frames
     kept[key] = h
@@ -314,11 +311,15 @@ end
 -- opts.itemLevel shows the item level line.
 -- Gear swapped while the window is open fades in. Stepped by hand, since the
 -- window can't use alpha animations.
+-- Only the picture and the words the slot shows: fading up shows a hidden text,
+-- and the ammo slot's name and count would land on the ranged weapon's.
 local function arrive(h)
     local M = DUI.Motion
     for _, r in ipairs({ h.tex, h.name, h.line }) do
-        r:SetAlpha(0)
-        M.AlphaTo(r, 1, M.NORMAL)
+        if r == h.tex or h.names then
+            r:SetAlpha(0)
+            M.AlphaTo(r, 1, M.NORMAL)
+        end
     end
 end
 
@@ -377,19 +378,29 @@ function Slots.Paint(h, e, opts)
         local side = w + 2 * Slots.CORNER_BG_PAD
         h.cornerBg:SetSize(side, side)
     end
-    Slots.PaintEnchant(h, e)
+    Slots.PaintEnchant(h, e, opts.missingEnchants == true and ns.Gear.MissingEnchant(e))
     Slots.FitText(h)
     if h.over then Style.InkText(h.name, "VALUE") end
 end
 
--- Enchant as a third line, or a small green mark in icons-only mode. A new
+-- Enchant as a third line, or a small mark in icons-only mode. A new
 -- enchant fades in. The first paint doesn't animate.
-function Slots.PaintEnchant(h, e)
+function Slots.PaintEnchant(h, e, missing)
     local text = (not e.empty and e.enchant) or nil
+    -- In the accent, so it stands apart from green item names and the white
+    -- lines. A slot that could have one says so softly.
+    local r, g, b = DUI.Style.Accent()
+    h.mark:SetVertexColor(r, g, b, 1)
+    if text then
+        h.enchant:SetTextColor(r, g, b)
+    elseif missing then
+        text = L["No enchant"]
+        DUI.Style.InkText(h.enchant, "OFF")
+    end
     local three = h.names == true and text ~= nil
     if three ~= (h.three == true) then stack(h, three) end
     h.enchant:SetShown(three)
-    h.mark:SetShown(text ~= nil and not h.names)
+    h.mark:SetShown(text ~= nil and not h.names and not missing)
     if text == h.enchantText then return end
     local fresh = h.enchantPainted and text ~= nil
     h.enchantText, h.enchantPainted = text, true
@@ -450,13 +461,14 @@ function Slots.DoLend()
     -- Parent to the Character page so the invisible buttons hide on other pages.
     local _, any = next(Slots.frames)
     local host = any:GetParent() or f
-    home = { parent = items:GetParent(), points = pointsOf(items), w = items:GetWidth(), h = items:GetHeight() }
+    home = { parent = items:GetParent(), points = pointsOf(items), w = items:GetWidth(), h = items:GetHeight(),
+             level = items:GetFrameLevel() }
     items:SetParent(host)
     items:ClearAllPoints()
     items:SetPoint("TOPLEFT", host, "TOPLEFT", 0, 0)
     items:SetSize(1, 1)   -- so it never covers the tabs
     for _, b in ipairs(gameButtons()) do
-        buttonHome[b] = { points = pointsOf(b), mouse = b:IsMouseEnabled() }
+        buttonHome[b] = { points = pointsOf(b), mouse = b:IsMouseEnabled(), level = b:GetFrameLevel() }
         Slots.RawAlpha(b, 0)
         local h = slotFor(b)
         if h then
@@ -479,23 +491,61 @@ end
 
 function Slots.Return()
     if not Slots.lent or InCombatLockdown() then return false end
+    -- A new parent drops a frame to one level above it, and the game keeps its
+    -- model under the slots only by level, so the old levels go back too.
+    local items = PaperDollItemsFrame
+    items:SetParent(home.parent)
+    if home.level then items:SetFrameLevel(home.level) end
+    restore(items, home.points)
+    if (home.w or 0) > 0 then items:SetSize(home.w, home.h) end
     for b, saved in pairs(buttonHome) do
         restore(b, saved.points)
+        if saved.level then b:SetFrameLevel(saved.level) end
         b:EnableMouse(saved.mouse ~= false)
         Slots.RawAlpha(b, 1)
     end
     buttonHome = {}
-    local items = PaperDollItemsFrame
-    items:SetParent(home.parent)
-    restore(items, home.points)
-    if (home.w or 0) > 0 then items:SetSize(home.w, home.h) end
     local fly = EquipmentFlyoutFrame
     if flyHome and type(fly) == "table" then fly:SetParent(flyHome) end
     flyHome = nil
     for _, h in pairs(Slots.frames) do h.button = nil end
     Slots.byButton = {}
     Slots.lent = false
+    Slots.Lift()
     return true
+end
+
+local function descendants(f, out)
+    for _, c in ipairs({ f:GetChildren() }) do
+        out[#out + 1] = c
+        descendants(c, out)
+    end
+    return out
+end
+
+-- The game means each slot to sit one level above its holder (100), over the
+-- model (50), but in game they can load at level 4, under the model, which
+-- then takes every hover and click. Each slot goes back to one above its
+-- holder, its own pieces (border, Alt arrow, outline) moved by the same amount.
+-- The slots aren't protected, so this works in a fight too.
+function Slots.Lift()
+    local items = PaperDollItemsFrame
+    if Slots.lent or type(items) ~= "table" then return end
+    local base = items:GetFrameLevel()
+    for _, b in ipairs(gameButtons()) do
+        local level = b:GetFrameLevel()
+        if b:GetParent() == items and level <= base then
+            local kids = descendants(b, {})
+            local was = {}
+            for i, c in ipairs(kids) do was[i] = c:GetFrameLevel() end
+            local shift = base + 1 - level
+            b:SetFrameLevel(base + 1)
+            -- Only the ones the client didn't already carry along.
+            for i, c in ipairs(kids) do
+                if c:GetFrameLevel() == was[i] then c:SetFrameLevel(was[i] + shift) end
+            end
+        end
+    end
 end
 
 -- The Alt swap menu attaches to the parked page each time it fills, so move it here after.

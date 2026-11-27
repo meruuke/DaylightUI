@@ -23,10 +23,16 @@ end
 Junk.PriceOf = priceOf
 
 -- Every junk slot that sells for something: { bag, slot, value }.
+-- A bag the game's Sell Junk is told to leave alone (its bag menu's "Ignore"
+-- Sell Junk, saved by the game). The game's sale skips it, so Daylight UI's
+-- own sales do too, and so does the NPC window's Sell junk count (the core's
+-- DUI.JunkSkipsBag).
+function Junk.BagSkipped(bag) return DUI.JunkSkipsBag(bag) end
+
 function Junk.Items()
     local out = {}
     for _, s in ipairs(ns.Bags.Slots()) do
-        if s.section ~= "keyring" then
+        if s.section ~= "keyring" and not Junk.BagSkipped(s.bag) then
             local slot = s.button:GetID()
             local info = ns.Items.InfoAt(s.bag, slot)
             if info and not info.hasNoValue then
@@ -50,7 +56,7 @@ end
 function Junk.Grays()
     local out, kept = {}, false
     for _, s in ipairs(ns.Bags.Slots()) do
-        if s.section ~= "keyring" then
+        if s.section ~= "keyring" and not Junk.BagSkipped(s.bag) then
             local slot = s.button:GetID()
             local info = ns.Items.InfoAt(s.bag, slot)
             if info and info.quality == 0 and not info.hasNoValue then
@@ -253,6 +259,14 @@ function Junk.OnVendor()
     Junk.Sell(Junk.Items())
 end
 
+-- Walking away from a vendor: the spots the open bag kept for sold items close
+-- up. Right-click sales, and sales Daylight UI didn't start (the game's own
+-- vendor button, another vendor addon), hold them only while the vendor is open.
+function Junk.Fold()
+    local f = ns.window
+    if f and f:IsShown() and f.stale and not f.sorting and ns.Window then ns.Window.EaseRelayout(f) end
+end
+
 -- For the NPC window's Sell junk button. True when a locked gray item means
 -- selling item by item here; false leaves it to the game's own sale.
 function DUI.SellJunkAroundLocks()
@@ -320,7 +334,7 @@ function Junk.Register()
         TDP.AddTooltipPostCall(types.Item, function(tip, data) DUI.SafeCall(Junk.OnTip, tip, data) end)
     end
     DUI.RegisterEvent("MERCHANT_SHOW", function() Junk.OnVendor(); refreshButton() end)
-    DUI.RegisterEvent("MERCHANT_CLOSED", function() Junk.vendorOpen = false; refreshButton() end)
+    DUI.RegisterEvent("MERCHANT_CLOSED", function() Junk.vendorOpen = false; refreshButton(); Junk.Fold() end)
     -- Joining or leaving a raid switches which shard limit counts.
     DUI.RegisterEvent("GROUP_ROSTER_UPDATE", function()
         if ns.window and ns.Window and Junk.IsWarlock() then ns.Window.UpdateShards(ns.window) end

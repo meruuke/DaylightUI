@@ -236,10 +236,13 @@ function Craft.MakeTabs(f)
     end
     local list = {}
     for _, t in ipairs(tabs) do list[#list + 1] = { id = t.skillLine, text = t.name } end
-    Win.Tabs(f, list, Craft.Switch)
+    Win.Tabs(f, list, Craft.Switch, { onReorder = function(ids)
+        ns.Data.SetOrder(ids)
+        Craft.tabs = ns.Data.Tabs()
+    end })
     for i, b in ipairs(f.tabs) do
-        local spellID = tabs[i].spellID
-        b:HookScript("OnEnter", function(self) Craft.TabCaster(f, self, spellID) end)
+        b.spellID = tabs[i].spellID
+        b:HookScript("OnEnter", function(self) Craft.TabCaster(f, self, self.spellID) end)
     end
 end
 
@@ -254,8 +257,24 @@ function Craft.TabCaster(f, b, spellID)
             above = function() return f end,
             enter = function(row) row.Paint(true) end,
             leave = function(row) row.Paint(false) end,
+            -- A tab dragged from here: its release must not cast, so the caster
+            -- holds no spell until the mouse is let go, then it's laid again over
+            -- whichever tab the mouse is on.
+            drag = function(row)
+                local btn = Craft.tabCaster.button
+                if btn and not InCombatLockdown() then btn:SetAttribute("type1", nil) end
+                Win.TabDragStart(f, row)
+            end,
+            drop = function()
+                Win.TabDragStop(f)
+                C_Timer.After(0, function()
+                    for _, t in ipairs(f.tabs or {}) do
+                        if t:IsMouseOver() then return Craft.TabCaster(f, t, t.spellID) end
+                    end
+                end)
+            end,
             post = function(row, button)
-                if button ~= "LeftButton" or f.tab == row.id then return end
+                if button ~= "LeftButton" or f.tab == row.id or Win.TabDropped(f) then return end
                 Win.PickTab(f, row.id)
                 if DUI.Sound then DUI.Sound.Play("click") end
             end })
@@ -613,15 +632,17 @@ function Craft.Changed(_, shown)
     end
     local g = Craft.Game()
     if not g then return end
+    -- A list still coming in can't say whose it is: a link may read as nothing, or
+    -- as the profession that was open before. Craft.Settled looks again once it's in,
+    -- the same wait the game's own frame does.
+    if ns.Data.Changing() and type(g.BookPage) == "table" and not g.BookPage:IsShown() then
+        Craft.waiting = "first"
+        return
+    end
     local page = Craft.PageFor(g)
     if page == "overview" then return Craft.Open(true) end
     if page == "view" then return ns.View.Open() end
-    if not page then
-        -- Someone's list hasn't arrived, so there's no way to tell whose it is yet. Craft.Settled
-        -- checks again.
-        if ns.Data.Changing() then Craft.waiting = true; return end
-        return lend()
-    end
+    if not page then return lend() end
     Craft.Open()
 end
 
@@ -637,6 +658,12 @@ function Craft.TradeSkillShown()
         return
     end
     if not Win.Followers.Shown(Craft.follow, "craft") then return end
+    -- Someone's link clicked over an open window reads as the old profession until
+    -- its list is in, so the pick waits for it (Craft.Settled).
+    if g and ns.Data.Changing() then
+        Craft.waiting = Craft.waiting or "shown"
+        return
+    end
     local page = g and Craft.PageFor(g)
     if page == "view" then
         if Win.IsOpen(Craft.frame) then shut(Craft.frame) end
@@ -657,8 +684,10 @@ function Craft.Settled()
         if Craft.Ours(g) and not kept() then Win.Followers.Reclaim(Craft.follow, "craft") end
         return
     end
-    if not Craft.waiting then return end
+    local waiting = Craft.waiting
+    if not waiting or ns.Data.Changing() then return end
     Craft.waiting = nil
+    if waiting == "shown" then return Craft.TradeSkillShown() end
     Craft.Changed("craft", true)
 end
 
@@ -853,7 +882,7 @@ end
 function Craft.Build(mod)
     ns.module = mod
     if Craft.frame then return Craft.frame end
-    local f = Win.New({ name = Craft.NAME, back = "Professions", w = Craft.W, h = Craft.H, portrait = true })
+    local f = Win.New({ name = Craft.NAME, escape = false, back = "Professions", w = Craft.W, h = Craft.H, portrait = true })
     Craft.frame = f
     f.onClose = Craft.Close
     Craft.PadKeys(f)

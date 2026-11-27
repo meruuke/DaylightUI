@@ -97,6 +97,172 @@ T.test("info panel: on Automatic, moved past the screen's middle, the meter come
     T.eq(P.side, "left", "reset: the screen's corner")
 end)
 
+T.test("info panel: Below, the meter slides down out of the minimap's bottom and the map stays put", function()
+    local DUI = login()
+    local P = stub.infopanel.Panel
+    DUI:Set("InfoPanel", "map.meterSide", "below")
+    settle()
+    T.eq(P.side, "below")
+    T.eq(DUI.Movers.Corner("infopanel"), "TOPRIGHT", "pinned by the map's top corner, so it grows downward")
+    local map, meterH = DUI:Get("InfoPanel", "map.size"), DUI:Get("InfoPanel", "meter.height")
+    local wide, tall = P.holder:GetWidth(), P.panel:GetHeight()
+    T.near(wide, map + 2 * P.inset, 0.01, "one column as wide as the map")
+    T.near(P.meterArea:GetWidth(), map, 0.01, "the meter as wide as the map")
+    T.near(P.meterArea:GetHeight(), meterH, 0.01, "as tall as its height setting")
+    T.eq(P.mapArea:GetPoint(1), "TOPLEFT", "the map at the top")
+    T.eq(P.meterClip:GetPoint(1), "BOTTOMLEFT", "the meter rides the panel's bottom edge")
+    local a = { P.arrow:GetPoint(1) }
+    T.eq(a[1], "TOP"); T.eq(a[3], "BOTTOM", "the fold tab on the bottom edge")
+    DUI:Set("InfoPanel", "meter.enabled", false)
+    stub.RunOnUpdate(P.slide.driver, P.SLIDE / 2)
+    local mid = P.panel:GetHeight()
+    T.truthy(mid < tall and mid > tall - meterH - P.inset, "slides, never jumps")
+    settle()
+    T.near(tall - P.panel:GetHeight(), meterH + P.inset, 0.01, "folded: the meter's height back")
+    T.near(P.holder:GetWidth(), wide, 0.01, "the width never changes")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- At the screen's top-right corner, Above and Right pushed the whole box (map
+-- too) back on screen. The meter's room may hang off the edge; the map never moves.
+T.test("info panel: on every side the screen keeps only the map in view, so opening the meter never pushes it", function()
+    local DUI = login()
+    local P = stub.infopanel.Panel
+    local want = { left = { 1, 1 }, right = { 2, -1 }, above = { 3, -1 }, below = { 4, 1 } }
+    for side, w in pairs(want) do
+        DUI:Set("InfoPanel", "map.meterSide", side)
+        DUI:Set("InfoPanel", "meter.enabled", true)
+        settle()
+        T.truthy(P.holder:IsClampedToScreen(), side .. ": still kept on screen")
+        local room = P.geo.room
+        T.truthy(room > 0, side .. ": the meter takes room")
+        local insets = { P.holder:GetClampRectInsets() }
+        for i = 1, 4 do
+            T.near(insets[i], i == w[1] and w[2] * room or 0, 0.01, side .. ": inset " .. i)
+        end
+        DUI:Set("InfoPanel", "meter.enabled", false)
+        stub.RunOnUpdate(P.slide.driver, P.SLIDE / 2)
+        local half = { P.holder:GetClampRectInsets() }
+        T.near(half[w[1]], w[2] * P.slide.p * room, 0.01, side .. ": follows the slide")
+        settle()
+        T.near(select(w[1], P.holder:GetClampRectInsets()), 0, 0.01, side .. ": folded, the whole box")
+    end
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("info panel: Above, the meter rises over the minimap, pinned by the map's bottom corner", function()
+    local DUI = login()
+    local P = stub.infopanel.Panel
+    DUI:Set("InfoPanel", "map.meterSide", "above")
+    settle()
+    T.eq(P.side, "above")
+    T.eq(DUI.Movers.Corner("infopanel"), "BOTTOMRIGHT", "the map's bottom corner stays where it is")
+    T.eq(P.mapArea:GetPoint(1), "BOTTOMLEFT", "the map at the bottom")
+    T.eq(P.meterClip:GetPoint(1), "TOPLEFT", "the meter rides the panel's top edge")
+    local a = { P.arrow:GetPoint(1) }
+    T.eq(a[1], "TOP", "with the experience bar on top, the fold tab sits on the bottom edge")
+    DUI:Set("InfoPanel", "xp.enabled", false)
+    settle()
+    a = { P.arrow:GetPoint(1) }
+    T.eq(a[1], "BOTTOM"); T.eq(a[3], "TOP", "without it, on the top edge toward the meter")
+    -- Back to a side: everything where it was.
+    DUI:Set("InfoPanel", "map.meterSide", "auto")
+    settle()
+    T.eq(P.side, "left")
+    T.eq(DUI.Movers.Corner("infopanel"), "TOPRIGHT")
+    T.eq(P.mapArea:GetPoint(1), "TOPRIGHT")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("info panel: Below, the player's meter windows line up under the meter and slide with it", function()
+    local DUI = login()
+    local ns = stub.infopanel
+    local P, MF = ns.Panel, ns.MeterFrame
+    DUI:Set("InfoPanel", "map.meterSide", "below")
+    settle()
+    local one = ns.Windows.Add("damage")
+    local two = ns.Windows.Add("healing")
+    stub.RunTimers()
+    settle()
+    local p1 = { MF.hosts[one].frame:GetPoint(1) }
+    T.eq(p1[1], "TOPRIGHT"); T.eq(p1[2], P.holder, "the first hangs from the panel")
+    T.eq(p1[3], "BOTTOMRIGHT", "under it, right edges lined up")
+    local p2 = { MF.hosts[two].frame:GetPoint(1) }
+    T.eq(p2[2], MF.hosts[one].frame, "the second hangs from the first")
+    T.eq(p2[3], "BOTTOMRIGHT")
+    -- Moved by hand, a window keeps its own spot; the next one closes up.
+    DUI.DB.Positions()["infopanel.meter." .. one] = { 100, 100 }
+    DUI.Movers.Apply("infopanel.meter." .. one)
+    ns.RefreshMeters(ns.module)
+    stub.RunTimers()
+    T.eq(select(2, MF.hosts[one].frame:GetPoint(1)), UIParent, "moved: its own spot")
+    T.eq(select(2, MF.hosts[two].frame:GetPoint(1)), P.holder, "the next one takes its place under the panel")
+    -- Above a panel low on the screen they stack upward; near the top they'd
+    -- run off it, so they hang under the panel instead.
+    function P.holder:GetTop() return 400 end
+    DUI:Set("InfoPanel", "map.meterSide", "above")
+    settle()
+    stub.RunTimers()
+    local up = { MF.hosts[two].frame:GetPoint(1) }
+    T.eq(up[1], "BOTTOMRIGHT"); T.eq(up[2], P.holder); T.eq(up[3], "TOPRIGHT", "over the panel")
+    function P.holder:GetTop() return UIParent:GetHeight() - 20 end
+    ns.RefreshMeters(ns.module)
+    stub.RunTimers()
+    up = { MF.hosts[two].frame:GetPoint(1) }
+    T.eq(up[1], "TOPRIGHT"); T.eq(up[3], "BOTTOMRIGHT", "no room over it: under it")
+    P.holder.GetTop = nil
+    -- Back on a side, they go back to the screen's corner.
+    DUI:Set("InfoPanel", "map.meterSide", "left")
+    settle()
+    stub.RunTimers()
+    T.eq(select(2, MF.hosts[two].frame:GetPoint(1)), UIParent, "the bottom-right corner again")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("info panel: Below, the quest tracker glides down with the meter and the docked windows, never in a fight", function()
+    local DUI = login()
+    local ns = stub.infopanel
+    local P, Tr, MF = ns.Panel, ns.Tracker, ns.MeterFrame
+    DUI.questsOwnTracker = true
+    -- The fake game has no layout: the panel's bottom follows its height.
+    function P.panel:GetRight() return 1900 end
+    function P.panel:GetBottom() return 1000 - self:GetHeight() end
+    local function y() return select(5, Tr.anchor:GetPoint(1)) end
+    local function glide() local d = DUI.Motion.Driver(); if d then stub.RunOnUpdate(d, 1) end end
+    DUI:Set("InfoPanel", "map.meterSide", "below")
+    settle()
+    Tr.Apply(DUI:Get("InfoPanel", "tracker"))
+    glide()
+    T.near(y(), P.panel:GetBottom() - P.GAP, 0.01, "under the panel with the meter out")
+    -- Folding: the tracker comes up with the meter, step by step.
+    local open = y()
+    DUI:Set("InfoPanel", "meter.enabled", false)
+    stub.RunOnUpdate(P.slide.driver, P.SLIDE / 2)
+    T.truthy(y() > open, "on its way up")
+    T.near(y(), P.panel:GetBottom() - P.GAP, 0.01, "right under the meter's edge mid-slide")
+    settle()
+    glide()
+    local folded = y()
+    T.near(folded, P.panel:GetBottom() - P.GAP, 0.01, "under the folded panel")
+    -- A window docked under the panel: the tracker goes under it.
+    local id = ns.Windows.Add("damage")
+    stub.RunTimers()
+    glide()
+    local h = MF.hosts[id].frame:GetHeight()
+    T.near(y(), folded - h - MF.GAP, 0.01, "under the docked window")
+    -- In a fight the quest item buttons can't move: the tracker waits, then glides.
+    stub.EnterCombat()
+    local before = y()
+    P.arrow:GetScript("OnClick")(P.arrow)
+    settle()
+    glide()
+    T.eq(y(), before, "held in the fight")
+    stub.LeaveCombat()
+    glide()
+    T.near(y(), P.panel:GetBottom() - P.GAP - h - MF.GAP, 0.01, "after it, under the meter and the window")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
 T.test("info panel: the minimap's box has its own background and border", function()
     local DUI = login()
     local P = stub.infopanel.Panel
@@ -1295,6 +1461,78 @@ T.test("info panel: a round map without turning has its ring, N fixed at the top
     T.falsy(Map.ring:IsShown(), "no ring on the square")
 end)
 
+T.test("info panel: a round map without its box: the meter slides out in a box of its own, the data texts in one under the map", function()
+    local DUI = login()
+    local P, Style = stub.infopanel.Panel, DUI.Style
+    local function finish() stub.RunOnUpdate(DUI.Motion.Driver(), 1); settle() end
+    local square = Style.GetShell(P.panel)
+    DUI:Set("InfoPanel", "map.noBox", true)
+    finish()
+    T.falsy(P.bare, "a square map keeps its box")
+    T.truthy(square:IsShown())
+    DUI:Set("InfoPanel", "map.shape", "round")
+    finish()
+    T.truthy(P.bare)
+    T.falsy(square:IsShown(), "the square box faded away")
+    T.truthy(P.meterBox:IsShown(), "the meter in a box of its own")
+    T.truthy(P.dataBox:IsShown(), "the data texts in a box of their own")
+    T.eq(Style.GetShell(P.meterBox):GetAlpha(), 1)
+    T.truthy(Minimap:GetFrameLevel() > P.meterArea:GetFrameLevel(), "the map over the meter: it slides out from behind it")
+    T.truthy(P.mapArea:GetFrameLevel() > P.meterBox:GetFrameLevel())
+    -- The meter's box is cut only behind the map: from past the panel's
+    -- outer edge (its shadow) to the map's middle.
+    local a = { P.meterClip:GetPoint(1) }
+    local b = { P.meterClip:GetPoint(2) }
+    T.eq(a[1], "TOPLEFT"); T.eq(a[2], P.panel)
+    T.truthy(a[4] < 0 and a[5] > 0, "room for the shadow")
+    T.eq(b[1], "TOPRIGHT"); T.eq(b[2], P.mapArea); T.eq(b[3], "TOP", "out from behind the map's middle")
+    local box = { P.meterBox:GetPoint(1) }
+    T.eq(box[2], P.meterArea, "the box round the meter")
+    -- Widths: the map's edge is the panel's when folded; open, the meter's box
+    -- and a gap beside it.
+    local T_ = DUI.Pixel.Px(P.panel, Style.BorderPx(P.panel))
+    local map, w, pad = DUI:Get("InfoPanel", "map.size"), DUI:Get("InfoPanel", "meter.width"), P.PAD
+    T.near(P.holder:GetWidth(), T_ + pad + map + w + 2 * (T_ + pad) + pad, 0.01, "open")
+    T.truthy((P.arrowY or 0) > 0, "the fold tab level with the map's middle, above the panel's")
+    DUI:Set("InfoPanel", "meter.enabled", false)
+    finish()
+    T.near(P.holder:GetWidth(), T_ + pad + map, 0.01, "folded: the panel ends at the map's ring")
+    T.falsy(P.meterBox:IsShown(), "no empty box behind the map")
+    T.eq(select(3, P.arrow:GetPoint(1)), "LEFT", "the tab tucks behind the ring")
+    DUI:Set("InfoPanel", "meter.enabled", true)
+    finish()
+    -- A meter with its own fade takes its box along.
+    DUI:Set("InfoPanel", "meter.ownFade", true)
+    finish()
+    T.truthy(P.meterBox:IsIgnoringParentAlpha(), "fades with the meter, not the panel")
+    DUI:Set("InfoPanel", "meter.ownFade", false)
+    finish()
+    T.falsy(P.meterBox:IsIgnoringParentAlpha())
+    -- Square again: the box comes back.
+    DUI:Set("InfoPanel", "map.shape", "square")
+    finish()
+    T.falsy(P.bare)
+    T.truthy(square:IsShown())
+    T.eq(square:GetAlpha(), 1)
+    T.falsy(P.meterBox:IsShown())
+    T.falsy(P.dataBox:IsShown())
+    T.eq(P.meterClip:GetPoint(1), "TOPLEFT")
+    T.eq(P.arrowY, 0)
+    -- Turning makes the map round, so it drops the box too.
+    local old = GetCVarBool
+    GetCVarBool = function(k) if k == "rotateMinimap" then return true end return old and old(k) end
+    stub.FireEvent("CVAR_UPDATE", "rotateMinimap", "1")
+    stub.RunTimers()
+    finish()
+    T.truthy(P.bare, "a turning map is round")
+    T.falsy(square:IsShown())
+    GetCVarBool = old
+    stub.FireEvent("CVAR_UPDATE", "rotateMinimap", "0")
+    stub.RunTimers()
+    finish()
+    T.falsy(P.bare)
+end)
+
 -- The game's Hybrid Minimap, loaded on demand where the map is drawn from art
 -- (dungeons). It's a child of the map filling it, fixed at BACKGROUND strata
 -- level 100 under the map (whose terrain it turns off), with a black background
@@ -1852,6 +2090,67 @@ T.test("info panel: faded out, the minimap goes see-through, never hidden (its i
     T.truthy(Minimap:IsShown())
 end)
 
+T.test("info panel: faded out, the minimap's quest areas go with it and come back with it", function()
+    login()
+    -- The client draws the quest areas (their fill and glowing edge) whatever
+    -- the map's alpha, as it does the arrow; they stay inside the map's mask.
+    -- A player saw the outlines float in the corner with the map faded away.
+    local Map = stub.infopanel.Minimap
+    local function areasShow() return Minimap:IsVisible() and Minimap.__mask ~= Map.ERASE end
+    local F = DaylightUI.Fade
+    local function settle()
+        F.Step()
+        for _ = 1, 120 do stub.RunOnUpdate(F.driver, 1 / 60) end
+    end
+    local own = Minimap.__mask
+    T.truthy(own and own ~= Map.ERASE, "at rest: the map's own mask")
+    T.truthy(areasShow(), "at rest: quest areas show")
+    DaylightUI:Set("InfoPanel", "fade.mode", "ooc")
+    DaylightUI:Set("InfoPanel", "fade.delay", 0)
+    stub.Advance(3)
+    settle()
+    T.eq(Minimap:GetAlpha(), 0, "faded: map gone")
+    T.falsy(areasShow(), "faded: its quest areas gone too")
+    -- The panel laid out again meanwhile (a setting, a loading screen) keeps them away.
+    Map.Apply(Map.cfg)
+    settle()
+    T.falsy(areasShow(), "a refresh while faded doesn't bring them back")
+    stub.EnterCombat()
+    settle()
+    T.eq(Minimap:GetAlpha(), 1, "in a fight: map back")
+    T.eq(Minimap.__mask, own, "with its own mask")
+    T.truthy(areasShow(), "and its quest areas")
+    stub.LeaveCombat()
+    stub.Advance(3)
+    settle()
+    T.falsy(areasShow(), "faded again: gone again")
+    -- A round map gets its round mask back, not the square one.
+    DaylightUI:Set("InfoPanel", "map.shape", "round")
+    settle()
+    T.falsy(areasShow(), "shape changed while faded: still gone")
+    DaylightUI:Set("InfoPanel", "fade.mode", "never")
+    stub.Advance(3)
+    settle()
+    T.eq(Minimap.__mask, Map.ROUND_MASK, "back: the round mask")
+    T.truthy(areasShow())
+    -- Faded only part way, the map still shows: so do they.
+    DaylightUI:Set("InfoPanel", "fade.mode", "ooc")
+    DaylightUI:Set("InfoPanel", "fade.alpha", 0.3)
+    stub.Advance(3)
+    settle()
+    T.near(Minimap:GetAlpha(), 0.3, 0.01, "part faded")
+    T.truthy(areasShow(), "part faded: still in sight")
+    -- The AFK screen and the NPC scene take the map away: the areas too.
+    DaylightUI:Set("InfoPanel", "fade.mode", "never")
+    stub.Advance(3)
+    settle()
+    F.MapAway("test", true)
+    T.falsy(areasShow(), "map away: quest areas away")
+    F.MapAway("test", false)
+    T.truthy(areasShow(), "map back: quest areas back")
+    DaylightUI:Set("InfoPanel", "map.shape", "square")
+end)
+
 T.test("info panel: the minimap comes back when something else dims the whole screen and lets go", function()
     login()
     local F = DaylightUI.Fade
@@ -1905,6 +2204,27 @@ T.test("info panel: minimap clock shows local or server time, 12/24-hour", funct
     T.eq(Map.clock.text:GetText(), "3:09:42 AM", "seconds once switched on")
     DaylightUI:Set("InfoPanel", "map.clock.enabled", false)
     T.truthy(not Map.clock:IsShown())
+end)
+
+T.test("info panel: clicking the minimap clock opens the game's Clock, or stops a ringing alarm", function()
+    login()
+    local opened, ringing = {}, false
+    _G.ToggleTimeManager = function() opened[#opened + 1] = "clock" end
+    _G.TimeManager_IsAlarmFiring = function() return ringing end
+    _G.TimeManager_TurnOffAlarm = function() ringing = false; opened[#opened + 1] = "alarm off" end
+    local Map = stub.infopanel.Minimap
+    Map.UpdateClock()
+    local c = Map.clock
+    T.truthy(c:GetScript("OnClick"), "the clock takes a click")
+    -- In a fight (no secure button laid over it) the clock's own click runs.
+    stub.EnterCombat()
+    c:GetScript("OnClick")(c, "LeftButton")
+    T.deq(opened, { "clock" }, "the alarm and stopwatch window opens")
+    ringing = true
+    c:GetScript("OnClick")(c, "LeftButton")
+    T.deq(opened, { "clock", "alarm off" }, "a ringing alarm stops")
+    stub.LeaveCombat()
+    _G.ToggleTimeManager, _G.TimeManager_IsAlarmFiring, _G.TimeManager_TurnOffAlarm = nil, nil, nil
 end)
 
 T.test("info panel: the minimap's rotate switch is the game's own rotateMinimap setting", function()
@@ -2918,9 +3238,13 @@ T.test("info panel: the drawer's corner button is painted only when it lights up
     dot.SetVertexColor = function(...) paints = paints + 1; return set(...) end
     for _ = 1, 5 do D.Watch() end
     T.eq(paints, 0, "nothing changed: no paint")
+    -- The corner button sits inside the map's area: the mouse on it is on the map too.
+    local area = stub.infopanel.Panel.mapArea
+    stub.MouseEnter(area)
     function D.glyph:IsMouseOver() return true end
     for _ = 1, 5 do D.Watch() end
     T.eq(paints, 1, "lit once as the mouse comes")
+    stub.MouseLeave(area)
     function D.glyph:IsMouseOver() return false end
     D.Watch()
     T.eq(paints, 2, "dimmed once as it leaves")
@@ -3702,4 +4026,92 @@ T.test("info panel: meter bars in a custom gradient, or its middle with Bar grad
     Meter.PaintBar(sb, { classFilename = "MAGE" }, nil, cfg)
     T.isnil(DUI.Style.FillStops(sb:GetStatusBarTexture()), "flat")
     T.rgb(sb.__barColor, { DUI.Gradients.StopsMid(cfg.barGradient) }, "at the middle")
+end)
+
+-- With the meter in its own window, the threat meter and its tab hang off that
+-- window, somewhere else on the screen. Hovering the panel (its gold text, say)
+-- woke that far-off tab, seen in game.
+T.test("info panel: the threat tab wakes near its own window, not over the panel", function()
+    local DUI = login()
+    local P, TM = stub.infopanel.Panel, stub.infopanel.ThreatMeter
+    DUI:Set("InfoPanel", "meter.detached", true)
+    settle()
+    DUI.SetTestMode(true)
+    stub.RunOnUpdate(TM.slider.driver, 1)
+    T.eq(TM.host, P.meterFrame, "the threat meter rides the separate meter window")
+    local function tick()
+        stub.RunOnUpdate(P.hoverDriver, P.HOVER_EVERY)
+        local d = DUI.Motion.Driver()
+        for _ = 1, 10 do stub.Advance(0.05); stub.RunOnUpdate(d, 0.05) end
+    end
+    function P.holder:IsMouseOver() return true end
+    tick()
+    T.eq(TM.tab:GetAlpha(), 0, "the mouse on the panel leaves the meter window's tab alone")
+    function P.holder:IsMouseOver() return false end
+    function P.meterFrame:IsMouseOver() return true end
+    tick()
+    T.eq(TM.tab:GetAlpha(), 1, "near its own window it shows")
+    P.meterFrame.IsMouseOver, P.holder.IsMouseOver = nil, nil
+    DUI.SetTestMode(false)
+    DUI:Set("InfoPanel", "meter.detached", false)
+end)
+
+T.test("info panel: the XP and reputation bars each wear their own bar animation", function()
+    local DUI = login()
+    local XP, Rep, Fx = stub.infopanel.XP, stub.infopanel.RepBar, DUI.BarFx
+    _G.C_Reputation = { GetWatchedFactionData = function()
+        return { name = "Stormwind", reaction = 5, currentReactionThreshold = 0, nextReactionThreshold = 3000, currentStanding = 1800 }
+    end }
+    DUI:Set("InfoPanel", "rep.enabled", true)
+    DUI:Set("InfoPanel", "xp.barFx.style", "none")
+    DUI:Set("InfoPanel", "rep.barFx.style", "none")
+    T.isnil(Fx.StyleOf(XP.bar), "plain when picked so")
+    T.isnil(Fx.StyleOf(Rep.bar))
+    DUI:Set("InfoPanel", "xp.barFx.style", "flow")
+    T.eq(Fx.StyleOf(XP.bar), "flow")
+    T.eq(Fx.StyleOf(XP.repBar), "flow", "reputation shown on the XP bar moves the same way")
+    T.isnil(Fx.StyleOf(Rep.bar), "the separate bar keeps its own pick")
+    DUI:Set("InfoPanel", "rep.barFx.style", "tide")
+    T.eq(Fx.StyleOf(Rep.bar), "tide")
+    T.eq(Fx.StyleOf(XP.bar), "flow")
+    -- Upright bars stay still (the styles run along a bar), and move again laid across.
+    DUI:Set("InfoPanel", "xp.detached", true)
+    DUI:Set("InfoPanel", "xp.orientation", "vertical")
+    DUI:Set("InfoPanel", "rep.orientation", "vertical")
+    T.isnil(Fx.StyleOf(XP.bar), "upright XP bar")
+    T.isnil(Fx.StyleOf(Rep.bar), "upright reputation bar")
+    DUI:Set("InfoPanel", "xp.orientation", "horizontal")
+    DUI:Set("InfoPanel", "rep.orientation", "horizontal")
+    T.eq(Fx.StyleOf(XP.bar), "flow")
+    T.eq(Fx.StyleOf(Rep.bar), "tide")
+    -- Motion effects off stills both.
+    DUI:Set("general", "motion", false)
+    stub.RunTimers()
+    T.isnil(Fx.StyleOf(XP.bar))
+    T.isnil(Fx.StyleOf(Rep.bar))
+    DUI:Set("general", "motion", true)
+    stub.RunTimers()
+    T.eq(Fx.StyleOf(XP.bar), "flow")
+    DUI:Set("InfoPanel", "rep.enabled", false)
+    _G.C_Reputation = nil
+end)
+
+T.test("info panel: the XP and reputation bars start still, even after a Yes to the bar styles question", function()
+    local DUI = login()
+    local XP = stub.infopanel.XP
+    T.eq(DUI:Get("InfoPanel", "xp.barFx.style"), "none", "a new setup")
+    T.eq(DUI:Get("InfoPanel", "rep.barFx.style"), "none")
+    T.isnil(DUI.BarFx.StyleOf(XP.bar))
+    DUI = stub.Load({ infopanel = true, module = true, before = function()
+        PW.world()
+        DaylightUIDB = { version = "1.8.4", notesSeen = "1.8.4", installerSeen = true,
+                         profileData = { ["DPS/Tank"] = { general = {}, modules = {}, positions = {} } } }
+    end })
+    stub.Dismiss()
+    DUI.BarFx.Ask()
+    T.eq(stub.Asked(), "barFx")
+    stub.Answer(true)
+    T.eq(DUI:Get("UnitFrames", "player.barFx.health.style"), "flow", "the frames do move")
+    T.eq(DUI:Get("InfoPanel", "xp.barFx.style"), "none")
+    T.eq(DUI:Get("InfoPanel", "rep.barFx.style"), "none")
 end)

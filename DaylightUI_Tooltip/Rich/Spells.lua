@@ -245,17 +245,31 @@ function Spells.Read(n, lines, own)
     return r
 end
 
+local function escape(w) return (w:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0")) end
+
 -- The school a description names first, as { key, word, color }, or nil.
+-- Whole words first, so "fires a volley ... Arcane damage" is Arcane. Languages
+-- that join the school onto the damage word ("Feuerschaden") fall back to
+-- finding it inside a word; English never needs that.
 function Spells.School(text)
     if type(text) ~= "string" then return nil end
     local low = text:lower()
-    local best, at
-    for _, s in ipairs(Spells.SCHOOLS) do
-        local w = _G[s.global]
-        if type(w) ~= "string" or w == "" then w = s.key end
-        local from = low:find(w:lower(), 1, true)
-        if from and (not at or from < at) then best, at = { key = s.key, word = w }, from end
+    local function first(whole)
+        local best, at
+        for _, s in ipairs(Spells.SCHOOLS) do
+            local w = _G[s.global]
+            if type(w) ~= "string" or w == "" then w = s.key end
+            local lw = w:lower()
+            local from
+            if whole then from = low:find("%f[%w]" .. escape(lw) .. "%f[%W]")
+            else from = low:find(lw, 1, true) end
+            if from and (not at or from < at) then best, at = { key = s.key, word = w }, from end
+        end
+        return best
     end
+    local best = first(true)
+    local locale = type(GetLocale) == "function" and GetLocale() or "enUS"
+    if not best and not tostring(locale):find("^en") then best = first(false) end
     if best then best.color = ns.Tooltip.SCHOOL_COLORS[best.key] end
     return best
 end
@@ -470,7 +484,6 @@ end
 function Spells.RecipeRows(p, r, id)
     local Panel, INK, SIZE = ns.RichPanel, Style.INK, Style.SIZE
     local word = Spells.RecipeWords()
-    Panel.Gap(p, Spells.AFTER_STRIP)
     if r.reagents then
         Panel.Section(p, word)
         Panel.Gap(p, Spells.SECTION_GAP)
@@ -502,8 +515,8 @@ function Spells.Card(p, tip, r, lines, school, id, light, cd)
         tags[#tags + 1] = Tag(prof, profColor)
         title = rest
     end
-    if school then tags[#tags + 1] = Tag(school.word, school.color or INK.TEXT) end
-    if r.rank and r.rank ~= "" then tags[#tags + 1] = Tag(r.rank, { Style.Pop() }) end
+    if school and Panel.Wants("tags.spell.school") then tags[#tags + 1] = Tag(school.word, school.color or INK.TEXT) end
+    if r.rank and r.rank ~= "" and Panel.Wants("tags.spell.rank") then tags[#tags + 1] = Tag(r.rank, { Style.Pop() }) end
     Panel.Header(p, { icon = iconOf(tip, id), iconSize = Spells.ICON, iconGap = Spells.ICON_GAP,
         title = title, tags = #tags > 0 and tags or nil, tagGap = Spells.TAG_GAP })
     local tiles = {}
@@ -514,26 +527,21 @@ function Spells.Card(p, tip, r, lines, school, id, light, cd)
     elseif r.range then
         tiles[#tiles + 1] = { r.range, L["Range"] }
     end
-    if #tiles > 0 then
-        Panel.Gap(p, Spells.AFTER_HEADER)
-        Panel.Tiles(p, tiles)
-    end
-    if cd then
-        Panel.Gap(p, Spells.AFTER_HEADER)
-        Spells.CooldownRows(p, cd)
-    end
+    -- Its pieces, in the player's order (Rich/Layout.lua).
     local numbers = school and school.color or nil
-    for i, t in ipairs(r.desc) do
-        if i == 1 then Panel.Gap(p, Spells.AFTER_STRIP) end
-        Panel.Text(p, Tips.Numbers(t, numbers), INK.TEXT)
-    end
-    if recipe then Spells.RecipeRows(p, r, id) end
-    for i, f in ipairs(r.facts) do
-        if i == 1 and recipe then Panel.Gap(p, Spells.AFTER_STRIP) end
-        Panel.Text(p, f[1], f[2], SIZE.small)
-    end
-    ns.RichForeign.Place(p, "mixed")
-    ns.RichForeign.Place(p, "own")
+    local pieces = {
+        tiles = { has = #tiles > 0, draw = function() Panel.Tiles(p, tiles) end },
+        cooldown = { has = cd ~= nil, draw = function() Spells.CooldownRows(p, cd) end },
+        desc = { has = #r.desc > 0, draw = function()
+            for _, t in ipairs(r.desc) do Panel.Text(p, Tips.Numbers(t, numbers), INK.TEXT) end
+        end },
+        reagents = { has = recipe and true or false, draw = function() Spells.RecipeRows(p, r, id) end },
+        facts = { has = #r.facts > 0, draw = function()
+            for _, f in ipairs(r.facts) do Panel.Text(p, f[1], f[2], SIZE.small) end
+        end },
+        addons = ns.RichForeign.Part(p, "spell"),
+    }
+    ns.RichLayout.Run(p, "spell", pieces)
     Panel.Finish(p)
 end
 

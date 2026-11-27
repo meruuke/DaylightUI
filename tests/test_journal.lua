@@ -401,6 +401,43 @@ T.test("journal: a zone folds, kept per character; a search shows every match", 
     T.deq(texts(shown(f.list.stack.pieces, "quest"), "title"), { "Westfall Stew" })
 end)
 
+-- Where a region's left (0) or right (1) edge lies across the list page, from its
+-- anchors (the fake game doesn't lay frames out). Texts measure by their words.
+local function edgeX(region, page, side, width)
+    if region == page then return side * width end
+    local function across(point) return point:find("LEFT") and 0 or point:find("RIGHT") and 1 or 0.5 end
+    local own = region.GetStringWidth and region:GetStringWidth() or region:GetWidth()
+    local fallback
+    for i = 1, region:GetNumPoints() do
+        local point, rel, relPoint, ox = region:GetPoint(i)
+        local s = across(point)
+        local at = edgeX(rel or region:GetParent(), page, across(relPoint or point), width) + (ox or 0)
+        if s == side then return at end
+        fallback = fallback or (at + (side - s) * own)
+    end
+    return fallback
+end
+
+T.test("journal: the quest count never runs under the search box, whatever the font and count", function()
+    local J = load()
+    local f = open(J)
+    -- A wide font (Poppins at a large text scale): about 13 px a letter.
+    stub.measure = function(fs) local t = rawget(fs, "__text") or ""; return #t * 13, 16 end
+    local ok, err = pcall(function()
+        for _, text in ipairs({ "3/25", "25/40", "40/40" }) do
+            f.list.count:SetText(text)
+            local W = 330
+            local searchRight = edgeX(f.list.search, f.list, 1, W)
+            local countLeft = edgeX(f.list.count, f.list, 0, W)
+            T.truthy(searchRight <= countLeft - 4, text .. ": search box ends at " .. searchRight
+                .. ", the count starts at " .. countLeft)
+            T.truthy(searchRight - edgeX(f.list.search, f.list, 0, W) > 150, text .. ": the search box keeps its room")
+        end
+    end)
+    stub.measure = nil
+    if not ok then error(err, 0) end
+end)
+
 T.test("journal: a ready quest keeps its level color, Ready says it", function()
     local J, ns = load({ zone = "Westfall" })
     local f = open(J)
@@ -909,6 +946,52 @@ T.test("journal on a controller: X tracks or untracks the quest on the row or pa
     QW.ShowLog(false)
     stub.RunTimers()
     T.eq(DaylightUI.Pad.taken, nil, "given back with the log")
+    _G.GamepadMode, _G.InputUtil, _G.SmartNavigation = nil, nil, nil
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- The game's rule, taught here: in its quest log the world map's controller
+-- footer binds D-pad left to "World Map" (Blizzard_WorldMap.lua, questLogFooter's
+-- focusMap, GAMEPAD_DPAD_LEFT), so its cursor never moves left inside the panel.
+-- The footer row runs left to right, so its leftmost button, Show on map, could
+-- not be reached from the buttons beside it.
+T.test("journal on a controller: D-pad left walks the footer to Show on map, then the map has it", function()
+    local function padOn()
+        _G.GamepadMode = { FrameControlsManager = { FrameShown = function() end, FrameHidden = function() end } }
+        _G.InputUtil = { IsGamepadUIEnabled = function() return true end }
+    end
+    local J = load(nil, { before = padOn })
+    local at
+    local function focusMap() at = "map" end
+    _G.SmartNavigation = {
+        GetCurrentButton = function() return type(at) == "table" and at or nil end,
+        GetActiveFrame = function() return WorldMapFrame end,
+        SetTargetButtonForFrame = function(_, frame, b) if frame == WorldMapFrame then at = b end end,
+    }
+    local f = open(J)
+    row(f, 1):Click()   -- its page
+    stub.RunTimers()
+    local bs = f.quest.footer.buttons
+    local function left()
+        local o = stub.overrides.PADDLEFT
+        if o and o.click and _G[o.click] then _G[o.click]:Click() else focusMap() end
+        stub.RunTimers()
+    end
+    at = bs[4]   -- Abandon, the right corner
+    stub.RunTimers()
+    left()
+    T.eq(at, bs[3], "Abandon to Share")
+    left()
+    T.eq(at, bs[2], "Share to Untrack")
+    left()
+    T.eq(at, bs[1], "Untrack to Show on map")
+    T.truthy(bs[1].spec.primary, "the main button in the left corner")
+    left()
+    T.eq(at, "map", "from the left end D-pad left is the map's again, as in the game's own log")
+    at = row(f, 1)
+    QW.ShowLog(false)
+    stub.RunTimers()
+    T.eq(stub.overrides.PADDLEFT, nil, "nothing left bound once the log closes")
     _G.GamepadMode, _G.InputUtil, _G.SmartNavigation = nil, nil, nil
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)

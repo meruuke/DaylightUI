@@ -270,6 +270,26 @@ T.test("a mount or a bigger race drops it further, a form shrinks it", function(
     stub.formID = nil
 end)
 
+-- Attacking from a mount knocks you off it with no mount event, and the game's
+-- mounted state can lag the aura change by a moment. The display must still
+-- come back up under you.
+T.test("knocked off a mount by an attack, it comes back up under you", function()
+    local _, _, PR = login()
+    stub.mounted = true
+    stub.FireEvent("PLAYER_MOUNT_DISPLAY_CHANGED")
+    frames(PR, 200)
+    T.near(topY(PR), expected(PR, 15, PR.MOUNTED), 0.5, "mounted")
+    -- The mount aura goes while the game still says mounted, then the fight starts.
+    stub.FireEvent("UNIT_AURA", "player")
+    stub.FireEvent("PLAYER_REGEN_DISABLED")
+    frames(PR, 200)
+    stub.mounted = nil
+    frames(PR, 200)
+    stub.RunTimers()
+    frames(PR, 200)
+    T.near(topY(PR), expected(PR, 15, 1), 0.5, "back at the unmounted spot")
+end)
+
 T.test("a secret race keeps the last plain one", function()
     local _, _, PR = login()
     stub.race = "Tauren"
@@ -544,6 +564,103 @@ T.test("mana sweep: follows the bar to its free spot and Ribbon's line", functio
     T.eq(Sweeps[f.power].holder:GetParent(), f.power:GetParent())
     T.truthy(Sweeps[f.power].holder:IsShown())
     T.falsy(Sweeps[f.insidePower.power].holder:IsVisible(), "the frame's own bar is hidden")
+    stub.spellCosts = nil
+end)
+
+-- Keep ticking: the ticks come from the gaps between real mana gains.
+local function gain(amount, after)
+    if after then stub.Advance(after) end
+    local p = stub.units.player
+    p.mana = p.mana + amount
+    stub.FireEvent("UNIT_POWER_FREQUENT", "player", "MANA")
+end
+
+local function tickLogin()
+    local DUI, ns, PR, Sweeps = sweepLogin("spark")
+    local p = stub.units.player
+    p.mana, p.maxMana = 100, 1000
+    return DUI, ns, Sweeps[ns.frames.player.power]
+end
+
+T.test("keep ticking: off by default, no mana events listened to", function()
+    local _, ns = tickLogin()
+    T.falsy(ns.module.db.player.regenTicks)
+    T.falsy(ns.PowerBar.regen.listeningTicks)
+    stub.spellCosts = nil
+end)
+
+T.test("keep ticking: learns the tick from two gains, then runs to each one", function()
+    local DUI, ns, s = tickLogin()
+    DUI:Set("UnitFrames", "player.regenTicks", true)
+    stub.RunTimers()
+    local regen = ns.PowerBar.regen
+    T.truthy(regen.listeningTicks)
+    gain(10)
+    T.falsy(s.holder:IsShown(), "one gain is no beat yet")
+    gain(10, 2)
+    T.eq(regen.tick, 2, "the gap between gains")
+    T.truthy(s.holder:IsShown(), "a light runs to the next tick")
+    local t = s.timer.__timer
+    T.eq(t[1].e - t[1].s, 2)
+    -- A cast: the rule's own sweep takes over, then the ticks come back.
+    cast(10)
+    T.isnil(regen.ticking)
+    T.eq(s.timer.__timer[1].e - s.timer.__timer[1].s, ns.PowerBar.REGEN_WINDOW)
+    stub.Advance(5)
+    stub.RunTimersOnce()
+    T.truthy(regen.ticking, "back to the ticks after the 5 seconds")
+    T.eq(s.timer.__timer[1].e - s.timer.__timer[1].s, 2)
+    stub.spellCosts = nil
+end)
+
+T.test("keep ticking: stops at full mana and when no gain comes", function()
+    local DUI, ns, s = tickLogin()
+    DUI:Set("UnitFrames", "player.regenTicks", true)
+    stub.RunTimers()
+    gain(10); gain(10, 2)
+    local regen = ns.PowerBar.regen
+    T.truthy(regen.ticking, "ticking")
+    stub.units.player.mana = 1000
+    stub.FireEvent("UNIT_POWER_FREQUENT", "player", "MANA")
+    T.isnil(regen.ticking, "full: nothing to tick for")
+    T.falsy(s.holder:IsShown())
+    stub.units.player.mana = 500   -- spent
+    stub.FireEvent("UNIT_POWER_FREQUENT", "player", "MANA")
+    gain(10, 2)
+    T.truthy(regen.ticking, "regen again: the beat is kept")
+    stub.RunTimers()   -- the tick's end, no gain since, mana still plain
+    T.isnil(regen.ticking, "no gain: regen stopped, so the ticks do too")
+    stub.spellCosts = nil
+end)
+
+T.test("keep ticking: steady regen and potions are no tick, so nothing shows", function()
+    local DUI, ns, s = tickLogin()
+    DUI:Set("UnitFrames", "player.regenTicks", true)
+    stub.RunTimers()
+    for _ = 1, 6 do gain(1, 0.1) end
+    T.isnil(ns.PowerBar.regen.tick, "gains a tenth of a second apart")
+    T.falsy(s.holder:IsShown())
+    gain(300, 9)
+    T.isnil(ns.PowerBar.regen.tick, "a long gap isn't one either")
+    stub.spellCosts = nil
+end)
+
+T.test("keep ticking: secret mana keeps the beat, the curve hides it at full", function()
+    local DUI, ns, s = tickLogin()
+    DUI:Set("UnitFrames", "player.regenTicks", true)
+    stub.RunTimers()
+    gain(10); gain(10, 2)
+    local regen = ns.PowerBar.regen
+    stub.units.player.mana = stub.Secret(500)
+    stub.Advance(2.5)
+    stub.RunTimers()
+    T.truthy(regen.ticking, "mana can't be read, so the ticks go on")
+    T.truthy(s.holder:IsShown())
+    stub.units.player.mana = 500
+    DUI:Set("UnitFrames", "player.regenTicks", false)
+    stub.RunTimers()
+    T.isnil(regen.ticking, "switched off")
+    T.falsy(regen.listeningTicks)
     stub.spellCosts = nil
 end)
 
@@ -868,4 +985,95 @@ T.test("preview: thin bars, so it starts zoomed in, never past its room", functi
     T.near(s.p:GetScale(), ns.PageSample.PERSONAL_ZOOM, 0.01)
     s.Refresh(200, 160)
     T.truthy(s.p:GetWidth() * s.p:GetScale() <= 200, "a narrow room shrinks it")
+end)
+
+-- Revealed for the layout editor, through the fade.
+
+local function reveal(DUI, PR, on) DUI.Fire("RevealFrame", PR.KEY, on) end
+
+local function stepFade(DUI, seconds)
+    for _ = 1, seconds * 4 do stub.Advance(0.25); DUI.Fade.Step(); DUI.Fade.Animate(0.25) end
+end
+
+T.test("revealed while on and faded: eases to its opacity where it stands, with your own health; ended, faded again", function()
+    local DUI, _, PR = login()
+    local h = PR.frame
+    local point = { h:GetPoint(1) }
+    stepFade(DUI, 10)
+    T.eq(h:GetAlpha(), 0, "out of a fight with no target: faded")
+    reveal(DUI, PR, true)
+    DUI.Fade.Animate(0.05)
+    local partway = h:GetAlpha()
+    T.truthy(partway > 0 and partway < 1, "eases in, not at once: " .. partway)
+    stepFade(DUI, 2)
+    local _, _, _, opacity = DUI.Fade.State(PR.FADE)
+    T.eq(h:GetAlpha(), opacity, "at its own opacity")
+    T.deq({ h:GetPoint(1) }, point, "where it stands")
+    T.falsy(h.test, "no sample")
+    T.eq(stub.Plain(h.healthBar.__value), 60, "your own health")
+    reveal(DUI, PR, false)
+    stepFade(DUI, 10)
+    T.eq(h:GetAlpha(), 0, "faded again")
+end)
+
+T.test("revealed while switched off or dead: stays hidden, and switched on later it fades as usual", function()
+    local DUI, _, PR = login(nil, nil, false)
+    local h = PR.frame
+    reveal(DUI, PR, true)
+    stepFade(DUI, 2)
+    T.falsy(h:IsShown(), "switched off: hidden")
+    reveal(DUI, PR, false)
+    DUI:Set("UnitFrames", "personal.enabled", true)
+    stepFade(DUI, 10)
+    T.truthy(h:IsShown(), "switched on: shown")
+    T.eq(h:GetAlpha(), 0, "and faded, nothing left of the reveal")
+    local deadDUI, _, deadPR = login()
+    stub.units.player.dead = true
+    stub.FireEvent("PLAYER_DEAD")
+    reveal(deadDUI, deadPR, true)
+    stepFade(deadDUI, 2)
+    T.falsy(deadPR.frame:IsShown(), "dead: hidden")
+end)
+
+T.test("a reveal, even sent twice, is ended by one end", function()
+    local DUI, _, PR = login()
+    stepFade(DUI, 10)
+    reveal(DUI, PR, true)
+    reveal(DUI, PR, true)
+    reveal(DUI, PR, false)
+    stepFade(DUI, 10)
+    T.eq(PR.frame:GetAlpha(), 0, "faded again")
+end)
+
+T.test("bar ends: the personal display's four shapes; heals lean with it, docked bars lean the usual way", function()
+    local DUI, ns = login("ROGUE")
+    local PR = ns.Personal
+    local S = DUI.Style
+    local cases = {
+        { true, true, false, true, "leaning left" },   -- left angled and flipped, right angled
+        { true, false, false, true, "top-out both" },
+        { true, true, true, true, "bottom-out both" },
+        { true, false, true, true, "leaning right" },
+    }
+    DUI:Set("UnitFrames", "personal.castbar", true)
+    for _, c in ipairs(cases) do
+        DUI:Set("UnitFrames", "personal.slantLeft", c[1])
+        DUI:Set("UnitFrames", "personal.slantUnderLeft", c[2])
+        DUI:Set("UnitFrames", "personal.slantUnder", c[3])
+        DUI:Set("UnitFrames", "personal.slant", c[4])
+        stub.RunTimers()
+        local body = PR.frame.body
+        local sl = S.GetSlant(body)
+        local want = (c[2] and c[3]) and "both" or c[2] and "left" or c[3] and "right" or nil
+        T.eq(sl.side, "both", c[5]); T.eq(sl.under, want, c[5])
+        local _, _, under = S.GetFillAngle(body.health)
+        T.eq(under == true, c[3], c[5] .. ": the fill's edge leans like the right end")
+        if body.heals then
+            local _, _, hu = S.GetFillAngle(body.heals)
+            T.eq(hu == true, c[3], c[5] .. ": heals too")
+        end
+        -- The cast bar docked under it is cut at the same ends, never flipped.
+        local cb = S.GetSlant(ns.playerCastbar)
+        T.eq(cb.side, "both", c[5]); T.isnil(cb.under, c[5] .. ": docked bars lean the usual way")
+    end
 end)

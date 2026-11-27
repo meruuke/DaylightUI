@@ -69,7 +69,7 @@ local function make(id)
             GameTooltip:SetHyperlink(self.link)
             GameTooltip:Show()
         end
-    end))
+    end, nil, true))   -- live: the item's cooldown counts down in its tooltip
     b:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
     return b
 end
@@ -162,11 +162,16 @@ function Items.InView(f, top, vt, vb)
         top, vt, vb = f:GetTop(), v and v:GetTop(), v and v:GetBottom()
     end
     if type(top) ~= "number" or type(vt) ~= "number" or type(vb) ~= "number" then return true end
+    -- The button sits by the title, so it leaves once the title slides under the
+    -- pinned header (the rest of the quest stays in view).
+    local S = ns.Scroll
+    if S and S.offset > 0 then vt = vt - S.topInset end
     return top <= vt + 1 and top - Items.SIZE >= vb - 1
 end
 
 function Items.Sync(blocks, frames)
     Items.blocks, Items.frames = blocks, frames
+    if ns.Tracker and ns.Tracker.starting then Items.Place(); return end
     DUI.AfterCombat(Items.Place, "quests:items")
 end
 
@@ -204,7 +209,7 @@ end
 -- every frame something in the list moves, so buttons already in place are
 -- left alone.
 function Items.Follow()
-    if not next(want) or InCombatLockdown() then return end
+    if not next(want) or ns.Locked() then return end
     local v = view()
     local frames = Items.frames or NONE
     local side = DUI:GetModule("Quests").db.itemSide

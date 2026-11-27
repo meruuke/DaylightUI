@@ -700,6 +700,81 @@ T.test("cdm profiles: characters of one class share the parked layout's profile;
     T.eq(D.Profile(priest).class, "PRIEST")
 end)
 
+-- A druid's layout as a player's file had it: Moonfire and Demoralizing Roar by
+-- spell, Moonfire again as the game's cooldown 41, Mark of the Wild (a buff any
+-- class can wear) and the trinket slot.
+local function druidPieces()
+    return {
+        ["s8921"] = { shape = "bar", x = 0, y = 0 },
+        ["s99"] = { shape = "bar", parent = "s8921", side = "down", align = "start" },
+        [41] = { shape = "icon", x = 0, y = -80 },
+        ["s1126"] = { shape = "icon", x = 60, y = -80 },
+        [13] = { shape = "icon", x = 120, y = -80 },
+    }
+end
+local function moonfireInfo()
+    _G.C_CooldownViewer = _G.C_CooldownViewer or {}
+    _G.C_CooldownViewer.GetCooldownViewerCooldownInfo = function(id)
+        if id == 41 then return { spellID = 9835 } end
+    end
+end
+
+T.test("cdm profiles: a new warrior sharing a druid's first name gets none of the druid's spells", function()
+    local db = { version = 2, profileData = { ["DPS/Tank"] = {} }, cdmMoved = 2, cdmNextProfile = 1,
+        cdmProfiles = { p1 = { name = "Boopy", class = "DRUID", set = { v = 2, chains = {}, pieces = druidPieces() } } },
+        characters = { ["Boopy Dadoopy-R"] = { profile = "DPS/Tank", install = "installed", class = "DRUID",
+            cdm = { use = { "p1", "p1" } } } } }
+    local DUI, D = boopy("Mcdoopy", "WARRIOR", db)
+    moonfireInfo()
+    local pieces = D.Get(1).pieces
+    T.isnil(D.Use(1), "the druid's layout isn't copied")
+    T.isnil(pieces["s8921"], "Moonfire is a druid's")
+    T.isnil(pieces["s99"], "Demoralizing Roar is a druid's")
+    T.isnil(pieces[41], "the game's Moonfire cooldown too")
+    for _, p in pairs(DaylightUIDB.cdmProfiles) do
+        if p.class == "WARRIOR" then
+            T.isnil(p.set.pieces["s8921"], "no warrior profile holds Moonfire")
+        end
+    end
+    T.eq(DaylightUIDB.cdmProfiles.p1.class, "DRUID", "the druid's own is left as it was")
+    T.truthy(DaylightUIDB.cdmProfiles.p1.set.pieces["s8921"])
+    _G.GetRealmName = nil
+end)
+
+T.test("cdm profiles: an old layout parked from a druid comes back to a warrior without the druid's spells", function()
+    local DUI, D = profileWorld("WARRIOR")
+    moonfireInfo()
+    local root = DUI.DB.Root()
+    root.cdmSaved = { [DUI.DB.DEFAULT] = { [1] = oldSet({ oldBlock("icon") }, inBlock(1, { "s8921", "s99", 11 })) } }
+    D.TakeSaved(true)
+    local pieces = D.Get(1).pieces
+    T.isnil(pieces["s8921"]); T.isnil(pieces["s99"])
+    T.isnil(D.Use(1), "it was the druid's layout: nothing to bring back")
+end)
+
+T.test("cdm profiles: a warrior's saved copy of a druid layout loses the druid's spells, keeps its own", function()
+    local mine = druidPieces()
+    mine["s6673"] = { shape = "bar", parent = "s99", side = "down", align = "start" }   -- Battle Shout, added later
+    local db = { version = 2, profileData = { ["DPS/Tank"] = {} }, cdmMoved = 2, cdmNextProfile = 2,
+        cdmClassCopies = { ["p1|WARRIOR"] = "p2" },
+        cdmProfiles = {
+            p1 = { name = "Boopy", class = "DRUID", set = { v = 2, chains = {}, pieces = druidPieces() } },
+            p2 = { name = "Boopy", class = "WARRIOR", from = "p1", set = { v = 2, chains = {}, pieces = mine } },
+        },
+        characters = { ["Boopy Mcdoopy-R"] = { profile = "DPS/Tank", install = "installed",
+            cdm = { use = { "p2", "p2" }, sharedLooked = true, savedTaken = true } } } }
+    local DUI, D = boopy("Mcdoopy", "WARRIOR", db)
+    moonfireInfo()
+    local pieces = D.Get(1).pieces
+    T.eq(D.Use(1), "p2")
+    T.isnil(pieces["s8921"]); T.isnil(pieces["s99"]); T.isnil(pieces[41])
+    T.truthy(pieces["s6673"], "the warrior's own Battle Shout stays")
+    T.isnil(pieces["s6673"].parent, "and goes free where it was")
+    T.truthy(pieces["s1126"], "a buff any class can wear stays")
+    T.truthy(pieces[13], "the trinket slot stays")
+    _G.GetRealmName = nil
+end)
+
 T.test("cdm data: a set still in the old rows format starts empty", function()
     local DUI, D = profileWorld()
     local set = oldLayout(DUI, D, 1, { rows = { { kind = "icon" } }, buttons = { [11] = { row = 1, order = 1 } }, blocks = { {} } })
@@ -1119,6 +1194,19 @@ T.test("cdm: unlock mode's bar has a Cooldown Manager button that opens the layo
     local _, rel2 = lock.fold:GetPoint(1)
     T.eq(rel2, lock.areas, "Hide closes up after Areas")
     DUI.Movers.Lock()
+    AB.Cooldowns.enabled = true
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("cdm: the Escape menu's Cooldown Manager button opens the layout, or leaves it to the game while off", function()
+    local DUI, AB = editorWorld()
+    T.truthy(DUI.OpenCooldownManager(), "taken")
+    T.truthy(AB.CdmEditor.IsOpen(), "the editor opens")
+    AB.CdmEditor.Close()
+    AB.Cooldowns.enabled = nil
+    T.falsy(DUI.OpenCooldownManager(), "off: the game's settings open instead")
+    T.falsy(AB.CdmEditor.IsOpen(), "the editor stays shut")
+    T.falsy(stub.ChatContains("switch it on"), "nothing printed")
     AB.Cooldowns.enabled = true
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
@@ -2116,6 +2204,59 @@ T.test("cdm effects: the warrior stance you're in is lit, and the light moves wi
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
+-- On Forever the game says Overpower isn't usable outside Battle Stance even
+-- right after a dodge, so a warrior in Defensive or Berserker never saw it light
+-- up to swap stances for it.
+T.test("cdm effects: Overpower lights up after the target dodges, in any stance", function()
+    local DUI, AB, set, ess = fxWorld()
+    local cds = withCooldowns(ess)
+    cds[111], cds[7384] = { duration = 0 }, { duration = 0 }
+    stub.units.player = stub.units.player or { name = "Tester" }
+    stub.units.player.class = "WARRIOR"
+    local stance, gameSays = 3, false
+    local spells = { 2457, 71, 2458 }
+    _G.GetNumShapeshiftForms = function() return #spells end
+    _G.GetShapeshiftFormInfo = function(i) return 132349 + i, stance == i, true, spells[i] end
+    C_Spell.IsSpellUsable = function() return gameSays, false end
+    ess[1].cooldownInfo.overrideSpellID = 7384
+    set.pieces[11].usableGlow = true
+    set.pieces[12].usableGlow = true
+    local Fx = AB.CdmEffects
+    pass(AB)
+    stub.FireEvent("UPDATE_SHAPESHIFT_FORM"); stub.RunTimers()
+    T.eq(Fx.FormNow(), "Berserker")
+    T.falsy(Fx.GlowShown(ess[1]), "no dodge yet")
+    stub.FireEvent("UNIT_COMBAT", "target", "WOUND", "", stub.Secret(40), 1)
+    stub.RunTimers()
+    T.falsy(Fx.GlowShown(ess[1]), "a hit isn't a dodge")
+    stub.FireEvent("UNIT_COMBAT", "target", "DODGE", "", 0, 1)
+    stub.RunTimers()
+    T.truthy(Fx.GlowShown(ess[1]), "dodged in Berserker Stance: lit")
+    T.falsy(Fx.GlowShown(ess[2]), "only Overpower")
+    stub.Advance(4); stub.FireEvent("SPELL_UPDATE_USABLE"); stub.RunTimers()
+    T.truthy(Fx.GlowShown(ess[1]), "still inside the 5 s")
+    stub.Advance(1.1); stub.FireEvent("SPELL_UPDATE_USABLE"); stub.RunTimers()
+    T.falsy(Fx.GlowShown(ess[1]), "the window ran out")
+    -- A new target: the dodge was the old one's.
+    stub.FireEvent("UNIT_COMBAT", "target", "DODGE", "", 0, 1); stub.RunTimers()
+    T.truthy(Fx.GlowShown(ess[1]))
+    stub.FireEvent("PLAYER_TARGET_CHANGED"); stub.RunTimers()
+    T.falsy(Fx.GlowShown(ess[1]), "another target: gone")
+    -- Cast it: spent.
+    stub.FireEvent("UNIT_COMBAT", "target", "DODGE", "", 0, 1); stub.RunTimers()
+    stub.FireEvent("UNIT_SPELLCAST_SUCCEEDED", "player", "cast", 7384); stub.RunTimers()
+    T.falsy(Fx.GlowShown(ess[1]), "used: gone")
+    -- In Battle Stance the game knows whose dodge it was: its answer stands.
+    stance = 1
+    stub.FireEvent("UPDATE_SHAPESHIFT_FORM"); stub.RunTimers()
+    stub.FireEvent("UNIT_COMBAT", "target", "DODGE", "", 0, 1); stub.RunTimers()
+    T.falsy(Fx.GlowShown(ess[1]), "Battle Stance, the game says no: someone else's dodge")
+    gameSays = true
+    stub.FireEvent("SPELL_UPDATE_USABLE"); stub.RunTimers()
+    T.truthy(Fx.GlowShown(ess[1]), "the game says yes")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
 -- Arcane Shot with every Visibility on Show vanished with no target (not
 -- usable, out of range), on and off cooldown.
 T.test("cdm effects: every Visibility on Show keeps a spell shown when it isn't usable", function()
@@ -2525,6 +2666,41 @@ T.test("cdm effects: the ready glow uses its own color", function()
     T.eq(green, 1)
 end)
 
+T.test("cdm data: a glow color goes back to the accent, other colors still need one", function()
+    local DUI, AB, set = fxWorld()
+    local D = AB.CdmData
+    for _, key in ipairs({ "glowColor", "readyGlowColor", "usableGlowColor", "missingGlowColor",
+                           "upGlowColor", "clipGlowColor" }) do
+        T.truthy(D.SetSpellValue(set, 11, key, { 0, 1, 0 }), key .. " takes a color")
+        T.deq(set.pieces[11][key], { 0, 1, 0 })
+        T.truthy(D.SetSpellValue(set, 11, key, nil), key .. " takes nil")
+        T.eq(set.pieces[11][key], nil, key .. " cleared")
+    end
+    T.eq(D.SetSpellValue(set, 11, "activeColor", nil), false, "not an accent color")
+    T.eq(D.SetSpellValue(set, 11, "readyGlowColor", "red"), false, "still checks colors")
+end)
+
+T.test("cdm effects: a cleared glow color paints the accent and follows it", function()
+    local DUI, AB, set, ess = fxWorld()
+    local cds = withCooldowns(ess)
+    local D = AB.CdmData
+    set.pieces[11].readyGlow = true
+    cds[111] = { duration = 0 }
+    D.SetSpellValue(set, 11, "readyGlowColor", { 0, 1, 0 })
+    pass(AB)
+    T.deq(glowRGB(AB.CdmEffects.GlowFrame(ess[1]).tex), { 0, 1, 0 }, "picked")
+    D.SetSpellValue(set, 11, "readyGlowColor", nil)
+    pass(AB)
+    local function accent() local r, g, b = DUI.Style.Accent(); return { r, g, b } end
+    local got = glowRGB(AB.CdmEffects.GlowFrame(ess[1]).tex)
+    for i = 1, 3 do T.near(got[i], accent()[i], 0.001, "the accent again") end
+    DUI:Set("General", "accent", "class")
+    pass(AB)
+    got = glowRGB(AB.CdmEffects.GlowFrame(ess[1]).tex)
+    for i = 1, 3 do T.near(got[i], accent()[i], 0.001, "follows a new accent") end
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
 T.test("cdm effects: cooldown end and combat end update the state", function()
     local DUI, AB, set, ess = fxWorld()
     local cds = withCooldowns(ess)
@@ -2553,20 +2729,23 @@ T.test("cdm effects: cooldown end and combat end update the state", function()
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
-T.test("cdm effects: hidden by cooldown turns the mouse off, back when ready", function()
+T.test("cdm effects: hidden by cooldown turns the mouse off, back as the game had it when ready", function()
     local DUI, AB, set, ess = fxWorld()
     local cds = withCooldowns(ess)
-    local mouse = {}
-    ess[2].EnableMouse = function(self, on) mouse[self] = on end
     set.pieces[12].onCd = "hide"
     cds[112] = { duration = 8, isOnGCD = false }
     pass(AB)
-    T.eq(mouse[ess[2]], false, "no tooltip over the gap")
+    T.eq(ess[2]:IsMouseMotionEnabled(), false, "no tooltip over the gap")
     pass(AB)
-    T.eq(mouse[ess[2]], false, "next pass keeps it off")
+    T.eq(ess[2]:IsMouseMotionEnabled(), false, "next pass keeps it off")
     cds[112] = { duration = 0 }
     cdEvent()
-    T.eq(mouse[ess[2]], true, "back on when shown")
+    T.eq(ess[2]:IsMouseMotionEnabled(), true, "its tooltip back when shown")
+    T.eq(ess[2]:IsMouseClickEnabled(), false, "and still click-through, as the game makes it")
+    -- The game hides its row, so Daylight UI lets its items go: they keep the game's mouse.
+    _G.EssentialCooldownViewer:Hide(); pass(AB)
+    T.eq(ess[2]:IsMouseClickEnabled(), false, "let go: click-through")
+    T.eq(ess[2]:IsMouseMotionEnabled(), true, "with its tooltip")
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 

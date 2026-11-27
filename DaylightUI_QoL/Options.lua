@@ -2,10 +2,12 @@
 
 local _, ns = ...
 
--- Its top end becomes the client's own limit when the page first opens (Camera.lua).
-ns.CAMERA_SLIDER = { type = "slider", key = "cameraZoom", label = "Max camera distance",
-    min = 0.5, max = 2, step = 0.05, unit = "%",
-    desc = "How far the camera can zoom out. 100% is the game's normal limit; the far right end is as far as this client allows. At 100% the game's own setting is left alone." }
+-- Its top end is the client's own limit, read whenever the slider is drawn or
+-- refreshed (Camera.lua), so a slider drawn by a search or in a fight catches up.
+ns.CAMERA_SLIDER = setmetatable({ type = "slider", key = "cameraZoom", label = "Max camera distance",
+    min = 0.5, step = 0.05, unit = "%",
+    desc = "How far the camera can zoom out. 100% is the game's normal limit; the far right end is as far as this client allows. At 100% the game's own setting is left alone." },
+    { __index = function(_, k) if k == "max" then return ns.Camera.SliderTop() end end })
 
 -- The loot feed page's pieces.
 local LOOT_MOVER = "qol.loot"
@@ -37,6 +39,42 @@ local lootLook = DaylightUI.Options.LookRows("lootFeedFrame", function(get) retu
       disabled = function(get) return get("lootFeedBorderColor") ~= "custom" end },
 })
 
+-- The zone title page's pieces.
+local ZONE_MOVER = "qol.zone"
+local function zoneOff(get) return get("zoneTitle") ~= true end
+local ZONE_COLOR = { accent = "Accent color", zone = "The zone's PvP color", white = "White", custom = "One color" }
+local LINE_COLOR = { name = "Same as the name", accent = "Accent color", zone = "The zone's PvP color", white = "White", custom = "One color" }
+local SUB_COLOR = { label = "Daylight UI tan", name = "Same as the name", accent = "Accent color", white = "White", custom = "One color" }
+local PVP_COLOR = { zone = "The zone's PvP color", label = "Daylight UI tan", white = "White", custom = "One color" }
+-- A color dropdown and its "One color" picker under it.
+local function zoneColor(key, label, values, order, desc, customLabel, customDesc)
+    return { type = "dropdown", key = key, since = "2.2.5", label = label, values = values, order = order,
+             disabled = zoneOff, desc = desc },
+           { type = "color", key = key .. "Custom", since = "2.2.5", label = customLabel, desc = customDesc,
+             disabled = function(get) return zoneOff(get) or get(key) ~= "custom" end }
+end
+local zoneColors = {}
+for _, row in ipairs({
+    { "zoneTitleColor", "Zone name color", ZONE_COLOR, { "accent", "zone", "white", "custom" },
+      "The zone's name: your accent color (General > Appearance), the zone's PvP color (green friendly, red hostile, amber contested), white, or a color you pick.",
+      "Custom zone name color", "The name's color when Zone name color is One color." },
+    { "zoneTitleLineColor", "Zone title line color", LINE_COLOR, { "name", "accent", "zone", "white", "custom" },
+      "The thin line under the name, and the light, glow and diamond with it. Same as the name follows the name's color.",
+      "Custom zone title line color", "The line's color when Zone title line color is One color." },
+    { "zoneTitleSubColor", "Subzone color", SUB_COLOR, { "label", "name", "accent", "white", "custom" },
+      "The subzone under the name, like Goldshire, and a subzone shown on its own.",
+      "Custom subzone color", "The subzone's color when Subzone color is One color." },
+    { "zoneTitlePvPColor", "PvP status color", PVP_COLOR, { "zone", "label", "white", "custom" },
+      "Contested, Sanctuary, Horde or Alliance territory: in the zone's own PvP color, tan, white, or a color you pick.",
+      "Custom PvP status color", "The PvP status's color when PvP status color is One color." },
+}) do
+    local a, b = zoneColor(row[1], row[2], row[3], row[4], row[5], row[6], row[7])
+    zoneColors[#zoneColors + 1] = a
+    zoneColors[#zoneColors + 1] = b
+end
+local zoneFont = DaylightUI.Options.FontRow("zoneTitleFont", "Zone title font", "Every text in the zone title", zoneOff)
+zoneFont.since = "2.2.5"
+
 -- The flight timer page's pieces.
 local FLIGHT_MOVER, WELCOME_MOVER = "qol.flight", "qol.welcome"
 local function flightOff(get) return get("flightTimer") ~= true end
@@ -50,6 +88,34 @@ local flightLook = DaylightUI.Options.LookRows("flightFrame", flightOff, nil, {
       desc = "The flight timer's border color when Flight timer border color is One color.",
       disabled = function(get) return get("flightBorderColor") ~= "custom" end },
 })
+
+-- A loot feed end's menu (straight, / or \). Its lean is kept against the
+-- lean it has in the pair, which follows Flip the loot feed, so a mirrored
+-- feed keeps its look; the menu shows the shape it has now.
+local function lootEnd(end_)
+    local on = end_ == "left" and "lootFeedLeft" or "lootFeedRight"
+    local flip = end_ == "left" and "lootFeedFlipLeft" or "lootFeedFlipRight"
+    local function get(k) return DaylightUI:Get("QoL", k) end
+    local function glyph(isOn, isFlip, mirrored)
+        return DaylightUI.Style.EndGlyph(end_, isOn ~= false, ns.LootFeed.FlipsAt(end_, mirrored == true, isFlip))
+    end
+    return { type = "dropdown", key = on, alsoKeys = { flip }, label = "Loot feed " .. end_ .. " end",
+        values = DaylightUI.Options.END_VALUES, order = DaylightUI.Options.END_ORDER,
+        desc = "Straight, or angled either way. On the right end / puts the top corner out and \\ the bottom one; on the left end it's the other way round. Each end is set on its own.",
+        disabled = function(g) return g("lootFeed") ~= true end,
+        get = function() return glyph(get(on), get(flip), get("lootFeedFlip")) end,
+        set = function(v)
+            local isOn, under = DaylightUI.Style.EndFromGlyph(end_, v)
+            -- Kept against the usual lean: flipped when it differs from it.
+            local usual = ns.LootFeed.FlipsAt(end_, get("lootFeedFlip") == true, false)
+            DaylightUI:Set("QoL", flip, isOn and (under ~= usual) or false)
+            DaylightUI:Set("QoL", on, isOn)
+        end,
+        default = function()
+            local d = ns.DEFAULTS
+            return glyph(d[on], d[flip], d.lootFeedFlip)
+        end }
+end
 
 ns.OPTIONS = { pages = {
     { id = "qol", label = "Quality of Life",
@@ -122,7 +188,7 @@ ns.OPTIONS = { pages = {
               desc = "Plays it now. Also /dui levelup.",
               func = function() if ns.LevelUp then ns.LevelUp.Preview() end end },
             { type = "toggle", key = "zoneTitle", label = "Zone title animation",
-              desc = "A new zone's name rises in at the top of the screen with a thin line under it, then the subzone and PvP status; a subzone shows just its name, small. It replaces the game's zone text. Follows Motion effects (General > Appearance)." },
+              desc = "A new zone's name rises in at the top of the screen with a thin line under it, then the subzone and PvP status; a subzone shows just its name, small. It replaces the game's zone text. Its text, colors and size are on the Zone title page. Follows Motion effects (General > Appearance)." },
             { type = "button", label = "Preview the zone title", text = "Preview",
               desc = "Plays it now. Also /dui zone.",
               func = function() if ns.ZoneTitle then ns.ZoneTitle.Preview() end end },
@@ -236,12 +302,8 @@ ns.OPTIONS = { pages = {
         { label = "Background and border", items = {
             { type = "toggle", key = "lootFeedBack", label = "Loot feed background", disabled = lootOff,
               desc = "The dark ribbon behind each line. When off, only the icon and text show." },
-            { type = "toggle", key = "lootFeedSlant", label = "Loot feed angled ends", disabled = lootOff,
-              desc = "Cuts the ends of each line at an angle. When off, the ends are straight." },
-            { type = "dropdown", key = "lootFeedSlantSide", label = "Loot feed angled side",
-              values = { both = "Both ends", left = "Left end", right = "Right end" }, order = { "both", "left", "right" },
-              desc = "Which ends of each line are cut at an angle. The other end stays straight.",
-              disabled = function(get) return get("lootFeed") ~= true or get("lootFeedSlant") == false end },
+            lootEnd("left"),
+            lootEnd("right"),
             { type = "toggle", key = "lootFeedShine", label = "Light across new loot feed lines", disabled = lootOff,
               desc = "A soft light in the line's color runs across it as it comes in or adds up." },
         } },
@@ -304,6 +366,51 @@ ns.OPTIONS = { pages = {
               desc = "A thin line in your accent color along the top of the box." },
         } },
         { label = "Borders and background", items = flightLook },
+      } },
+    { id = "zone", label = "Zone title",
+      desc = "The zone's name at the top of the screen when you arrive somewhere new.",
+      groups = {
+        { label = "Zone title", items = {
+            { type = "toggle", key = "zoneTitle", label = "Zone title animation",
+              desc = "A new zone's name rises in at the top of the screen with a thin line under it, then the subzone and PvP status. It replaces the game's zone text. Move it with /dui unlock." },
+            { type = "button", label = "Preview the zone title", text = "Preview", disabled = zoneOff,
+              desc = "Plays it now. Also /dui zone.",
+              func = function() if ns.ZoneTitle then ns.ZoneTitle.Preview() end end },
+        } },
+        { label = "What shows", items = {
+            { type = "toggle", key = "zoneTitleSub", since = "2.2.5", label = "Show the subzone", disabled = zoneOff,
+              desc = "The part of the zone you're in, like Goldshire, under the zone's name." },
+            { type = "toggle", key = "zoneTitlePvP", since = "2.2.5", label = "Show the PvP status", disabled = zoneOff,
+              desc = "Contested, Sanctuary, Horde or Alliance territory under the name, in its own color." },
+            { type = "toggle", key = "zoneTitleSubAlone", since = "2.2.5", label = "Show subzone changes",
+              desc = "Walking into a new part of the same zone shows its name, small. When off, only a new zone shows the title.",
+              disabled = function(get) return zoneOff(get) or get("zoneTitleSub") == false end },
+            { type = "toggle", key = "zoneTitleCaps", since = "2.2.5", label = "Zone name in capitals", disabled = zoneOff,
+              desc = "Writes the zone's name in capital letters." },
+            { type = "slider", key = "zoneTitleHold", since = "2.2.5", label = "Zone title duration", min = 1, max = 8, step = 0.5, unit = "s",
+              disabled = zoneOff, desc = "How long the whole title stays before it drifts away." },
+        } },
+        { label = "Colors", items = zoneColors },
+        { label = "Size and text", items = {
+            { type = "slider", since = "2.2.5", label = "Zone title scale", min = 0.5, max = 2, step = 0.05, unit = "x", disabled = zoneOff,
+              desc = "The whole zone title. Also the mouse wheel over its handle in /dui unlock.",
+              get = function() return DaylightUI.Movers.PieceScale(ZONE_MOVER) end,
+              set = function(v) DaylightUI.Movers.SetPieceScale(ZONE_MOVER, v) end,
+              default = function() return 1 end },
+            zoneFont,
+            { type = "slider", key = "zoneTitleNameSize", since = "2.2.5", label = "Zone name text size", min = 16, max = 48, step = 1,
+              disabled = zoneOff, desc = "How big the zone's name is." },
+            { type = "slider", key = "zoneTitleSubSize", since = "2.2.5", label = "Subzone text size", min = 10, max = 24, step = 1,
+              disabled = zoneOff, desc = "How big the subzone is. The PvP status is a little smaller." },
+        } },
+        { label = "Flourishes", items = {
+            { type = "toggle", key = "zoneTitleShine", since = "2.2.5", label = "Light across the zone name", disabled = zoneOff,
+              desc = "A soft light runs across the name as it settles in. Follows Motion effects (General > Appearance)." },
+            { type = "toggle", key = "zoneTitleHaze", since = "2.2.5", label = "Glow behind the zone name", disabled = zoneOff,
+              desc = "A soft haze in the name's color glows behind it." },
+            { type = "toggle", key = "zoneTitleGem", since = "2.2.5", label = "Diamond on the line", disabled = zoneOff,
+              desc = "A small diamond grows in where the line under the name starts from." },
+        } },
       } },
     { id = "scenes", label = "Scenes",
       desc = "Calm scenes along the bottom of the screen while you fish or craft.",

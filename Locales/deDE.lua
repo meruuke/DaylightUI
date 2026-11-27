@@ -1,7 +1,6 @@
 -- German (deDE). English text is the key (Locales/Locales.lua).
 local _, DUI = ...
-if DUI.LOCALE ~= "deDE" then return end
-local L = DUI.L
+DUI.AddLanguage("deDE", function(L)
 
 -- DaylightUI_Tooltip: checked by a native speaker.
 L["Activity"] = "Aktivität"
@@ -1064,7 +1063,7 @@ L["No challenges match."] = "Keine passenden Herausforderungen."
 L["Incomplete"] = "Unvollständig"
 L["Completed"] = "Errungen"
 L["Clean up toward the end"] = "Ans Ende aufräumen"
-L["The game's own setting: Clean Up packs your items into the last slots of your bags, so the empty slots sit at the top and what you loot next shows up in front of them. Best in the Grid view."] = "Einstellung des Spiels: „Taschen aufräumen“ legt deine Gegenstände in die letzten Plätze deiner Taschen. Die freien Plätze sind dann oben, und neue Beute erscheint vor den übrigen Gegenständen. Am besten mit „Raster (je Tasche)“."
+L["Clean Up packs your items into the last slots of your bags and bank, so the empty slots sit at the top and what you loot next shows up in front of them. Best in the Grid view."] = "„Taschen aufräumen“ legt deine Gegenstände in die letzten Plätze deiner Taschen und deiner Bank. Die freien Plätze sind dann oben, und neue Beute erscheint vor den übrigen Gegenständen. Am besten mit „Raster (je Tasche)“."
 L["Free bag slots on the backpack"] = "Freie Taschenplätze am Rucksack"
 L["The game's own setting: how many empty slots you have left, written on the backpack button, so you can see your bag space without opening your bags."] = "Einstellung des Spiels: Die Zahl der freien Taschenplätze steht auf dem Rucksack-Button. So siehst du deinen Taschenplatz, ohne die Taschen zu öffnen."
 L["Full health and percent (4,100 | 62%)"] = "Gesundheit und Prozent (4.100 | 62%)"
@@ -1345,7 +1344,7 @@ L["The colors the animation moves: the ones the bar already has, your accent, yo
 L["One end of the custom pair."] = "Erste Farbe des eigenen Farbpaars."
 L["The other end of the custom pair."] = "Zweite Farbe des eigenen Farbpaars."
 L["React to hits and heals"] = "Auf Treffer und Heilungen reagieren"
-L["Animations that react (Tide) move with every heal and hit. When off, they keep their steady pace."] = "Animationen, die reagieren („Flut“), bewegen sich bei jeder Heilung und jedem Treffer mit. Sonst laufen sie gleichmäßig weiter."
+L["Animations that react (Tide, Daybreak) move with every heal and hit. When off, they keep their steady pace."] = "Animationen, die reagieren („Flut“, „Daybreak“), bewegen sich bei jeder Heilung und jedem Treffer mit. Sonst laufen sie gleichmäßig weiter."
 L["Reaction size"] = "Reaktionsstärke"
 L["How big a reaction is. The game doesn't say how big a hit or heal was, so every one moves the same."] = "Stärke der Reaktion. Das Spiel verrät nicht, wie groß ein Treffer oder eine Heilung war, deshalb fällt jede Reaktion gleich aus."
 L["Small icons over your frame from its left end. Your buff bars show them too."] = "Kleine Symbole über deinem Rahmen, ab seinem linken Ende. Deine Buffleisten zeigen sie ebenfalls."
@@ -2798,7 +2797,6 @@ L["Later error"] = "Neuerer Fehler"
 L["Earlier error"] = "Älterer Fehler"
 L["%d of %d"] = "%d von %d"
 L["/dui bug - your version, addons and setup, ready to copy into the Discord bug form"] = "/dui bug - deine Version, Addons und dein Setup, fertig zum Kopieren in das Bug-Formular auf Discord"
-L["%s is also loaded. Both replace the same %s; disable one of them."] = "%s ist ebenfalls geladen. Beide ersetzen denselben Bereich (%s). Deaktiviere eines der beiden."
 L["Commands:"] = "Befehle:"
 L["/dui all - every command"] = "/dui all - alle Befehle"
 L["%s is missing %s: /reload, or restart the game if it stays."] = "%s: Es fehlt %s. Gib /reload ein oder starte das Spiel neu, falls das Problem bleibt."
@@ -2978,6 +2976,7 @@ L["%d ready-made profiles"] = "%d fertige Profile"
 L["%s needs a newer DaylightUI: update DaylightUI to use it."] = "%s braucht eine neuere Version von DaylightUI. Aktualisiere DaylightUI, um es zu nutzen."
 L["%s was made for an older DaylightUI and is off: look for an update of it."] = "%s wurde für eine ältere Version von DaylightUI gemacht und ist deaktiviert. Sieh nach, ob es dafür ein Update gibt."
 L["Its name in the AddOns list should read \"%s %s\": every plugin\'s does."] = "Sein Name in der AddOn-Liste sollte \"%s %s\" lauten: so heißt jedes Plugin."
+L["Its .toc should say \"## Category: %s\" and \"## Group: %s\", so it sits under the plugins' heading in the AddOns list."] = "Seine .toc sollte \"## Category: %s\" und \"## Group: %s\" enthalten, damit es in der AddOn-Liste unter der Überschrift der Plugins steht."
 L["Export profile"] = "Profil exportieren"
 L["The profile %s: its settings, frame positions and Edit Mode layout. Ctrl+C to copy, then share it."] = "Das Profil %s: Einstellungen, Rahmenpositionen und Layout des Bearbeitungsmodus. Kopiere es mit Strg+C und teile es."
 L["Couldn't export: %s."] = "Exportieren nicht möglich: %s."
@@ -6439,6 +6438,8 @@ L["Progress bar texture"] = "Textur der Fortschrittsleiste"
 L["Shift-click on a quest"] = "Umschalt-Klick auf eine Quest"
 L["Fold it"] = "Einklappen"
 L["Fold ready quests"] = "Fertige Quests einklappen"
+L["Filter under the title"] = "Filter unter dem Titel"
+L["Shows All and This zone as words under the Quests title, always there, instead of buttons on its line that appear when you hover the list. The tracker grows by one line."] = "Zeigt Alle und Diese Zone als Wörter unter dem Titel Quests, immer sichtbar, statt als Schaltflächen auf seiner Zeile, die beim Überfahren der Liste erscheinen. Der Tracker wird eine Zeile höher."
 L["Quest order"] = "Reihenfolge der Quests"
 L["Quest tracker font"] = "Schrift der Questverfolgung"
 L["Quest tags"] = "Questkennzeichen"
@@ -7293,3 +7294,12 @@ L["The data bar has no border on the global style: on a strip this thin the acce
 L["The color of every chat panel's border. The border still lights up in your accent color while you drag a corner to size the chat."] = "Die Randfarbe jedes Chat-Panels. Der Rand leuchtet weiterhin in deiner Akzentfarbe auf, während du eine Ecke ziehst, um die Chatgröße zu ändern."
 L["Every chat panel: the main one, the second one and a chat window pulled out on its own. On the global style the Classic chat keeps a thin line."] = "Jedes Chat-Panel: das Hauptpanel, das zweite und ein einzeln herausgezogenes Chatfenster. Im globalen Stil behält der klassische Chat eine dünne Linie."
 L["Gives the second chat panel its own background opacity, set in the row below. When off, it's as see-through as the main chat panel. Shown while the chat's Use Daylight UI global style is off."] = "Gibt dem zweiten Chat-Panel eine eigene Hintergrunddeckkraft, einzustellen in der Zeile darunter. Ist die Option aus, ist es so durchsichtig wie das Haupt-Chat-Panel. Sichtbar, solange „Globalen Daylight-UI-Stil verwenden“ beim Chat aus ist."
+
+-- Mailbox: what happened to an auction house letter's item (machine draft, not yet checked by a native speaker;
+-- Canceled, Expired and Outbid follow the game's own words where it has one that fits).
+L["Sold"] = "Verkauft"
+L["Expired"] = "Abgelaufen"
+L["Canceled"] = "Abgebrochen"
+L["Won"] = "Gewonnen"
+L["Outbid"] = "Überboten"
+end)

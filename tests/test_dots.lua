@@ -80,6 +80,7 @@ local FRENCH = {
     [14914] = { name = "Flammes sacrées", desc = "Consume l'ennemi et lui inflige 84 à 104 points de dégâts du Sacré et 30 points de dégâts du Sacré supplémentaires en 10 sec." },
     [15407] = { name = "Fouet mental", desc = "Inflige 75 points de dégâts d\226\128\153ombre en 3 sec." },
     [18265] = { name = "Siphon de vie", desc = "Transfère 15 points de vie de la cible vers le lanceur de sorts toutes les 3 sec. Dure 30 sec." },
+    [3034] = { name = "Morsure de vipère", desc = "Mord la cible et lui draine 616 points de mana en 8 sec. Une seule technique de Morsure ou de Piqûre peut être active sur la cible par chasseur." },
 }
 
 T.test("dots: a French client reads its own tooltips and spell names", function()
@@ -100,6 +101,10 @@ T.test("dots: a French client reads its own tooltips and spell names", function(
     T.eq(select(2, Dots.Parse(FRENCH[14914].desc)), 2, "Holy")
     T.eq(select(2, Dots.Parse(FRENCH[15407].desc)), SHADOW, "the curly apostrophe")
     T.eq((Dots.Parse(FRENCH[18265].desc)), 150, "a drain by its ticks")
+    T.isnil(Dots.Parse(FRENCH[3034].desc), "Viper Sting drains mana, not health")
+    cast(3034)
+    T.isnil(Dots.Left("target"), "so nothing is drawn on the health bar")
+    Dots.Forget()
     cast(COR)
     T.eq(Dots.Left("target"), 40, "the cast shows")
     Dots.Forget()
@@ -296,6 +301,49 @@ T.test("dots: the game's own school names count", function()
     _G.STRING_SCHOOL_SHADOW = was
 end)
 
+-- The game writes big numbers grouped ("1,214 Shadow damage"), so a pattern
+-- starting after the comma read 214 and Shadow Word: Pain at 1,214 showed
+-- a sliver, while Devouring Plague at 904 looked right.
+T.test("dots: a description's grouped thousands read whole", function()
+    local _, Dots = world()
+    stub.spells[589] = { name = "Shadow Word: Pain", desc = "A word of darkness that causes 1,214 Shadow damage over 24 sec." }
+    T.eq((Dots.Parse(stub.spells[589].desc)), 1214, "English comma")
+    T.eq((Dots.Parse("Transfers 1,015 health from the target to the caster every 3 sec.  Lasts 30 sec.")), 10150, "a drain")
+    T.eq((Dots.Parse("Causes 1,234,567 Shadow damage over 12 sec.")), 1234567, "two commas")
+    T.eq(Dots.Upfront("Burns the enemy for 1,011 Fire damage and then an additional 2,020 Fire damage over 15 sec."), 1011, "the upfront hit")
+    cast(589)
+    T.eq(Dots.Left("target"), 1214, "the whole DoT shows at the cast")
+    tick(3); secretHit(SHADOW)
+    T.eq(Dots.Left("target"), 1062, "7 of 8 ticks left after the first, not a sliver")
+    local cases = {
+        { "deDE", "Verursacht 24 Sek. lang 1.214 Punkt(e) Schattenschaden." },
+        { "frFR", "Inflige 1\194\160214 points de dégâts d'Ombre en 24 sec." },
+        { "frFR", "Inflige 1\226\128\175214 points de dégâts d'Ombre en 24 sec." },
+        { "ruRU", "Наносит цели 1 214 ед. урона от темной магии за 24 сек." },
+        { "esES", "Causa 1.214 p. de daño de las Sombras durante 24 s." },
+        { "ptBR", "Causa 1.214 de dano de Sombra ao longo de 24 s." },
+        { "zhCN", "在24秒内造成累计1,214点暗影伤害。" },
+        { "koKR", "24초에 걸쳐 총 1,214의 암흑 피해를 입힙니다." },
+    }
+    for _, c in ipairs(cases) do
+        Dots.UseLocale(c[1])
+        T.eq((Dots.Parse(c[2])), 1214, c[1] .. " groups its thousands its own way")
+    end
+    Dots.UseLocale("deDE")
+    T.eq(select(3, Dots.Parse("Verursacht 7,5 Sek. lang 40 Punkt(e) Schattenschaden.")), 7.5, "a decimal comma")
+    Dots.UseLocale("enUS")
+end)
+
+-- A size learned next to a misread description ("1,950" read as 950) is
+-- twice too big once the description reads whole, so older saved sizes go.
+T.test("dots: sizes learned while thousands were misread are dropped", function()
+    local DUI, Dots = world()
+    stub.spells[589] = { name = "Shadow Word: Pain", desc = "A word of darkness that causes 1,950 Shadow damage over 24 sec." }
+    DUI.DB.Character().dots = { v = 2, ticks = { [589] = 2.05 }, weights = { [589] = 8 } }
+    cast(589)
+    T.eq(Dots.Left("target"), 1950, "the description's own size, not 2.05 times it")
+end)
+
 T.test("dots: a cast shows its whole damage, each tick takes its share off", function()
     local _, Dots = world()
     T.isnil(Dots.Left("target"))
@@ -459,6 +507,7 @@ end)
 local function hiddenGUIDs()
     stub.SetRestriction("Map", true)
     _G.C_NamePlate = { GetNamePlateForUnit = function(unit)
+        stub.CheckPlateUnit(unit)
         for i = 1, 3 do
             local token = "nameplate" .. i
             if stub.units[token] and stub.units[token] == stub.units[unit] then return { unitToken = token } end
@@ -491,6 +540,21 @@ T.test("dots: with GUIDs hidden and no plate, only the target is tracked", funct
     T.eq(Dots.Left("target"), 40)
     stub.FireEvent("PLAYER_TARGET_CHANGED")
     T.isnil(Dots.Left("target"))
+    stub.SetRestriction("Map", false)
+    _G.C_NamePlate = nil
+end)
+
+T.test("dots: with GUIDs hidden, a hit on your target's target asks no plate", function()
+    local _, Dots = world()
+    hiddenGUIDs()
+    stub.units.targettarget = { name = "Gnoll", reaction = 2, guid = "Creature-2", health = 300, maxHealth = 300 }
+    cast(COR)
+    tick(3)
+    T.noerror(function()
+        stub.FireEvent("UNIT_COMBAT", "targettarget", "WOUND", "", stub.Secret(9), SHADOW)
+    end)
+    T.isnil(Dots.KeyOf("targettarget"), "a chained token can't be told apart")
+    stub.units.targettarget = nil
     stub.SetRestriction("Map", false)
     _G.C_NamePlate = nil
 end)
@@ -985,6 +1049,29 @@ T.test("dots draw: an angled fill angles both ends of the veil, and its line lea
     Dots.LayoutVeil(veil, b, false)
     T.eq(#(veil.bar:GetStatusBarTexture().__masks or {}), 0)
     T.eq(veil.edge.__vertexOffsets[1][1], 0)
+end)
+
+T.test("dots draw: a flipped fill edge flips the veil's back end and its line", function()
+    local DUI, Dots = world()
+    local _, b = bar()
+    -- The fill's edge leans under: its bottom corner is ahead (\ on the right).
+    DUI.Style.AngleFill(b, "right", 6, true)
+    local veil = Dots.NewVeil(b)
+    Dots.LayoutVeil(veil, b, false)
+    local masks = veil.bar:GetStatusBarTexture().__masks or {}
+    T.eq(#masks, 2)
+    T.eq(masks[1], DUI.Style.GetFillMask(b))
+    -- The back end is the same line turned round: the left end's cut image.
+    T.eq(masks[2].__texture, DUI.MEDIA .. "mask-slant-l.png", "the damage's end leans the fill's way")
+    -- The line's bottom moves out along the cut, its top stays.
+    local off = veil.edge.__vertexOffsets
+    T.eq(off[1][1], 0); T.eq(off[3][1], 0)
+    T.eq(off[2][1], 6); T.eq(off[4][1], 6)
+    -- Back to the usual lean: top out again, bottom back.
+    DUI.Style.AngleFill(b, "right", 6)
+    Dots.LayoutVeil(veil, b, false)
+    off = veil.edge.__vertexOffsets
+    T.eq(off[1][1], 6); T.eq(off[2][1], 0)
 end)
 
 T.test("dots draw: the skull rides the end of a long bar in a small window", function()

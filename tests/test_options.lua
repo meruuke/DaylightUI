@@ -58,7 +58,7 @@ T.test("our windows and the skins are pages under Extras, not sections of their 
         sections[#sections + 1] = s.id
         if s.id == "QoL" then for _, p in ipairs(s.pages) do ids[#ids + 1] = p.id end end
     end
-    T.eq(table.concat(ids, ","), "QoL.qol,QoL.loot,QoL.flight,QoL.scenes,Character.window,NPC.window,windows,Skins.skins,Skins.rolls")
+    T.eq(table.concat(ids, ","), "QoL.qol,QoL.loot,QoL.flight,QoL.zone,QoL.scenes,Character.window,NPC.window,windows,Skins.skins,Skins.rolls")
     for _, id in ipairs(sections) do
         T.truthy(id ~= "Skins" and id ~= "Character" and id ~= "NPC" and id ~= "Book" and id ~= "Inspect", id)
     end
@@ -125,6 +125,52 @@ T.test("a hidden page isn't listed or opened, and comes back when it applies aga
     DUI:Set("Demo", "on", false)
     T.truthy(DUI.Options.GetPage("Demo.more"))
     T.falsy(stub.ChatContains("Options ("))
+end)
+
+T.test("bar ends: one menu per end reads and writes its two switches", function()
+    local DUI = stub.Load()
+    local D = { bar = { slant = true, slantUnder = false, slantLeft = false, slantUnderLeft = false },
+                big = { slant = true, slantUnder = false, slantLeft = false, slantUnderLeft = false } }
+    local rows = function()
+        return DUI.Options.EndRows({ name = "Demo bar",
+            left = { on = "bar.slantLeft", flip = "bar.slantUnderLeft" },
+            right = { on = "bar.slant", flip = "bar.slantUnder" } })
+    end
+    DUI:RegisterModule("Demo", { label = "Demo", defaults = D, options = { pages = {
+        { id = "main", label = "Main", groups = { { label = "Card", items = rows() } } },
+        -- A page that edits another table with the same keys (raid sizes do this).
+        { id = "big", label = "Big", mapKey = function(key) return (key:gsub("^bar%.", "big.")) end,
+          groups = { { label = "Card", items = rows() } } },
+    } } })
+    T.falsy(stub.ChatContains("Options ("), "the rows are valid")
+    local O = DUI.Options
+    local page = O.GetPage("Demo.main")
+    local left, right = page.groups[1].items[1], page.groups[1].items[2]
+    T.eq(left.label, "Demo bar left end"); T.eq(right.label, "Demo bar right end")
+    -- Today's look: left straight, right the usual /.
+    T.eq(O.Get(page, left), "straight"); T.eq(O.Get(page, right), "slash")
+    T.truthy(O.IsDefault(page, right))
+    -- /--\ : the left end picked /, the right end flipped to \.
+    O.Set(page, left, "slash")
+    O.Set(page, right, "backslash")
+    T.eq(DUI:Get("Demo", "bar.slantLeft"), true); T.eq(DUI:Get("Demo", "bar.slantUnderLeft"), true)
+    T.eq(DUI:Get("Demo", "bar.slant"), true); T.eq(DUI:Get("Demo", "bar.slantUnder"), true)
+    T.eq(O.Get(page, left), "slash"); T.eq(O.Get(page, right), "backslash")
+    T.falsy(O.IsDefault(page, right))
+    -- Straight clears the flip as well.
+    O.Set(page, left, "straight")
+    T.eq(DUI:Get("Demo", "bar.slantLeft"), false); T.eq(DUI:Get("Demo", "bar.slantUnderLeft"), false)
+    -- Reset puts both switches back.
+    O.ResetItem(page, right)
+    T.eq(DUI:Get("Demo", "bar.slant"), true); T.eq(DUI:Get("Demo", "bar.slantUnder"), false)
+    -- The other table's page writes its own keys only.
+    local big = O.GetPage("Demo.big")
+    O.Set(big, big.groups[1].items[2], "backslash")
+    T.eq(DUI:Get("Demo", "big.slantUnder"), true)
+    T.eq(DUI:Get("Demo", "bar.slantUnder"), false)
+    -- A broken end row is reported.
+    local errs = DUI.Options.Validate({ { type = "dropdown", key = "on", label = "X", ends = { side = "up", on = "on", flip = "on" } } }, DEFAULTS)
+    T.eq(#errs, 1)
 end)
 
 T.test("a reload item asks (the core's own reload prompt) only when its value actually changes", function()
@@ -198,6 +244,16 @@ T.test("every unit frames page is valid", function()
         if page.section == "UnitFrames" then n = n + 1 end
     end
     T.eq(n, 19, "no Healer Frames page, no Target Auras page; Click-casting is one; Raid 10, 20 and 40; the Personal Display; PvP Frames; Focus Target; Party Targets; Aura Lists")
+    T.falsy(stub.ChatContains("Options ("))
+end)
+
+T.test("every module's pages are valid, with nothing reported in chat", function()
+    local DUI = stub.Load({ module = true, actionbars = true, buffs = true, skins = true, bags = true, nameplates = true,
+        tooltip = true, procs = true, qol = true, auctionhouse = true, chat = true, infopanel = true, quests = true })
+    for id, page in DUI.Options.Pages() do
+        local errors = DUI.Options.ValidatePage(page)
+        T.eq(#errors, 0, id .. ": " .. tostring(errors[1]))
+    end
     T.falsy(stub.ChatContains("Options ("))
 end)
 
@@ -282,6 +338,26 @@ end)
 -- The window
 -- ---------------------------------------------------------------------
 
+T.test("a row with its own get and a reset counts as changed only while set, and resets to unset", function()
+    local DUI = stub.Load({ module = true })
+    local O = DUI.Options
+    local page = O.GetPage("UnitFrames.player")
+    local stored
+    local item = { type = "color", key = "test.ownColor", label = "Own color",
+                   get = function() return stored or { 1, 1, 1 } end,
+                   set = function(v) stored = v end,
+                   reset = true, isSet = function() return stored ~= nil end }
+    T.truthy(O.IsDefault(page, item), "unset")
+    O.Set(page, item, { 0, 1, 0 })
+    T.falsy(O.IsDefault(page, item), "set")
+    O.ResetItem(page, item)
+    T.eq(stored, nil, "the reset clears it")
+    T.truthy(O.IsDefault(page, item))
+    local plain = { type = "color", key = "test.plain", label = "Plain", get = function() return { 0, 1, 0 } end,
+                    set = function() end }
+    T.truthy(O.IsDefault(page, plain), "a row with its own get and no reset still has no arrow")
+end)
+
 local function open(id)
     local DUI = stub.Load({ module = true })
     DUI.OptionsPanel.Show(id)
@@ -348,6 +424,9 @@ T.test("sliders snap, show units and take typed values", function()
     local W = DUI.Widgets
     T.eq(W.FormatValue({ unit = "px" }, 4), "4 px")
     T.eq(W.FormatValue({ unit = "x" }, 1.25), "1.25x")
+    T.eq(W.FormatValue({ unit = "s" }, 2.5), "2.5 s")
+    T.eq(W.FormatValue({ unit = "s" }, 20), "20 s")
+    T.eq(W.FormatValue({ unit = "c" }, 5), "5 c")
     T.eq(W.FormatValue({ unit = "x" }, 1), "1.00x")
     T.eq(W.FormatValue({ unit = "x" }, 0.71), "0.71x", "a saved 0.71 reads as it did")
     T.eq(W.FormatValue({ unit = "x" }, 0.7111), "0.7111x", "decimals show when the value has them")
@@ -776,7 +855,7 @@ end)
 -- Every row a player can change or press has hover text saying what it does.
 -- Text and custom rows explain themselves.
 T.test("every setting and button has a description", function()
-    local DUI = stub.Load({ module = true, actionbars = true, buffs = true, bags = true, nameplates = true, tooltip = true,
+    local DUI = stub.Load({ module = true, actionbars = true, buffs = true, bags = true, nameplates = true, tooltip = true, procs = true,
                             qol = true, chat = true, infopanel = true, skins = true, quests = true })
     local O = DUI.Options
     local missing, seen = {}, {}
@@ -963,4 +1042,29 @@ T.test("role badges use Media/roles.png, as a badge and inline in text", functio
     local text = W.RoleText("DAMAGER", 12)
     T.eq(text, "|T" .. DUI.MEDIA .. "roles.png:12:12:0:0:128:128:0:64:64:128|t", "inline, the bottom left quarter")
     T.eq(W.RoleText("NONE"), "", "no art for anything else")
+end)
+
+T.test("bar ends: on every page a bar's two end menus sit together in one card, left then right", function()
+    local DUI = stub.Load({ module = true })
+    local O = DUI.Options
+    local found = 0
+    for id in O.Pages() do
+        local page = O.GetPage(id)
+        for _, g in ipairs(page and page.groups or {}) do
+            local items = g.items or {}
+            for i, it in ipairs(items) do
+                if it.ends and it.ends.side == "left" then
+                    found = found + 1
+                    local nxt = items[i + 1]
+                    local name = it.label:gsub(" left end$", "")
+                    T.truthy(nxt and nxt.ends and nxt.ends.side == "right", id .. ": " .. it.label .. " has its right end right after it")
+                    T.eq(nxt and nxt.label, name .. " right end", id .. ": the same bar")
+                elseif it.ends and it.ends.side == "right" then
+                    local prev = items[i - 1]
+                    T.truthy(prev and prev.ends and prev.ends.side == "left", id .. ": " .. it.label .. " follows its left end")
+                end
+            end
+        end
+    end
+    T.truthy(found > 10, "end menus found: " .. found)
 end)

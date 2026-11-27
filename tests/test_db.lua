@@ -292,6 +292,65 @@ T.test("tooltips default to Rich, existing profiles keep the look they had", fun
     T.isnil(pd.Old.modules.Tooltip.style, "only once")
 end)
 
+-- Proc Alerts came later: profiles from before start with them off (the welcome
+-- offers them), once; new installs and new profiles have them on.
+T.test("Proc Alerts start off in profiles from before them, on in new ones", function()
+    local DUI = stub.Load({ procs = true, before = function()
+        DaylightUIDB = { version = 2, profileData = {
+            Old = { modules = { Tooltip = { textSize = 13 } } },
+            On = { modules = { Procs = { enabled = true } } } } }
+    end })
+    local pd = DaylightUIDB.profileData
+    T.eq(pd.Old.modules.Procs.enabled, false, "an existing profile starts with them off")
+    T.eq(pd.On.modules.Procs.enabled, true, "one switched on stays on")
+    T.eq(pd.Old.procsOff1, true)
+    pd.Old.modules.Procs.enabled = true
+    DUI.DB.Init()
+    T.eq(pd.Old.modules.Procs.enabled, true, "only once")
+    DUI.Profiles.Create("Fresh")
+    T.eq(pd.Fresh.procsOff1, true, "a new profile is marked")
+end)
+
+-- Nameplates sit lower by default now: profiles from before keep the old
+-- height once, so no player's plates move; new installs and new profiles
+-- start low.
+T.test("nameplates keep their old height in old profiles, sit low in new ones", function()
+    local DUI = stub.Load({ nameplates = true, before = function()
+        DaylightUIDB = { version = 2, profileData = {
+            Old = { modules = { Tooltip = { textSize = 13 } } },
+            Moved = { modules = { Nameplates = { offsetY = 5 } } } } }
+    end })
+    local pd = DaylightUIDB.profileData
+    T.eq(pd.Old.modules.Nameplates.offsetY, 14, "an existing profile keeps the old height")
+    T.eq(pd.Moved.modules.Nameplates.offsetY, 5, "a height picked by hand stays")
+    pd.Old.modules.Nameplates.offsetY = nil
+    DUI.DB.Init()
+    T.isnil(pd.Old.modules.Nameplates.offsetY, "only once")
+    DUI.Profiles.Create("Fresh")
+    T.eq(pd.Fresh.plateLow1, true, "a new profile is marked")
+    T.eq(DUI:Get("Nameplates", "offsetY") ~= nil, true)
+end)
+
+T.test("a fresh install starts with low nameplates", function()
+    local DUI = stub.Load({ nameplates = true })
+    local first = DaylightUIDB.profileData[DUI.DB.DEFAULT]
+    T.eq(first.plateLow1, true)
+    T.eq(DUI:Get("Nameplates", "offsetY"), -20)
+    DUI.DB.Init()
+    T.eq(DUI:Get("Nameplates", "offsetY"), -20, "still low on the next load")
+end)
+
+T.test("a fresh install starts with Proc Alerts on, and stays so on the next load", function()
+    local DUI = stub.Load({ procs = true })
+    local first = DaylightUIDB.profileData[DUI.DB.DEFAULT]
+    T.eq(first.procsOff1, true)
+    T.eq(DUI:Get("Procs", "enabled"), true)
+    DUI.DB.Init()
+    T.eq(DUI:Get("Procs", "enabled"), true, "not off on the next load")
+    DUI.Profiles.Create("Blank", { general = {}, modules = {}, positions = {} })
+    T.eq(DaylightUIDB.profileData.Blank.modules.Procs.enabled, true, "a shared profile starts on too")
+end)
+
 T.test("a fresh install and a new profile start in Rich tooltips with nothing saved", function()
     local DUI = stub.Load({ tooltip = true })
     local first = DaylightUIDB.profileData[DUI.DB.DEFAULT]
@@ -336,4 +395,25 @@ T.test("a fresh install and a new profile are not set to English chat tags", fun
     local p = DaylightUIDB.profileData.Fresh
     T.truthy(p, "a profile is made")
     T.eq(p.tagLetters1, true, "a new profile is marked too")
+end)
+
+T.test("bar ends: one switch for both ends is split so every end looks as it did", function()
+    stub.Load({ before = function()
+        DaylightUIDB = { version = 2, profileData = {
+            Off = { modules = { InfoPanel = { databar = { angled = false } }, QoL = { lootFeedSlant = false, lootFeedSlantSide = "left" } } },
+            Left = { modules = { QoL = { lootFeedSlantSide = "left" } } },
+            Right = { modules = { QoL = { lootFeedSlantSide = "right" } } },
+            Plain = { modules = { InfoPanel = { databar = { height = 30 } } } } } }
+    end })
+    local pd = DaylightUIDB.profileData
+    T.eq(pd.Off.modules.InfoPanel.databar.angledRight, false, "the data bar's right end straight as before")
+    T.eq(pd.Off.modules.QoL.lootFeedLeft, false); T.eq(pd.Off.modules.QoL.lootFeedRight, false)
+    T.isnil(pd.Off.modules.QoL.lootFeedSlant, "the old keys go")
+    T.isnil(pd.Off.modules.QoL.lootFeedSlantSide)
+    T.isnil(pd.Left.modules.QoL.lootFeedLeft, "angled on the left: the default")
+    T.eq(pd.Left.modules.QoL.lootFeedRight, false)
+    T.eq(pd.Right.modules.QoL.lootFeedLeft, false)
+    T.isnil(pd.Right.modules.QoL.lootFeedRight)
+    T.isnil(pd.Plain.modules.InfoPanel.databar.angledRight, "untouched: nothing written")
+    T.eq(pd.Plain.barEnds1, true)
 end)

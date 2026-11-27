@@ -304,6 +304,19 @@ function stub.Children(parent, keep)
     table.sort(out, byAge)
     return out
 end
+
+function stub.ShownCount(list)
+    local shown = 0
+    for _, widget in ipairs(list or {}) do
+        if widget:IsShown() then shown = shown + 1 end
+    end
+    return shown
+end
+
+-- The keys the reveal handlers answer, plus a test lead's.
+function stub.RevealKeys(ns)
+    return { "test.lead", ns.Personal.KEY, "unitframes.party", "unitframes.raid", ns.Raid.SpotKey(20), ns.Raid.SpotKey(40) }
+end
 -- A Line is a region too (SimpleLine: frame:GetRegions returns the lines made on it).
 local REGIONS = { Texture = true, FontString = true, MaskTexture = true, Line = true }
 local function isRegion(w) return REGIONS[w.__type] == true end
@@ -356,6 +369,11 @@ function Widget:SetParent(p)
     guard(self, "SetParent")
     adopt(self, p)
     self.__parent = p
+    -- Like the client, a new parent puts the frame one level above it, whatever
+    -- level it had before.
+    if type(p) == "table" and type(rawget(p, "__level")) == "number" and rawget(self, "__level") ~= nil then
+        self.__level = p.__level + 1
+    end
     if type(p) == "table" and rawget(p, "__inAura") then self.__inAura = p.__inAura end
 end
 -- Like the client, OnShow and OnHide run when a frame's visibility changes,
@@ -594,6 +612,10 @@ local function checkAnchor(self, rel)
 end
 function Widget:SetPoint(...)
     guard(self, "SetPoint")
+    -- As in game: the point itself is required.
+    if type((...)) ~= "string" then
+        error('Usage: ("point" [, region or nil] [, "relativePoint"] [, offsetX, offsetY]', 2)
+    end
     checkAnchor(self, select(2, ...))
     local rel = select(2, ...)
     if type(rel) == "table" then
@@ -694,6 +716,13 @@ end
 function Widget:StartMoving() self.__moving = true end
 function Widget:SetClampedToScreen(v) self.__clamped = v and true or false end
 function Widget:IsClampedToScreen() return self.__clamped == true end
+-- The part of the frame the screen keeps in view: insets into its own rect
+-- (left and bottom positive, right and top negative let that much hang off).
+function Widget:SetClampRectInsets(l, r, t, b) self.__clampInsets = { l, r, t, b } end
+function Widget:GetClampRectInsets()
+    local c = self.__clampInsets or { 0, 0, 0, 0 }
+    return c[1], c[2], c[3], c[4]
+end
 function Widget:StopMovingOrSizing() self.__moving = false end
 function Widget:CreateTexture(name, layer, _, sublevel)
     local t = new("Texture", name, self)
@@ -819,9 +848,12 @@ local function focusScript(box, name)
     local fn = box.__scripts and box.__scripts[name]
     if fn then fn(box) end
 end
+-- A box that isn't on screen (itself or a parent hidden) doesn't take the
+-- keyboard: the chat card's first whisper ignored typing until a second click.
 function Widget:SetFocus()
     local was = stub.focus
     if was == self then return end
+    if type(self.IsVisible) == "function" and not self:IsVisible() then return end
     stub.focus = self
     if was then focusScript(was, "OnEditFocusLost") end
     focusScript(self, "OnEditFocusGained")
@@ -853,6 +885,11 @@ function Widget:AddDispelTypeTexture(tex, opts)
     self.__dispels = self.__dispels or {}
     self.__dispels[#self.__dispels + 1] = { tex = tex, opts = opts }
     self.__dispel = self.__dispel or self.__dispels[1]
+end
+-- The client forgets every texture handed to AddDispelTypeTexture (BigWigs and
+-- DBM call it before handing a restyled button its textures again).
+function Widget:ClearDispelTypeTextures()
+    self.__dispels, self.__dispel = nil, nil
 end
 function Widget:SetHitRectInsets(l, r, t, b) self.__hitRect = { l, r, t, b } end
 function Widget:RegisterForClicks(...) self.__clicks = { ... } end
@@ -902,10 +939,43 @@ end
 -- animation's start value, so a test can check none runs where a tween owns it.
 function Widget:CreateAnimationGroup()
     local g = new("AnimationGroup", nil, self)
+    -- Each animation keeps what it was set to, read back by the client's getters.
+    g.__anims = {}
     function g:CreateAnimation(kind)
         if kind == "Alpha" then g.__alpha = true end
-        return new("Animation", nil, self)
+        local a = new("Animation", nil, self)
+        g.__anims[#g.__anims + 1] = a
+        function a:GetObjectType() return kind or "Animation" end
+        function a:SetDuration(d) self.__duration = d end
+        function a:GetDuration() return self.__duration or 0 end
+        function a:SetFlipBookFrames(n) self.__frames = n end
+        function a:GetFlipBookFrames() return self.__frames or 0 end
+        function a:SetFlipBookColumns(n) self.__cols = n end
+        function a:GetFlipBookColumns() return self.__cols or 0 end
+        function a:SetFlipBookRows(n) self.__rows = n end
+        function a:GetFlipBookRows() return self.__rows or 0 end
+        -- Read back as the client's getters do (SimpleAnim*APIDocumentation).
+        function a:SetTarget(t) self.__target = t end
+        function a:GetTarget() return self.__target end
+        function a:SetStartDelay(d) self.__startDelay = d end
+        function a:GetStartDelay() return self.__startDelay or 0 end
+        function a:SetEndDelay(d) self.__endDelay = d end
+        function a:GetEndDelay() return self.__endDelay or 0 end
+        function a:SetOrder(n) self.__order = n end
+        function a:GetOrder() return self.__order or 1 end
+        function a:SetSmoothing(s) self.__smoothing = s end
+        function a:GetSmoothing() return self.__smoothing or "NONE" end
+        function a:SetFromAlpha(v) self.__fromAlpha = v end
+        function a:GetFromAlpha() return self.__fromAlpha or 0 end
+        function a:SetToAlpha(v) self.__toAlpha = v end
+        function a:GetToAlpha() return self.__toAlpha or 0 end
+        function a:SetScaleTo(x, y) self.__scaleTo = { x, y } end
+        function a:GetScaleTo() local s = self.__scaleTo or { 1, 1 } return s[1], s[2] end
+        return a
     end
+    function g:GetAnimations() return unpack(self.__anims) end
+    function g:SetAnimationSpeedMultiplier(k) self.__speed = k end
+    function g:GetAnimationSpeedMultiplier() return self.__speed or 1 end
     -- OnPlay as it starts, OnStop when a playing group is stopped, as the
     -- client's AnimationGroup scripts. A looping group plays until stopped.
     function g:Play()
@@ -921,7 +991,73 @@ function Widget:CreateAnimationGroup()
     end
     function g:IsPlaying() return self.__playing == true end
     function g:SetLooping(kind) self.__looping = kind end
+    function g:GetLooping() return self.__looping or "NONE" end
     return g
+end
+-- This client makes a TextureCoordTranslation only from an XML template: asked
+-- for one from Lua it hands back a plain Animation with no SetOffset (seen in
+-- game), so code calling SetOffset on it errors "attempt to call a nil value".
+-- Made from a virtual AnimationGroup template in one of Daylight UI's own XML
+-- files (the .xml lines of DaylightUI.toc), the group gets the template's
+-- looping and its TextureCoordTranslation, aimed at the region it was made on.
+local animTemplates
+local function readAnimTemplates()
+    animTemplates = {}
+    for line in io.lines("DaylightUI.toc") do
+        local file = line:gsub("\r", ""):gsub("\\", "/"):match("^([^#].-%.xml)%s*$")
+        local fh = file and io.open(file)
+        if fh then
+            local xml = fh:read("*a")
+            fh:close()
+            for attrs, body in xml:gmatch("<AnimationGroup(.-)>(.-)</AnimationGroup>") do
+                local name = attrs:match('name="([^"]+)"')
+                if name then
+                    local t = { looping = attrs:match('looping="([^"]+)"'), anims = {} }
+                    for kind, a in body:gmatch("<(%w+)(.-)/>") do
+                        t.anims[#t.anims + 1] = { kind = kind, duration = tonumber(a:match('duration="([^"]+)"')),
+                            u = tonumber(a:match('offsetU="([^"]+)"')) or 0, v = tonumber(a:match('offsetV="([^"]+)"')) or 0 }
+                    end
+                    animTemplates[name] = t
+                end
+            end
+        end
+    end
+end
+do
+    local makeGroup = Widget.CreateAnimationGroup
+    function Widget:CreateAnimationGroup(name, template, ...)
+        local g = makeGroup(self, name, template, ...)
+        self.__animGroups = self.__animGroups or {}
+        self.__animGroups[#self.__animGroups + 1] = g
+        local make = g.CreateAnimation
+        function g:CreateAnimation(kind, ...)
+            if kind ~= "TextureCoordTranslation" then return make(self, kind, ...) end
+            local a = make(self, "Animation", ...)
+            local index = getmetatable(a).__index
+            return setmetatable(a, { __index = function(t, k)
+                if k == "SetOffset" or k == "GetOffset" then return nil end
+                return index(t, k)
+            end })
+        end
+        if type(template) == "string" then
+            if not animTemplates then readAnimTemplates() end
+            local t = animTemplates[template]
+            if not t then error("unknown animation group template " .. template, 2) end
+            if t.looping then g:SetLooping(t.looping) end
+            for _, spec in ipairs(t.anims) do
+                local a = make(g, spec.kind)
+                a.__target, a.__offset = self, { spec.u, spec.v }
+                if spec.duration then a:SetDuration(spec.duration) end
+                function a:GetOffset() return self.__offset[1], self.__offset[2] end
+                function a:GetTarget() return self.__target end
+            end
+        end
+        return g
+    end
+    function Widget:GetAnimationGroups() return unpack(self.__animGroups or {}) end
+    -- Tiling across: a texture repeated at its file's width instead of stretched.
+    function Widget:SetHorizTile(on) self.__horizTile = on == true end
+    function Widget:GetHorizTile() return self.__horizTile == true end
 end
 -- As the client's Button:Click: PreClick, OnClick, PostClick, in order. A test's
 -- click counts as the player's, so it is a hardware event while its scripts run.
@@ -1089,7 +1225,29 @@ function Widget:GetValue() return self.__value end
 function Widget:SetStatusBarColor(r, g, b, a) self.__barColor = { r, g, b, a } end
 -- Buttons take the mouse from the start, other frames once asked. On a protected
 -- frame this is a protected change.
-function Widget:EnableMouse(on) guard(self, "EnableMouse"); self.__mouse = on and true or false end
+function Widget:EnableMouse(on)
+    guard(self, "EnableMouse")
+    self.__mouse = on and true or false
+    self.__clicks, self.__motion = self.__mouse, self.__mouse
+end
+
+-- Clicks and hover can also be set apart. EnableMouse sets both.
+function Widget:SetMouseClickEnabled(on)
+    guard(self, "SetMouseClickEnabled")
+    self.__clicks = on and true or false
+end
+function Widget:SetMouseMotionEnabled(on)
+    guard(self, "SetMouseMotionEnabled")
+    self.__motion = on and true or false
+end
+function Widget:IsMouseClickEnabled()
+    if self.__clicks ~= nil then return self.__clicks end
+    return self:IsMouseEnabled()
+end
+function Widget:IsMouseMotionEnabled()
+    if self.__motion ~= nil then return self.__motion end
+    return self:IsMouseEnabled()
+end
 -- Whether a key a frame gets also goes on to the game is restricted in a fight
 -- (HasRestrictions in the frame API docs), so addon code can't change it in combat.
 function Widget:EnableKeyboard(on) guard(self, "EnableKeyboard"); self.__keyboard = on and true or false end
@@ -1142,7 +1300,7 @@ function Widget:RemoveMaskTexture(m)
         if x == m then table.remove(self.__masks, i) return end
     end
 end
-function Widget:SetTexture(p, wrapH, wrapV) self.__texture = p; self.__wrap = wrapH; self.__atlas = nil; return true end
+function Widget:SetTexture(p, wrapH, wrapV, filter) self.__texture = p; self.__wrap = wrapH; self.__filter = filter; self.__atlas = nil; return true end
 function Widget:GetTexture() return self.__texture end
 -- The client knows a file by its id, so a texture set by path reads back the id
 -- when the file has one. Tests list them in stub.fileIDs (lowercase, backslashes,
@@ -1312,6 +1470,18 @@ local function newAuraContainer(name, parent, template)
         self.__candidateSets = (self.__candidateSets or 0) + 1
         self.__refreshes = (self.__refreshes or 0) + 1
     end
+    -- SetAuraGroupFilterString (Blizzard_CustomAuraContainer.lua): a new filter for a
+    -- group already added; the same string again does nothing, a new one re-reads.
+    function c:SetAuraGroupFilterString(key, filter)
+        assert(self.__groups[key], "aura group was not found with this key.")
+        assert(type(filter) == "string", "invalid filter string")
+        if stub.refuseAuraFilters and stub.refuseAuraFilters[filter] then error("Invalid aura filter: " .. filter) end
+        local g = self.__groups[key]
+        if g.filter == filter then return end
+        g.filter = filter
+        self.__filterSets = (self.__filterSets or 0) + 1
+        self.__refreshes = (self.__refreshes or 0) + 1
+    end
     -- SetAuraGroupSortMethod: a new order for a group already added; the client
     -- re-sorts its buttons on the next refresh.
     function c:SetAuraGroupSortMethod(key, method, dir)
@@ -1321,6 +1491,33 @@ local function newAuraContainer(name, parent, template)
         self.__sortSets = (self.__sortSets or 0) + 1
     end
     function c:SetAuraGroupLayout(key, l) assert(self.__groups[key], key); self.__groups[key].layout = l end
+    -- One aura shown by itself (CustomAuraContainerSharedMixin:AddAuraSlot): a
+    -- non-empty key used once, a filter string, the same display options as a
+    -- group's; its one button is made (initializeFrame run) and handed back. The
+    -- addon anchors it itself. Kept in c.__slots[key] = { filter, opts, button, enabled }.
+    c.__slots = {}
+    function c:AddAuraSlot(key, filter, opts)
+        assert(type(key) == "string" and key ~= "", "slotKey must be a non-empty string.")
+        assert(type(filter) == "string" and filter ~= "", "invalid filter string")
+        assert(not self.__slots[key], string.format("aura slot '%s' already exists with this key.", key))
+        validCandidates(opts and opts.candidateFilters)
+        validSort(opts and opts.sortMethod or 0, opts and opts.sortDirection or 0)
+        local slot = { filter = filter, opts = opts, enabled = true }
+        self.__slots[key] = slot
+        slot.button = newAuraButton(self, opts and opts.initializeFrame or function() end)
+        return slot.button
+    end
+    local function slotOf(self, key)
+        local slot = self.__slots[key]
+        assert(slot, "aura slot was not found with this key.")
+        return slot
+    end
+    function c:SetAuraSlotEnabled(key, enabled)
+        assert(type(enabled) == "boolean", "enabled must be a boolean.")
+        slotOf(self, key).enabled = enabled
+    end
+    function c:IsAuraSlotEnabled(key) return slotOf(self, key).enabled end
+    function c:GetAuraSlotFrame(key) local slot = self.__slots[key]; return slot and slot.button or nil end
     function c:SetFlowLayoutAnchorPoint(p) self.__anchorPoint = p end
     function c:SetFlowLayoutGrowthDirection(h, v) self.__growth = { h, v } end
     function c:SetFlowLayoutMaximumLineSize(n) self.__lineSize = n end
@@ -1332,7 +1529,7 @@ end
 -- Shown for an aura, its shown animations play when it comes up and stop when it
 -- has none. This is the client's own code, so it runs in fights and under
 -- restrictions too.
-function stub.AuraVisible(btn, on)
+function stub.AuraVisible(btn, on, applications)
     local was = btn.__auraShown == true
     btn.__auraShown = on and true or false
     -- The client's own SetShown is never refused, unlike an addon's on a locked
@@ -1344,6 +1541,15 @@ function stub.AuraVisible(btn, on)
     end
     for _, g in ipairs(btn.__shownAnims or {}) do
         if on and not was then g:Play() elseif not on then g:Stop() end
+    end
+    -- ApplyApplicationBar: the bar shows at its least applications OR MORE.
+    local bar = btn.__appBar
+    if bar then
+        local want = on and (applications or 0) >= (btn.__appBarOpts.minApplications or 0)
+        if (rawget(bar, "__shown") and true or false) ~= want then
+            rawset(bar, "__shown", want)
+            if parentsShown(bar) then cascade(bar, want and "OnShow" or "OnHide") end
+        end
     end
 end
 
@@ -1393,6 +1599,19 @@ function newAuraButton(c, initializeFrame)
         inbound(self, g, "AnimationGroup")
         self.__shownAnims = self.__shownAnims or {}
         table.insert(self.__shownAnims, g)
+    end
+    function btn:RemoveAuraShownAnimation(g)
+        for i, x in ipairs(self.__shownAnims or {}) do
+            if x == g then table.remove(self.__shownAnims, i); return end
+        end
+    end
+    function btn:ClearAuraShownAnimations() self.__shownAnims = {} end
+    -- A bar the client fills with the stack count and shows from minApplications
+    -- up (ApplyApplicationBar); it must be a StatusBar inside the button.
+    function btn:SetApplicationBar(bar, opts)
+        inbound(self, bar, "StatusBar")
+        self.__appBar = bar
+        self.__appBarOpts = { minApplications = opts and opts.minApplications or 0, maxApplications = opts and opts.maxApplications or 0 }
     end
     -- Played by the client each time the button is given an aura, also one aura
     -- replacing another on a button already shown. Kept in __assignedAnims.
@@ -1615,9 +1834,11 @@ stub.IsAddonHandler = isAddonHandler
 -- before its OnShow, where the controller code stores the box's actions). An
 -- addon's script there leaves the rest of the game's call tainted. Lists each
 -- "piece.script" under frame (not frame itself) where addon code would run.
+-- scripts narrows it to a list, for a window whose pieces only the game's
+-- showing and enabling reach (a mouse press there starts with the player).
 stub.INSIDE_SCRIPTS = { "OnShow", "OnHide", "OnSizeChanged", "OnEnable", "OnDisable",
     "OnMouseDown", "OnMouseUp", "OnEditFocusGained", "OnEditFocusLost", "OnTextChanged" }
-function stub.AddonScriptsInside(frame)
+function stub.AddonScriptsInside(frame, scripts)
     local found = {}
     local function handlers(f, fn, out)
         local parts = rawget(f, "__hookParts")
@@ -1633,7 +1854,7 @@ function stub.AddonScriptsInside(frame)
     local function walk(f, path)
         for i, child in ipairs({ f:GetChildren() }) do
             local name = path .. "." .. (child:GetName() or tostring(i))
-            for _, script in ipairs(stub.INSIDE_SCRIPTS) do
+            for _, script in ipairs(scripts or stub.INSIDE_SCRIPTS) do
                 for _, fn in ipairs(handlers(child, child:GetScript(script), {})) do
                     if isAddonHandler(fn) then
                         local info = debug.getinfo(fn, "S")
@@ -1731,6 +1952,13 @@ function stub.FinishFade(f)
         local fn = g:GetScript("OnFinished")
         if fn then fn(g) end
     end
+end
+-- Runs only the timers already waiting, not the ones they start: a timer that
+-- keeps starting itself again (a repeating beat) can be stepped one round at a time.
+function stub.RunTimersOnce()
+    local pending = timers
+    timers = {}
+    for _, fn in ipairs(pending) do fn() end
 end
 function stub.RunTimers()
     for _ = 1, 10 do
@@ -1950,7 +2178,10 @@ _G.C_DurationUtil = {
 _G.UnitChannelInfo = function(u)
     local x = U(u); local c = x and x.channel
     if not c then return end   -- no cast: the client returns nothing at all, not a nil
-    return c.name, c.name, c.texture, 0, 0, false, c.notInterruptible, c.spellID or 1
+    -- displayName can be missing on a mob's channel; the game's own bar tests the first value.
+    local shown = c.displayName
+    if shown == nil then shown = c.name elseif shown == false then shown = nil end
+    return c.name, shown, c.texture, 0, 0, false, c.notInterruptible, c.spellID or 1
 end
 _G.UnitCastingDuration = function(u) local x = U(u); return x and x.cast and x.cast.duration end
 _G.UnitChannelDuration = function(u) local x = U(u); return x and x.channel and x.channel.duration end
@@ -1964,7 +2195,8 @@ _G.CurveConstants = { ScaleTo100 = "ScaleTo100" }
 _G.Enum = {
     StatusBarTimerDirection = { ElapsedTime = 0, RemainingTime = 1 },
     StatusBarInterpolation = { Immediate = 0, ExponentialEaseOut = 1 },
-    CustomAuraButtonDispelTypeTextureStyle = { Border = 0, BorderWithIcon = 1, CustomAsset = 2, PreserveAsset = 3 },
+    -- The game's values (AuraContainerSharedDocumentation.lua).
+    CustomAuraButtonDispelTypeTextureStyle = { Border = 0, BorderWithIcon = 1, Icon = 2, PreserveAsset = 3, CustomAsset = 4 },
     CustomAuraButtonDispelTypeStealableFilter = { Stealable = 0, NotStealable = 1 },
 }
 _G.AuraContainerSortMethod = { Default = 0, BigDefensive = 1, UnitFrameDebuff = 2, ImportantOnly = 3, Expiration = 4,
@@ -2001,6 +2233,15 @@ _G.C_RestrictedActions = {
 -- This only sets it. The game announces it with PLAYER_ENTERING_WORLD (a loading
 -- screen) or ZONE_CHANGED_NEW_AREA, which a test fires itself.
 function stub.SetInstance(kind) stub.instance = kind end
+
+-- C_NamePlate.GetNamePlateForUnit takes a plain token only: a chained one
+-- ("targettarget", "focustarget", "nameplate2target") errors in the client.
+-- A test's own GetNamePlateForUnit calls this first.
+function stub.CheckPlateUnit(unit)
+    if type(unit) == "string" and #unit > 6 and unit:sub(-6) == "target" then
+        error("bad argument #1 to 'get' (Target-of-target unit tokens are not allowed for this call. - Usage: local nameplate = C_NamePlate.GetNamePlateForUnit(unitToken [, includeForbidden]))", 2)
+    end
+end
 
 function stub.SetRestriction(name, on)
     local t = assert(Enum.AddOnRestrictionType[name], name)
@@ -2282,10 +2523,35 @@ function stub.SecureClick(b, button, down)
             if v == "" then v = nil end
             return v
         end
+        -- SecureCmdItemParse (ChatFrameUtil.lua): "bag slot" names that bag item.
+        -- /use then hands it to SecureCmdUseItem, which is UseContainerItem for a
+        -- bag item (SlashCommands.lua): what the bag's own right click does.
+        local function useBagItem(item)
+            local bag, slot = string.match(item or "", "^(%d+)%s+(%d+)$")
+            if bag and C_Container and C_Container.UseContainerItem then
+                C_Container.UseContainerItem(tonumber(bag), tonumber(slot))
+            end
+        end
         if acts and attr("type") == "macro" then
             local text = attr("macrotext")
+            local useItem = type(text) == "string" and string.match(text, "^/use%s+(%d+%s+%d+)$")
             if text == "/reload" then ReloadUI()
+            elseif useItem then useBagItem(useItem)
             elseif type(text) == "string" then slashLine(text) end
+        end
+        -- SECURE_ACTIONS.item (SecureTemplates.lua): an item that can be worn and
+        -- isn't is equipped by name, whatever else it does; anything else is used.
+        if acts and attr("type") == "item" then
+            local item = attr("item")
+            local bag, slot = string.match(item or "", "^(%d+)%s+(%d+)$")
+            local name = bag and C_Container and C_Container.GetContainerItemLink
+                and C_Container.GetContainerItemLink(tonumber(bag), tonumber(slot)) or item
+            if name and C_Item and C_Item.IsEquippableItem and C_Item.IsEquippableItem(name)
+                and not (C_Item.IsEquippedItem and C_Item.IsEquippedItem(name)) then
+                if C_Item.EquipItemByName then C_Item.EquipItemByName(name) end
+            else
+                useBagItem(item)
+            end
         end
         -- Type "spell": a test world that cares what a cast does sets stub.CastSpell.
         if acts and attr("type") == "spell" and stub.CastSpell then stub.CastSpell(attr("spell")) end
@@ -2531,6 +2797,12 @@ local BASE_TEMPLATES = {
         f.__attrs["ping-receiver"] = true
     end,
     ActionBarButtonTemplate = actionButton,
+    -- Blizzard_FrameXMLUtil/Mainline/Cooldown.xml: setAllPoints="true", so a new
+    -- cooldown already covers its parent; points set after it add to those two.
+    CooldownFrameTemplate = function(f)
+        local p = f.__parent
+        f.__points = { { "TOPLEFT", p, "TOPLEFT", 0, 0 }, { "BOTTOMRIGHT", p, "BOTTOMRIGHT", 0, 0 } }
+    end,
     SecureHandlerBaseTemplate = function(f) f.__protected = true end,
     -- SecureHandlers.lua: OnClick runs the frame's "_onclick" snippet (self,
     -- button, down), then the client's PostClick runs the addon's script.
@@ -3540,7 +3812,14 @@ function stub.ActionSlots(slots)
         local s = S(slot)
         if not s then return nil end
         if s.flyout then return "flyout", s.flyout end
-        if s.macro then return "macro", s.macro end
+        -- The game hands a macro's spell straight back with subType "spell"
+        -- (ActionButton.lua's spell alerts read it that way). A macro with no
+        -- spell: what the client gives is a guess here.
+        if s.macro then
+            local sid = stub.macroSpells[s.macro]
+            if sid then return "macro", sid, "spell" end
+            return "macro", s.macro, ""
+        end
         if s.item then return "item", s.item end
         return "spell", s.spellID
     end
@@ -3610,6 +3889,45 @@ function stub.ActionSlots(slots)
                  startTime = secret(100), duration = secret(10) }
     end
     _G.C_SpellActivationOverlay = { IsSpellOverlayed = function(id) return stub.overlay[id] == true end }
+end
+
+-- The spell reads Proc Alerts watches, installed by a test that wants them
+-- (other areas' tests keep these missing, as before). As the game's docs say,
+-- none carries a secret flag: stub.secretSpellReads = true makes each answer
+-- secret anyway, the worst case Proc Alerts must survive.
+--   stub.spellUsable[id] = { usable, noPower }   (C_Spell.IsSpellUsable; default false, false)
+--   stub.castTimes[id] = milliseconds             (C_Spell.GetSpellInfo().castTime)
+--   stub.spellCosts[id] = { { cost = n } }        (C_Spell.GetSpellPowerCost, made by Reset)
+--   stub.knownSpells[id] = true                   (IsPlayerSpell, C_SpellBook.IsSpellKnown)
+--   stub.spellCooldowns[id] = true | "gcd"        (C_Spell.GetSpellCooldown's isActive / isOnGCD)
+function stub.SpellReads()
+    stub.spellUsable, stub.castTimes, stub.spellCosts = {}, {}, {}
+    stub.spellCooldowns, stub.secretSpellReads = {}, nil
+    local function maybe(v)
+        if stub.secretSpellReads and v ~= nil then return stub.Secret(v) end
+        return v
+    end
+    C_Spell.IsSpellUsable = function(id)
+        local u = stub.spellUsable[id]
+        return maybe(u ~= nil and u[1] == true), maybe(u ~= nil and u[2] == true)
+    end
+    C_Spell.GetSpellInfo = function(id)
+        local s, ct = stub.spells and stub.spells[id], stub.castTimes[id]
+        if s == nil and ct == nil and not stub.knownSpells[id] then return nil end
+        return { name = s and s.name or tostring(id), castTime = maybe(ct or 0), spellID = id }
+    end
+    C_Spell.GetSpellPowerCost = function(id)
+        local t = stub.spellCosts[id]
+        if t == nil then return nil end
+        return maybe(t)
+    end
+    C_Spell.GetSpellCooldown = function(id)
+        local k = stub.spellCooldowns[id]
+        local plain = stub.inGame > 0 or not stub.AurasRestricted()
+        return { isActive = k ~= nil, isOnGCD = (k == "gcd") or nil, isEnabled = true,
+                 startTime = plain and 100 or stub.Secret(100), duration = plain and 10 or stub.Secret(10) }
+    end
+    _G.IsPlayerSpell = function(id) return stub.knownSpells[id] == true end
 end
 
 -- Globals Reset clears (the addon under test and its saved variables). Another addon that copies this file changes the list.
@@ -3703,6 +4021,29 @@ function stub.Reset()
         local f = new("StatusBar", n, _G.UIParent)
         function f:SetUnit(u) self.__castUnit = u; self.__setUnitCalled = true end
         f:RegisterEvent("UNIT_SPELLCAST_START")
+    end
+    -- The player cast bar the profession window borrows while you craft
+    -- (CastingBarFrame.lua, OverlayPlayerCastingBarMixin): it stands in for
+    -- PlayerCastingBarFrame over the given frame and shows on the next player
+    -- cast its own events hear.
+    local overlay = new("StatusBar", "OverlayPlayerCastingBarFrame", _G.UIParent)
+    overlay:Hide()
+    function overlay:SetUnit(u) self.__castUnit = u; self.__setUnitCalled = true end
+    overlay:RegisterEvent("UNIT_SPELLCAST_START")
+    overlay:SetScript("OnEvent", function(self, _, unit)
+        if unit == "player" and self.showCastbar then self:Show() end
+    end)
+    function overlay:StartReplacingPlayerBarAt(parent)
+        _G.PlayerCastingBarFrame.showCastbar = false
+        self:SetParent(parent)
+        self:SetFrameStrata("HIGH")
+        self.showCastbar = true
+    end
+    function overlay:EndReplacingPlayerBar()
+        self.showCastbar = false
+        self:Hide()
+        self:SetParent(_G.UIParent)
+        _G.PlayerCastingBarFrame.showCastbar = true
     end
     -- The swing timer API: speeds and the target's reach set by hand, the spells
     -- queued for the next swing, and the game's own swing bars.
@@ -4017,8 +4358,8 @@ function stub.WrapSecrets()
     end
 end
 
-stub.CORE_FILES = { "Locales/Locales.lua", "Locales/ruRU.lua", "Locales/zhCN.lua", "Locales/koKR.lua", "Locales/frFR.lua", "Locales/esES.lua", "Locales/deDE.lua", "Core.lua", "DB.lua", "Pixel.lua", "Style.lua", "Tips.lua", "GameFonts.lua", "DamageText.lua", "Motion.lua", "Sound.lua", "Pad.lua", "Media.lua", "Health.lua", "Weapons.lua", "Threat.lua", "Interrupt.lua", "Spots.lua", "Dots.lua", "DotsDraw.lua", "PrivateAuras.lua", "Taint.lua", "BugReport.lua", "PlateReport.lua", "WorldWatch.lua", "Gradients.lua", "BarFx.lua", "BarFxStyles.lua", "Movers.lua", "Fade.lua", "FadeUpgrade.lua", "EditMode.lua", "EditModeBase.lua", "GameMovers.lua", "PTRButton.lua", "QuestieAside.lua", "PrettyAside.lua", "OpenMap.lua", "CombatText/Kinds.lua", "CombatText/Lines.lua", "CombatText/Feed.lua", "CombatText/Page.lua", "Options/Registry.lua", "Options/Theme.lua",
-                    "Options/Widgets.lua", "Options/SampleStrip.lua", "Options/Nav.lua", "Options/Results.lua", "Options/Panel.lua", "GameMenu.lua", "Installer.lua", "InstallerDraft.lua", "InstallerPages.lua", "InstallerCards.lua", "InstallerScreen.lua", "InstallerUI.lua", "InstallerChrome.lua", "InstallerSteps.lua", "InstallerPlugins.lua", "InstallerLooks.lua", "InstallerDuel.lua", "Welcome.lua", "Profiles.lua", "Alts.lua", "Plugins.lua", "API.lua", "Donators.lua", "PatchNotes.lua", "PatchNotesUI.lua", "TestBox.lua", "Windows/Feel.lua", "Windows/Frame.lua", "Windows/Room.lua", "Windows/Follow.lua", "Windows/Swap.lua", "Windows/Parts.lua", "Windows/Keys.lua", "Windows/Cast.lua", "Tour.lua" }
+stub.CORE_FILES = { "Locales/Locales.lua", "Locales/ruRU.lua", "Locales/zhCN.lua", "Locales/koKR.lua", "Locales/frFR.lua", "Locales/esES.lua", "Locales/deDE.lua", "Core.lua", "DB.lua", "Pixel.lua", "Style.lua", "Tips.lua", "GameFonts.lua", "DamageText.lua", "Motion.lua", "Sound.lua", "Pad.lua", "Media.lua", "Health.lua", "Weapons.lua", "Threat.lua", "Interrupt.lua", "Spots.lua", "Dots.lua", "DotsDraw.lua", "PrivateAuras.lua", "Taint.lua", "BugReport.lua", "PlateReport.lua", "WorldWatch.lua", "Gradients.lua", "BarFx.lua", "BarFxStyles.lua", "BarFxSoft.lua", "BarFxDaybreak.lua", "Movers.lua", "Fade.lua", "FadeUpgrade.lua", "EditMode.lua", "EditModeBase.lua", "GameMovers.lua", "PTRButton.lua", "QuestieAside.lua", "PrettyAside.lua", "OpenMap.lua", "CombatText/Kinds.lua", "CombatText/Lines.lua", "CombatText/Feed.lua", "CombatText/Page.lua", "Options/Registry.lua", "Options/Theme.lua",
+                    "Options/Widgets.lua", "Options/SampleStrip.lua", "Options/Nav.lua", "Options/Results.lua", "Options/Panel.lua", "GameMenu.lua", "Installer.lua", "InstallerDraft.lua", "InstallerPages.lua", "InstallerCards.lua", "InstallerScreen.lua", "InstallerUI.lua", "InstallerChrome.lua", "InstallerSteps.lua", "InstallerPlugins.lua", "InstallerLooks.lua", "InstallerDuel.lua", "Welcome.lua", "Clashes.lua", "Profiles.lua", "Alts.lua", "Plugins.lua", "API.lua", "Donators.lua", "PatchNotes.lua", "PatchNotesUI.lua", "TestBox.lua", "Windows/Feel.lua", "Windows/Frame.lua", "Windows/Room.lua", "Windows/Follow.lua", "Windows/Swap.lua", "Windows/Parts.lua", "Windows/Keys.lua", "Windows/Cast.lua", "Tour.lua" }
 stub.BUFFS_FILES = { "Core.lua", "Categories.lua", "Data.lua", "Classify.lua", "Auras.lua", "Spells.lua", "Layout.lua",
                      "Scan.lua", "Preview.lua", "Widgets.lua", "Bar.lua", "Feel.lua", "DebuffBar.lua", "Private.lua", "PreviewBar.lua", "Reminder.lua", "EdgeEditor.lua", "Commands.lua",
                      "Options.lua", "Module.lua" }
@@ -4036,12 +4377,13 @@ stub.LFG_FILES = { "Defaults.lua", "Data.lua", "Rows.lua", "Browse.lua", "Listin
 stub.MAIL_FILES = { "Defaults.lua", "Ledger.lua", "Inbox.lua", "Send.lua", "LedgerPage.lua", "Window.lua", "Options.lua", "Module.lua" }
 stub.SOCIAL_FILES = { "Defaults.lua", "Data.lua", "Detail.lua", "Friends.lua", "Allies.lua", "Requests.lua", "Raid.lua", "Window.lua", "Options.lua", "Module.lua" }
 stub.LEGACY_FILES = { "Defaults.lua", "Data.lua", "Progress.lua", "Challenges.lua", "Trees.lua", "Window.lua", "Options.lua", "Module.lua" }
+stub.PROCS_FILES = { "Defaults.lua", "Data.lua", "Alerts.lua", "Flares.lua", "Engine.lua", "Game.lua", "Sample.lua", "Options.lua", "Module.lua" }
 stub.MODULE_DIR = "DaylightUI_UnitFrames/"
 stub.ACTIONBARS_FILES = { "Defaults.lua", "Shape.lua", "Skin.lua", "Hide.lua", "Menus.lua", "Totems.lua", "Park.lua", "Paging.lua", "Buttons.lua", "Ping.lua", "RankUp.lua", "Keys.lua", "Small.lua", "PadSkin.lua", "Bars.lua",
-                          "Cooldowns.lua", "BuffBars.lua", "CdmData.lua", "CdmSpells.lua", "CdmCustom.lua", "CdmEffects.lua", "CdmRows.lua", "CdmOwn.lua",
+                          "Cooldowns.lua", "BuffBars.lua", "CdmData.lua", "CdmTether.lua", "CdmSpells.lua", "CdmCustom.lua", "CdmEffects.lua", "CdmRows.lua", "CdmOwn.lua",
                           "CdmAuras.lua", "CdmBars.lua", "CdmEditor.lua", "CdmCard.lua", "CdmImport.lua", "CdmSwitch.lua", "CdmGuide.lua", "Diag.lua", "Options.lua", "Module.lua" }
 stub.MODULE_FILES = { "Defaults.lua", "UnitFrames.lua", "Colors.lua", "CastBar.lua", "Swing.lua", "HealSpells.lua", "AuraLists.lua", "Auras.lua", "AuraGroups.lua", "Indicators.lua", "Texts.lua", "Looks.lua", "Combo.lua", "Happiness.lua", "Blizzard.lua",
-                      "GroupParts.lua", "GroupPrivate.lua", "Group.lua", "Raid.lua", "PartyPets.lua", "PartyTargets.lua", "PartyCasts.lua", "Party.lua", "Arena.lua", "Leader.lua", "Pull.lua", "ClickCast.lua", "ClickBinder.lua", "ClickCastPage.lua", "AuraListsPage.lua", "PowerBar.lua", "DruidBars.lua", "Personal.lua", "Arrive.lua", "Moments.lua", "Socket.lua", "Upgrade.lua", "Units.lua", "TestMode.lua", "Sample.lua", "PageSample.lua", "Sweep.lua", "Options.lua", "Module.lua" }
+                      "GroupParts.lua", "GroupPrivate.lua", "Group.lua", "Raid.lua", "PartyPets.lua", "PartyTargets.lua", "PartyCasts.lua", "Party.lua", "Arena.lua", "Leader.lua", "Pull.lua", "ClickCast.lua", "ClickBinder.lua", "ClickCastPage.lua", "AuraListsPage.lua", "PowerBar.lua", "DruidBars.lua", "Personal.lua", "Arrive.lua", "Moments.lua", "Socket.lua", "Upgrade.lua", "Units.lua", "TestMode.lua", "Sample.lua", "PageSample.lua", "Sweep.lua", "Layers.lua", "Options.lua", "Module.lua" }
 
 -- Each file is read and compiled once per run (false = not on disk). Every Load
 -- runs the compiled chunk again, which gives fresh locals as a reload does.
@@ -4082,10 +4424,10 @@ function stub.Load(opts)
     stub.Reset()
     if opts.before then opts.before() end
     local DUI, UF = {}, nil
-    -- opts.locale(L) is a test's own language, put on DUI.L right after
+    -- opts.locale(L, DUI) is a test's own language, put on DUI.L right after
     -- Locales.lua makes it and before any file reads it (tests/test_locale.lua).
     loadFiles("", stub.CORE_FILES, "DaylightUI", DUI, opts.locale and function(file)
-        if file == "Locales/Locales.lua" then opts.locale(DUI.L) end
+        if file == "Locales/Locales.lua" then opts.locale(DUI.L, DUI) end
     end)
     loadFiles("Character/", stub.CHARACTER_FILES, "DaylightUI", DUI)   -- the character window, part of the core
     stub.character = DUI.Char
@@ -4132,7 +4474,7 @@ function stub.Load(opts)
     end
     if opts.bags then
         local BG = {}
-        loadFiles("DaylightUI_Bags/", { "Defaults.lua", "Saved.lua", "Items.lua", "Plugins.lua", "Search.lua", "ItemTree.lua", "Categories.lua", "Junk.lua", "Repair.lua", "Bags.lua", "Layout.lua", "Stack.lua", "Keep.lua", "Swap.lua", "Window.lua", "Move.lua", "Disenchant.lua", "Guard.lua", "Prep.lua", "Slots.lua", "Bank.lua", "Viewer.lua",
+        loadFiles("DaylightUI_Bags/", { "Defaults.lua", "Saved.lua", "Items.lua", "Search.lua", "Plugins.lua", "ItemTree.lua", "Categories.lua", "Junk.lua", "Repair.lua", "Bags.lua", "Layout.lua", "Stack.lua", "Keep.lua", "Swap.lua", "Window.lua", "Move.lua", "Disenchant.lua", "Guard.lua", "Prep.lua", "Slots.lua", "Bank.lua", "Viewer.lua",
                                         "Currency.lua", "MoneyRoll.lua",
                                         "OpenClose.lua", "Options.lua", "Module.lua" }, "DaylightUI_Bags", BG)
         stub.FireEvent("ADDON_LOADED", "DaylightUI_Bags")
@@ -4147,9 +4489,15 @@ function stub.Load(opts)
     end
     if opts.tooltip then
         local TT = {}
-        loadFiles("DaylightUI_Tooltip/", { "Defaults.lua", "Tooltip.lua", "Rich/Read.lua", "Rich/Panel.lua", "Rich/Players.lua", "Rich/Items.lua", "Rich/Spells.lua", "Rich/World.lua", "Rich/Foreign.lua", "Rich/Pill.lua", "Rich/Rich.lua", "Rich/Sample.lua", "Ghost.lua", "Options.lua", "Module.lua" }, "DaylightUI_Tooltip", TT)
+        loadFiles("DaylightUI_Tooltip/", { "Defaults.lua", "Tooltip.lua", "Rich/Read.lua", "Rich/Panel.lua", "Rich/Layout.lua", "Rich/Players.lua", "Rich/Items.lua", "Rich/Spells.lua", "Rich/World.lua", "Rich/Foreign.lua", "Rich/Pill.lua", "Rich/Rich.lua", "Rich/Sample.lua", "Ghost.lua", "Options.lua", "Rich/Design.lua", "Module.lua" }, "DaylightUI_Tooltip", TT)
         stub.FireEvent("ADDON_LOADED", "DaylightUI_Tooltip")
         stub.tooltip = TT
+    end
+    if opts.procs then
+        local PR = {}
+        loadFiles("DaylightUI_Procs/", stub.PROCS_FILES, "DaylightUI_Procs", PR)
+        stub.FireEvent("ADDON_LOADED", "DaylightUI_Procs")
+        stub.procs = PR
     end
     if opts.qol then
         local Q = {}

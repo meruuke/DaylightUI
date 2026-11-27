@@ -23,17 +23,17 @@ Tracker.FALLBACK = { "TOPRIGHT", "UIParent", "TOPRIGHT", -24, -300 }
 Tracker.BOX_PAD = { 8, 10, 6 }    -- box padding around the list: sides, top, bottom (the top clears the header's buttons)
 Tracker.EVENTS = { "QUEST_LOG_UPDATE", "QUEST_WATCH_LIST_CHANGED", "QUEST_ACCEPTED", "QUEST_TURNED_IN",
     "QUEST_REMOVED", "QUEST_AUTOCOMPLETE", "ZONE_CHANGED", "ZONE_CHANGED_NEW_AREA", "PLAYER_ENTERING_WORLD",
-    "CONTENT_TRACKING_UPDATE", "TRACKED_ACHIEVEMENT_UPDATE", "PLAYER_REGEN_ENABLED", "SUPER_TRACKING_CHANGED",
+    "CONTENT_TRACKING_UPDATE", "TRACKED_ACHIEVEMENT_UPDATE", "PLAYER_REGEN_ENABLED", "PLAYER_REGEN_DISABLED", "SUPER_TRACKING_CHANGED",
     "PLAYER_LEVEL_UP",    -- title difficulty colors depend on the player's level
     "UNIT_QUEST_LOG_CHANGED", "GROUP_ROSTER_UPDATE" }   -- which party members are on a quest
 -- These can arrive in bursts (a whole raid turning in), so they wait and get one check.
 Tracker.WAITS = { QUEST_LOG_UPDATE = true, UNIT_QUEST_LOG_CHANGED = true, GROUP_ROSTER_UPDATE = true }
 -- Settings whose change re-lays the list with a fade instead of a jump.
-Tracker.FADE_PATHS = { filter = true, instances = true, zoneNames = true, hideDone = true, sort = true, foldReady = true, readyLast = true, emptyHeader = true }
+Tracker.FADE_PATHS = { filter = true, filterRow = true, instances = true, zoneNames = true, hideDone = true, sort = true, hereFirst = true, foldReady = true, readyLast = true, emptyHeader = true }
 Tracker.NEAR_EVERY = 5            -- seconds between nearest-first checks
 Tracker.DIM = 0.5                 -- other quests' alpha while one is hovered
 
-local db, holder, view, content, box
+local db, holder, view, content, box, rowsClip
 local frames, shown = {}, {}
 local queued, wantAnimate = false, nil
 Tracker.frames = frames
@@ -113,23 +113,60 @@ function Tracker.ForgetProgress(id)
     seen[id] = nil
 end
 
+-- Matching the minimap: with the box on, the box's edges sit on the minimap
+-- frame's outer edges (its padding and border count, whatever their size);
+-- without one, the list lines up with the map picture.
+function Tracker.Matching()
+    return db and db.matchMap and DUI:Get("InfoPanel", "map.enabled") == true or false
+end
+
+-- Info panel units (UIParent's) to the list's.
+local function toList(v)
+    local ref = view or holder
+    local s = ref and ref:GetEffectiveScale()
+    if type(s) ~= "number" or s <= 0 then return v end
+    return v * UIParent:GetEffectiveScale() / s
+end
+
 function Tracker.Width()
-    if db.matchMap and DUI:Get("InfoPanel", "map.enabled") == true then
+    if Tracker.Matching() then
+        local boxLeft, boxRight, mapLeft, mapRight
+        if DUI.MinimapSpan then boxLeft, boxRight, mapLeft, mapRight = DUI.MinimapSpan() end
+        if boxLeft then
+            if db.box == true then return toList(boxRight - boxLeft) - 2 * Tracker.BOX_PAD[1] end
+            return toList(mapRight - mapLeft)
+        end
         local w = DUI:Get("InfoPanel", "map.size")
         if type(w) == "number" and w > 0 then return w end
     end
     return db.width
 end
 
+-- For the info panel, which hangs the list under the minimap: whether its box
+-- or the list itself lines up there, and how far that edge is from the list's
+-- top-right corner, in UIParent units. nil when not matching.
+function DUI.QuestTrackerFit()
+    if not (Tracker.built and Tracker.Matching()) then return nil end
+    local box = db.box == true
+    local pad = 0
+    if box then
+        local s = holder and holder:GetEffectiveScale()
+        pad = Tracker.BOX_PAD[1] * ((type(s) == "number" and s > 0) and s / UIParent:GetEffectiveScale() or 1)
+    end
+    return { box = box, pad = pad }
+end
+
 function Tracker.Options()
     return { width = Tracker.Width(), sizes = db.sizes, zoneNames = db.zoneNames, compact = db.compact,
-             hideDone = db.hideDone, filter = Tracker.ZoneOnly() and "zone" or db.filter, folds = Tracker.Folds(), caps = db.capsTitles,
-             levels = db.questLevels, tags = db.questTags, party = db.questParty, sort = db.sort,
+             hideDone = db.hideDone, filter = Tracker.ZoneOnly() and "zone" or db.filter, filterRow = db.filterRow, folds = Tracker.Folds(), caps = db.capsTitles,
+             levels = db.questLevels, tags = db.questTags, party = db.questParty, sort = db.sort, hereFirst = db.hereFirst,
              recent = db.sort == "recent" and Tracker.Recent() or nil, near = Tracker.near,
              frozen = InCombatLockdown() and Tracker.order or nil,
              frozenZones = InCombatLockdown() and Tracker.zoneOrder or nil,
+             zoneOrder = Tracker.zoneDrag and Tracker.zoneDrag.order or Tracker.ZoneOrder(),
              frozenReady = InCombatLockdown() and Tracker.readyIDs or nil,
-             foldReady = db.foldReady, readyLast = db.readyLast, emptyHeader = db.emptyHeader }
+             foldReady = db.foldReady, readyLast = db.readyLast, emptyHeader = db.emptyHeader,
+             fightOnly = db.fightFocus and Tracker.fighting or nil }
 end
 
 -- Only the current zone: the player's filter, or a dungeon's own view (instances
@@ -458,7 +495,10 @@ local PAINT_NEW = {}
 function Tracker.Render(animate, ifChanged)
     queued, Tracker.waiting = false, false
     if not content then return end
-    local snap = ns.Data.Snapshot(db.filter)
+    -- Mid-drag only the zone order changes, so the last read of the log is reused:
+    -- reading it again each time the zone passes another made dragging stutter.
+    local snap = Tracker.zoneDrag and Tracker.lastSnap or ns.Data.Snapshot(db.filter)
+    Tracker.lastSnap = snap
     Tracker.zone = snap.realZone   -- ZONE_CHANGED compares against the game's own zone text
     Tracker.groups, Tracker.hereKey = snap.groups, ns.Data.HereKey(snap.here)
     for k in pairs(inTracker) do inTracker[k] = nil end
@@ -468,7 +508,7 @@ function Tracker.Render(animate, ifChanged)
             for _, q in ipairs(g.quests) do inTracker[q.id] = true end
         end
     end
-    Tracker.NoteProgress(snap)
+    if not Tracker.zoneDrag then Tracker.NoteProgress(snap) end
     local blocks, height, readyIDs = ns.Layout.Build(snap, Tracker.Options(), Tracker.Measure)
     if ifChanged and not Tracker.held and ns.Layout.Same(shown, blocks) then
         Tracker.reasons = { enter = {}, leave = {}, far = {}, fold = false }
@@ -479,7 +519,12 @@ function Tracker.Render(animate, ifChanged)
     content:SetWidth(look.width)
     local r = Tracker.reasons
     Tracker.reasons = { enter = {}, leave = {}, far = {}, fold = false }
-    if InCombatLockdown() and ns.Layout.WouldMoveItems(shown, blocks, { from = Tracker.contentHeight, to = height,
+    if Tracker.starting then
+        -- The fight-start fold: item buttons can still move now but can't glide
+        -- after, so with any of them showing the rows land in place at once.
+        for _, b in ipairs(blocks) do if b.item then animate = false; break end end
+    end
+    if ns.Locked() and ns.Layout.WouldMoveItems(shown, blocks, { from = Tracker.contentHeight, to = height,
             max = db.maxHeight, offset = ns.Scroll and ns.Scroll.offset, growUp = db.growUp == true }) then
         -- Item buttons can't follow in combat: keep the on-screen layout and only update
         -- what's already there. The rest plays when combat ends.
@@ -512,11 +557,11 @@ function Tracker.Render(animate, ifChanged)
         if f then
             local ev = ns.Rows.Paint(f, b, look, PAINT[animate == true])
             if ev.ready and animate then Tracker.OnReady(b) end
-            if diff.moved[b.key] then
+            if diff.moved[b.key] and not Tracker.Dragged(b.key) then
                 if animate then ns.Animate.Glide(f, b.y) else ns.Animate.Jump(f, b.y) end
             end
         else
-            f = ns.Rows.Get(b.kind, content)
+            f = ns.Rows.Get(b.kind, b.key == Tracker.PIN and content or rowsClip)
             frames[b.key] = f
             if ns.Clicks then ns.Clicks.Attach(f) end
             ns.Rows.Paint(f, b, look, PAINT_NEW)
@@ -603,7 +648,28 @@ end
 -- again) and combat ending (whatever was held).
 Tracker.ALWAYS = { PLAYER_ENTERING_WORLD = true, PLAYER_REGEN_ENABLED = true }
 
+-- In a fight the list can fold down to the priority quest (`fightFocus`). It
+-- folds while PLAYER_REGEN_DISABLED runs, just before the lockdown, since that's
+-- the last moment the item buttons can follow their rows. Quests with an item
+-- button stay, so in the fight nothing has to move under them.
+Tracker.fighting = false
+function ns.Locked()
+    return InCombatLockdown() and not Tracker.starting
+end
+function Tracker.FightStarts()
+    Tracker.fighting = true
+    if not (db and db.fightFocus and Tracker.built and Tracker.Wanted()) then return end
+    Tracker.starting = true
+    DUI.SafeCall(Tracker.Render, DUI.loggedIn == true, false)
+    Tracker.starting = false
+end
+
 function Tracker.OnEvent(event, a, b)
+    if event == "PLAYER_REGEN_DISABLED" then
+        Tracker.ZoneDragStop()      -- a fight drops a dragged zone where it is
+        return Tracker.FightStarts()
+    end
+    if event == "PLAYER_REGEN_ENABLED" then Tracker.fighting = false end
     local r = Tracker.reasons
     if event == "QUEST_ACCEPTED" then
         if type(a) == "number" then r.enter[a] = true end
@@ -661,6 +727,251 @@ function Tracker.FoldZoneQuests(zone)
     Tracker.Queue(true)
 end
 
+-- The player's own zone order, per character: the log's zone names in the order
+-- they picked by dragging a zone name or from the Quests header's menu. nil means
+-- the quest order setting places the zones.
+function Tracker.ZoneOrder()
+    local o = DUI.DB.Character().questZoneOrder
+    return type(o) == "table" and o or nil
+end
+
+local function shownZones()
+    local out = {}
+    for _, b in ipairs(shown) do if b.kind == "zone" then out[#out + 1] = b.label end end
+    return out
+end
+
+local function sameList(a, b)
+    if #a ~= #b then return false end
+    for i = 1, #a do if a[i] ~= b[i] then return false end end
+    return true
+end
+
+-- Each zone's stretch of the list: its name's top to its last quest's bottom.
+local function zoneSpans()
+    local spans, cur = {}, nil
+    for _, b in ipairs(shown) do
+        if b.kind == "zone" then
+            cur = { name = b.label, top = b.y, bottom = b.y + b.h }
+            spans[#spans + 1] = cur
+        elseif b.kind == "header" then
+            cur = nil
+        elseif cur then
+            cur.bottom = b.y + b.h
+        end
+    end
+    return spans
+end
+
+local function cursorY()
+    local _, y = GetCursorPosition()
+    local s = content and content:GetEffectiveScale()
+    if type(y) ~= "number" or type(s) ~= "number" or s <= 0 then return nil end
+    return y / s
+end
+
+-- Dragging a zone name, open or folded. The zone and its quests ride the mouse on
+-- a lifted card while the other zones dim a little and glide aside each time it
+-- passes one. Not in a fight: the quest item buttons can't follow their rows then.
+Tracker.ZONE_DROP_GRACE = 0.05    -- a click this soon after a drop is its own release
+Tracker.DRAG_DIM = 0.55           -- the other rows' alpha while a zone is dragged
+Tracker.DRAG_EDGE = 2             -- the lifted card's accent edge, in pixels
+Tracker.DRAG_LEVEL = 4            -- how far the dragged rows rise above the others
+Tracker.dragDim = 1
+
+-- The dragged zone's rows, by key: its name and every quest under it.
+function Tracker.Dragged(key)
+    local d = Tracker.zoneDrag
+    return d ~= nil and key ~= nil and d.keys[key] == true
+end
+
+local function dragGroup(name)
+    local keys, list, inside = {}, {}, false
+    for _, b in ipairs(shown) do
+        if b.kind == "zone" or b.kind == "header" then inside = b.kind == "zone" and b.label == name end
+        if inside then keys[b.key] = true; list[#list + 1] = b end
+    end
+    return keys, list
+end
+
+local function setDim(v)
+    Tracker.dragDim = v
+    for _, f in pairs(frames) do
+        local st = ns.Animate.State(f)
+        Tracker.softenBlock(f, st.y, st.a)
+    end
+end
+
+function Tracker.DragCard()
+    local c = Tracker.dragCard
+    if not c then
+        c = CreateFrame("Frame", nil, rowsClip)
+        c.bg = c:CreateTexture(nil, "BACKGROUND")
+        c.bg:SetAllPoints()
+        c.hi = c:CreateTexture(nil, "BORDER")
+        c.hi:SetAllPoints()
+        c.hi:SetTexture(DUI.Win.Parts.WHITE)
+        c.edge = c:CreateTexture(nil, "ARTWORK")
+        c.edge:SetTexture(DUI.Win.Parts.WHITE)
+        c.edge:SetPoint("TOPLEFT")
+        c.edge:SetPoint("BOTTOMLEFT")
+        c:SetAlpha(0)
+        c:Hide()
+        Tracker.dragCard = c
+    end
+    return c
+end
+
+-- Places the dragged rows and their card where the mouse holds them.
+local function placeDragged(d, at)
+    local zb
+    for _, b in ipairs(d.list) do if b.kind == "zone" then zb = b; break end end
+    if not zb then return end
+    local delta = at - (zb.y + zb.h / 2)
+    local top, bottom = math.huge, -math.huge
+    for _, b in ipairs(d.list) do
+        local f = frames[b.key]
+        if f then
+            local st = ns.Animate.State(f)
+            ns.Animate.Jump(f, b.y + delta, st.dx, st.a)
+            top, bottom = math.min(top, b.y), math.max(bottom, b.y + b.h)
+        end
+    end
+    local c = Tracker.dragCard
+    if c and top < bottom then
+        local pad = ns.Rows.HI_PAD
+        c:ClearAllPoints()
+        c:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -(top + delta - pad))
+        c:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, -(top + delta - pad))
+        c:SetHeight(bottom - top + pad * 2)
+    end
+    if ns.Items then ns.Items.Follow() end
+end
+
+local function liftRows(d, on)
+    local base = (rowsClip:GetFrameLevel() or 0) + 1
+    for key in pairs(d.keys) do
+        local f = frames[key]
+        if f then f:SetFrameLevel(on and base + Tracker.DRAG_LEVEL or base) end
+    end
+end
+
+function Tracker.ZoneDragStart(f)
+    local b = f and f.block
+    if not (b and b.kind == "zone") or Tracker.zoneDrag then return end
+    if InCombatLockdown() then DUI.ShowError(ns.Clicks.IN_COMBAT); return end
+    local y = cursorY()
+    local order = shownZones()
+    if not y or #order < 2 then return end
+    local keys, list = dragGroup(b.label)
+    Tracker.zoneDrag = { frame = f, name = b.label, order = order, from = order, keys = keys, list = list,
+                         startY = y, startAt = b.y + b.h / 2 }
+    ns.Rows.Hover(f, true)
+    local c = Tracker.DragCard()
+    local bg = Style.BACKGROUND
+    c.bg:SetColorTexture(bg[1], bg[2], bg[3], 1)   -- solid, so the rows it passes over don't show through
+    local hi = DUI.Win.Parts.HI
+    c.hi:SetVertexColor(hi[1], hi[2], hi[3], hi[4])
+    c.edge:SetWidth(DUI.Pixel.Px(c, Tracker.DRAG_EDGE))
+    Style.PaintAccent(c.edge, 1, "VERTICAL")
+    c:SetFrameLevel((rowsClip:GetFrameLevel() or 0) + Tracker.DRAG_LEVEL - 1)
+    liftRows(Tracker.zoneDrag, true)
+    placeDragged(Tracker.zoneDrag, Tracker.zoneDrag.startAt)
+    DUI.Motion.AlphaTo(c, 1, DUI.Motion.FAST)
+    DUI.Motion.Tween("quests:dragdim", Tracker.dragDim, Tracker.DRAG_DIM, DUI.Motion.FAST, setDim)
+    Tracker.dragger = Tracker.dragger or CreateFrame("Frame", nil, holder)
+    Tracker.dragger:SetScript("OnUpdate", function() DUI.SafeCall(Tracker.ZoneDragMove) end)
+end
+
+function Tracker.ZoneDragMove()
+    local d = Tracker.zoneDrag
+    if not d then return end
+    -- The release can land on another frame, so the button itself says when it's over.
+    if type(IsMouseButtonDown) == "function" and not IsMouseButtonDown("LeftButton") then
+        return Tracker.ZoneDragStop()
+    end
+    if frames["zone:" .. d.name] ~= d.frame then return Tracker.ZoneDragStop() end   -- the zone left the list
+    local y = cursorY()
+    if not y then return end
+    local at = d.startAt + (d.startY - y)
+    at = math.max(0, math.min(at, Tracker.contentHeight or at))
+    -- The rows' own spots changed if the list laid out again since the last frame.
+    d.keys, d.list = dragGroup(d.name)
+    placeDragged(d, at)
+    local spans = zoneSpans()
+    local over
+    for _, s in ipairs(spans) do
+        if at < s.bottom then over = s; break end
+    end
+    over = over or spans[#spans]
+    if not over or over.name == d.name then return end
+    local before = at < (over.top + over.bottom) / 2
+    local order = {}
+    for _, n in ipairs(d.order) do if n ~= d.name then order[#order + 1] = n end end
+    local i = #order + 1
+    for k, n in ipairs(order) do
+        if n == over.name then i = before and k or k + 1; break end
+    end
+    table.insert(order, i, d.name)
+    if sameList(order, d.order) then return end
+    d.order = order
+    Tracker.Queue(true)
+end
+
+function Tracker.ZoneDragStop()
+    local d = Tracker.zoneDrag
+    if not d then return end
+    Tracker.zoneDrag = nil
+    if Tracker.dragger then Tracker.dragger:SetScript("OnUpdate", nil) end
+    Tracker.zoneDropAt = GetTime()
+    if not sameList(d.order, d.from) then
+        DUI.DB.Character().questZoneOrder = ns.Layout.MergeZoneOrder(Tracker.ZoneOrder(), d.order)
+    end
+    -- The rows settle from where the mouse left them into their place.
+    d.keys = dragGroup(d.name)
+    liftRows(d, false)
+    for _, b in ipairs(shown) do
+        local f = d.keys[b.key] and frames[b.key]
+        if f then ns.Animate.Glide(f, b.y) end
+    end
+    if Tracker.dragCard then DUI.Motion.AlphaTo(Tracker.dragCard, 0, DUI.Motion.FAST, true) end
+    DUI.Motion.Tween("quests:dragdim", Tracker.dragDim, 1, DUI.Motion.FAST, setDim)
+    local f = d.frame
+    ns.Rows.Hover(f, type(f.IsMouseOver) == "function" and f:IsMouseOver() == true)
+    Tracker.Queue(true)
+end
+
+function Tracker.ZoneDropped()
+    return Tracker.zoneDropAt ~= nil and GetTime() - Tracker.zoneDropAt <= Tracker.ZONE_DROP_GRACE
+end
+
+-- The Quests header's menu: zones A to Z, by level (each zone's lowest quest, the
+-- way level across zones orders them), or back to the quest order setting's.
+function Tracker.SortZonesBy(how)
+    local c = DUI.DB.Character()
+    if how == "zonesLog" then
+        c.questZoneOrder = nil
+    elseif how == "zonesAZ" or how == "zonesLevel" then
+        local list, key = {}, {}
+        for _, g in ipairs(Tracker.groups or {}) do
+            list[#list + 1] = g.name
+            local low = math.huge
+            for _, q in ipairs(g.quests) do
+                if type(q.level) == "number" and q.level < low then low = q.level end
+            end
+            key[g.name] = how == "zonesLevel" and low or g.name:lower()
+        end
+        table.sort(list, function(a, b)
+            if key[a] ~= key[b] then return key[a] < key[b] end
+            return a < b
+        end)
+        c.questZoneOrder = ns.Layout.MergeZoneOrder(Tracker.ZoneOrder(), list)
+    else
+        return
+    end
+    Tracker.Queue(true)
+end
+
 -- Key binding (Bindings.xml): fold the whole list to its header.
 function Tracker.FoldAll() Tracker.ToggleFold("quests") end
 DUI.QuestsFoldAll = function() if Tracker.built then Tracker.FoldAll() end end
@@ -705,6 +1016,7 @@ end
 -- (Scroll.EdgeFor's top inset).
 Tracker.PIN = "section:quests"
 Tracker.PIN_LEVEL = 5   -- above the rows in the content
+Tracker.CLIP_H = 10000  -- the rows' clip reaches well past any list
 
 local function pinned(f) return f ~= nil and f == frames[Tracker.PIN] end
 
@@ -719,8 +1031,10 @@ end
 local function softenBlock(f, y, a)
     local edge = 1
     if ns.Scroll and not pinned(f) then edge = ns.Scroll.EdgeFor(y, f:GetHeight()) end
+    if Tracker.dragDim < 1 and not pinned(f) and not Tracker.Dragged(f.key) then edge = edge * Tracker.dragDim end
     f:SetAlpha(a * edge)
 end
+Tracker.softenBlock = softenBlock
 
 local function placeBlock(f, y, dx, a)
     local top = y
@@ -738,8 +1052,21 @@ end
 -- After a scroll, and every frame of a glide: only the edge fade follows. The view
 -- moved, not the rows, so nothing is re-anchored (that would lay out the whole
 -- list every frame).
+-- The rows' clip starts where the pinned header ends, so a quest sliding under it
+-- is cut at the header's edge instead of showing through its text.
+function Tracker.PlaceClip()
+    local top = 0
+    if ns.Scroll and ns.Scroll.offset > 0 then top = ns.Scroll.offset + ns.Scroll.topInset end
+    if Tracker.clipTop == top then return end
+    Tracker.clipTop = top
+    rowsClip:ClearAllPoints()
+    rowsClip:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -top)
+    rowsClip:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, -top)
+end
+
 function Tracker.RefreshEdges()
     if ns.Scroll then ns.Scroll.topInset = Tracker.PinnedHeight() end
+    Tracker.PlaceClip()
     for _, f in pairs(frames) do
         local st = ns.Animate.State(f)
         softenBlock(f, st.y, st.a)
@@ -826,12 +1153,24 @@ function Tracker.PaintControls()
     c.zone.SetActive(zoneOnly)
 end
 
+-- Whether the Quests title leaves room for the controls on its line: the controls sit
+-- left of the header's arrow, so a long title (a long word in another language, a small
+-- tracker) would run under them.
+function Tracker.TitleFits(h)
+    local c = Tracker.controls
+    local w = h and h.label and h.label:GetStringWidth()
+    if type(w) ~= "number" or DUI.IsSecret(w) then return true end
+    local cw = c.all:GetWidth() + 4 + c.zone:GetWidth()
+    return w + Tracker.CONTROL_GAP <= Tracker.Width() - (ns.Rows.CHEVRON + Tracker.CONTROL_GAP) - cw
+end
+
 -- Controls show while the mouse is over the list (and a moment after it leaves).
--- The count under them fades out.
+-- The count under them fades out, and so does the title when it doesn't fit beside them.
+-- With the filter under the header's line (`filterRow`) they never show.
 local function alpha(a) Tracker.controls:SetAlpha(a) end
 function Tracker.Hovered()
     local c = Tracker.controls
-    local over = (view:IsMouseOver() == true) or (c:IsShown() and c:IsMouseOver() == true)
+    local over = db.filterRow ~= true and ((view:IsMouseOver() == true) or (c:IsShown() and c:IsMouseOver() == true))
     local now = GetTime()
     if over then Tracker.lastOver = now end
     local want = over or (Tracker.lastOver and now - Tracker.lastOver < Tracker.CONTROL_LINGER)
@@ -866,6 +1205,13 @@ function Tracker.Hovered()
             local from = h.countGoal and fs:GetAlpha() or goal
             h.countGoal = goal
             M.Tween(fs, from, goal, goal == 0 and M.FAST or M.NORMAL, function(a) fs:SetAlpha(a) end)
+        end
+        local tg = (c:IsShown() and not c.leaving and not Tracker.TitleFits(h)) and 0 or 1
+        if h.labelGoal ~= tg then
+            local fs = h.label
+            local from = h.labelGoal and fs:GetAlpha() or tg
+            h.labelGoal = tg
+            M.Tween(fs, from, tg, tg == 0 and M.FAST or M.NORMAL, function(a) fs:SetAlpha(a) end)
         end
     end
 end
@@ -942,6 +1288,13 @@ function Tracker.Build(mod)
     content = CreateFrame("Frame", nil, view)
     content:SetSize(Tracker.Width(), 1)
     view:SetScrollChild(content)
+    -- Every row but the pinned header lives in here. Its bottom is left far below
+    -- the list, since rows glide past the content's end while a shorter list settles.
+    rowsClip = CreateFrame("Frame", nil, content)
+    rowsClip:SetClipsChildren(true)
+    rowsClip:SetHeight(Tracker.CLIP_H)
+    Tracker.rowsClip = rowsClip
+    Tracker.PlaceClip()
     ns.Scroll.Build(view, content)
     Tracker.BuildControls()
     Tracker.holder, Tracker.view, Tracker.content, Tracker.box = holder, view, content, box
@@ -984,6 +1337,9 @@ function Tracker.Build(mod)
     DUI.On("SettingChanged", function(scope, path)
         if scope == "InfoPanel" and (path == "map.size" or path == "map.enabled") and db.matchMap then Tracker.Apply() end
     end)
+    -- Its frame's border or padding changed too: the info panel says so once it
+    -- has laid the map out again.
+    DUI.On("MinimapSpanChanged", function() if db.matchMap then Tracker.Apply() end end)
     Tracker.built = true
     Tracker.Render(false)
     Tracker.hoverTicker = C_Timer.NewTicker(0.1, function()

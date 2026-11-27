@@ -286,6 +286,46 @@ T.test("tooltip: a changed text size keeps its titles and small text where they 
     T.isnil(fresh.modules.Tooltip.titleSize, "a text size changed later leaves the titles alone")
 end)
 
+T.test("tooltip: a clicked link's X sits on the rich card's corner, not the tooltip's", function()
+    login()
+    local close = ItemRefTooltip.CloseButton
+    local card = stub.tooltip.RichPanel.For(ItemRefTooltip)
+    ItemRefTooltip:Show()
+    ItemRefTooltip:GetScript("OnShow")(ItemRefTooltip)
+    -- The card is filled and shown after the tooltip shows; the next frame sees it.
+    card:Show()
+    stub.RunTimers()
+    local point, rel, relPoint, x, y = close:GetPoint(1)
+    T.eq(point, "TOPRIGHT")
+    T.eq(rel, card, "anchored to the card")
+    T.eq(x, DaylightUI.Win.CLOSE_X, "the windows' X spot")
+    T.eq(y, DaylightUI.Win.CloseY(true))
+    -- Simple style, or a link the card doesn't draw: the card is hidden, with the
+    -- size of the last link, so the X stays on the tooltip.
+    card:Hide()
+    ItemRefTooltip:GetScript("OnShow")(ItemRefTooltip)
+    stub.RunTimers()
+    T.eq(select(2, close:GetPoint(1)), ItemRefTooltip, "a hidden card is left alone")
+end)
+
+T.test("tooltip: a second link clicked with the tooltip open moves the X with the card", function()
+    login()
+    local close = ItemRefTooltip.CloseButton
+    local card = stub.tooltip.RichPanel.For(ItemRefTooltip)
+    ItemRefTooltip:Show()
+    -- The game refills a shown tooltip for the next link and doesn't show it
+    -- again: only the card comes and goes, so the X follows the card.
+    card:Show()
+    T.eq(select(2, close:GetPoint(1)), card, "a link with a card: the X is on the card")
+    card:Hide()
+    T.eq(select(2, close:GetPoint(1)), ItemRefTooltip, "the next link has none: the X is back on the tooltip")
+    card:Show()
+    T.eq(select(2, close:GetPoint(1)), card, "and a link with a card again: on the card")
+    local _, _, _, x, y = close:GetPoint(1)
+    T.eq(x, DaylightUI.Win.CLOSE_X, "the windows' X spot")
+    T.eq(y, DaylightUI.Win.CloseY(true))
+end)
+
 T.test("tooltip: a rich card's title and small lines take their own size and font", function()
     login()
     local Panel = stub.tooltip.RichPanel
@@ -679,6 +719,31 @@ T.test("tooltip: a world unit's tooltip whose owner reads secret stays hidden in
     T.eq((GameTooltip:GetPoint(1)), "BOTTOMLEFT", "still placed at the cursor")
     GameTooltip:GetScript("OnHide")(GameTooltip)
     stub.combat = false
+end)
+
+T.test("tooltip: the fishing bobber's tooltip is muted while the line is in, when set to", function()
+    local Tip = login(function() Enum.TooltipDataType.Object = 33 end)
+    stub.spells = stub.spells or {}
+    stub.spells[7620] = { name = "Fishing" }
+    local function bobber()
+        GameTooltip_SetDefaultAnchor(GameTooltip, UIParent)
+        show(GameTooltip, Enum.TooltipDataType.Object, function(t) t.__unit = nil end)
+        GameTooltip:GetScript("OnUpdate")(GameTooltip, 0.02)
+        return Tip.Muted(GameTooltip) == "bobber"
+    end
+    stub.units.player.channel = { name = "Fishing", spellID = 7620 }
+    T.eq(bobber(), false, "off by default: it shows")
+    DaylightUI:Set("Tooltip", "hideBobber", true)
+    stub.RunTimers()
+    T.eq(bobber(), true, "muted while fishing")
+    T.eq(GameTooltip:GetAlpha(), 0)
+    T.truthy(GameTooltip:IsShown(), "never hidden: the click still reaches the bobber")
+    stub.units.player.channel = nil
+    T.eq(bobber(), false, "a chest or a mailbox when not fishing shows")
+    stub.units.player.channel = { name = "Arcane Missiles", spellID = 5143 }
+    T.eq(bobber(), false, "another channel isn't fishing")
+    stub.units.player.channel = nil
+    GameTooltip:GetScript("OnHide")(GameTooltip)
 end)
 
 T.test("tooltip: hidden in combat when set to, unless Shift is held", function()
@@ -1332,6 +1397,45 @@ T.test("tooltip: short item stats, on out of the box, procs left alone", functio
     stub.RunTimers()
     fill(GameTooltip, Item, { id = 1001, hyperlink = "sword" }, { "Sword", "Equip: Improves your chance to hit by 1%." })
     T.eq(at(2):GetText(), "Equip: Improves your chance to hit by 1%.", "off: the game's sentence")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("tooltip: food, drink, potions and bandages in a few words, under the short stats switch", function()
+    login(itemWorld)
+    local at = withLines(GameTooltip)
+    local Item = Enum.TooltipDataType.Item
+    local function words(i) return (at(i):GetText():gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")) end
+    local FOOD = "Use: Restores 530 health over 24 sec. Must remain seated while eating. If you spend at least 10 seconds eating you will become well fed and gain 5 Stamina and 5% increased experience from kills for 15 min."
+    local OLD_FOOD = "Use: Restores 1,338 health over 27 sec. Must remain seated while eating. If you spend at least 10 seconds eating you will become well fed and gain 12 Stamina and Spirit for 900 sec."
+    local LONG = "Use: Restores 2,148 health over 30 sec. Must remain seated while eating. If you spend at least 10 seconds eating you will become well fed and restore 8 mana every 5 seconds for 10 min."
+    fill(GameTooltip, Item, { id = 1001, hyperlink = "food" }, {
+        "Smoked Bear Meat", FOOD, OLD_FOOD,
+        "Use: Restores 1,344 mana over 30 sec. Must remain seated while drinking.",
+        "Use: Restores 900 health and 900 mana over 30 sec. Must remain seated while eating.",
+        "Use: Restores 455 to 585 health.",
+        "Use: Instantly restores 700 to 900 mana.",
+        "Use: Heals 400 damage over 8 sec.",
+        LONG,
+        "Use: Returns you to your home.",
+    })
+    T.eq(words(2), "Use: 530 health over 24 sec\nWell Fed: +5 Stamina, +5% XP (15 min)")
+    T.eq(words(3), "Use: 1,338 health over 27 sec\nWell Fed: +12 Stamina, +12 Spirit (15 min)", "an old food's both stats, seconds read as minutes")
+    T.eq(words(4), "Use: 1,344 mana over 30 sec", "a drink")
+    T.eq(words(5), "Use: 900 health and 900 mana over 30 sec", "a mage's food")
+    T.eq(words(6), "Use: 455-585 health", "a potion")
+    T.eq(words(7), "Use: 700-900 mana", "a mana potion")
+    T.eq(words(8), "Use: 400 health over 8 sec", "a bandage")
+    T.eq(at(9):GetText(), LONG, "a sentence it can't read stays whole")
+    T.eq(at(10):GetText(), "Use: Returns you to your home.", "other use effects stay")
+    local hex = DaylightUI.Win.Parts.Hex
+    local Style, Tip = DaylightUI.Style, stub.tooltip.Tooltip
+    T.truthy(at(2):GetText():find(hex(Style.INK.GOOD) .. "530|r", 1, true), "health in heal green")
+    T.truthy(at(4):GetText():find(hex({ Style.PowerColor("MANA") }) .. "1,344|r", 1, true), "mana in mana's color")
+    T.truthy(at(2):GetText():find(hex(Tip.STAT_COLORS.Stamina) .. "+5 Stamina|r", 1, true), "a stat in its color")
+    DaylightUI:Set("Tooltip", "greenStats", false)
+    stub.RunTimers()
+    fill(GameTooltip, Item, { id = 1001, hyperlink = "food" }, { "Smoked Bear Meat", FOOD })
+    T.eq(at(2):GetText(), FOOD, "off: the game's sentence")
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
@@ -2209,11 +2313,48 @@ T.test("tooltip: the card's own lines end at the last one the game drew, not at 
     -- A recipe's spell, as the game hands it: an empty spacer second that adds
     -- no line, so four drawn lines from five data lines, then another addon's.
     local recipe = { lines = { { type = 13, lineIndex = 1 }, { type = 0, leftText = "", rightText = "", lineIndex = 1 },
-        { lineIndex = 2 }, { lineIndex = 3 }, { type = 34, lineIndex = 4 } } }
+        { leftText = "Reagents: Bronze Tube", lineIndex = 2 }, { leftText = "Requires Engineering (190)", lineIndex = 3 },
+        { type = 34, leftText = "Teaches you how to make a mortar.", lineIndex = 4 } } }
     T.eq(Own(recipe, 5), 4, "the fifth line is the other addon's")
+    -- An item's SellPrice line has no words: stamped with the line above, its
+    -- coins drawn one below by the game's post-call. Those coins are the game's.
+    local ring = { lines = { { type = 22, leftText = "Ring", lineIndex = 1 }, { leftText = "+7 Stamina", lineIndex = 2 },
+        { type = 11, price = 4630, lineIndex = 2 } } }
+    T.eq(Own(ring, 4), 3, "the coins line is the game's, the fourth another addon's")
     T.eq(Own({ lines = { {}, {}, {} } }, 5), 3, "no line indexes: the data's count, as before")
     T.eq(Own({ lines = {} }, 5), 5, "no lines of its own: all are the card's")
     T.eq(Own({ lines = { { lineIndex = stub.Secret(1) }, {} } }, 4), 2, "a secret index is skipped")
+end)
+
+-- A recipe's spacer draws no line, so every data line after it sits one line
+-- higher. Read by data position, the line under the sell price (an Auction
+-- price added by an addon) took the SellPrice type, and the card showed the
+-- crafted item's auction price as the recipe's vendor price.
+T.test("tooltip: a recipe's drawn lines take their own data line's type, past the spacer", function()
+    login(itemWorld)
+    local Read = stub.tooltip.RichRead
+    local tip = GameTooltip
+    withLines(tip)
+    tip:AddLine("Schematic: EZ-Thro Bronze Mortar", 1, 1, 1)
+    tip:AddLine("Requires Engineering (190)", 1, 0, 0)
+    tip:AddDoubleLine("Sell Price:", "6s", 1, 1, 1, 1, 1, 1)
+    tip:AddDoubleLine("Auction", "95s", 1, 1, 1, 1, 1, 1)
+    local data = { lines = {
+        { type = 0, leftText = "Schematic: EZ-Thro Bronze Mortar", lineIndex = 1 },
+        { type = 0, leftText = "", rightText = "", lineIndex = 1 },
+        { type = 23, leftText = "Requires Engineering (190)", lineIndex = 2 },
+        { type = 11, leftText = "Sell Price:", lineIndex = 3 },
+    } }
+    local n, lines = Read.Lines(tip, data)
+    T.eq(n, 4)
+    T.eq(lines[2].type, 23, "the second drawn line is the Requires line")
+    T.eq(lines[3].type, 11, "the sell price keeps its own type")
+    T.eq(lines[4].type, nil, "the Auction line is another addon's, with no type")
+    -- Data with no line indexes: matched by position, as before.
+    local plain = { lines = { { type = 0 }, { type = 23 }, { type = 11 } } }
+    n, lines = Read.Lines(tip, plain)
+    T.eq(lines[3].type, 11)
+    T.eq(lines[4].type, nil)
 end)
 
 -- The game compares an item with what you wear when its alwaysCompareItems

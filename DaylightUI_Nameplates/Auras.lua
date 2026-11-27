@@ -41,9 +41,11 @@ function Auras.DispelColor(key)
     return Auras.DISPEL_COLORS[key]
 end
 -- Big defensives, every rank. The client's BIG_DEFENSIVE filter tags none of
--- these on this client (seen in game), so the row names them. It may match
--- buffs by spell on any player or player's pet, enemies included, which is
--- where they matter: duels, battlegrounds, world PvP.
+-- these on this client (seen in game), so the slot names them. The client only
+-- matches a buff by spell id on someone you can help, or a spell it marks never
+-- secret. No filter string narrows an enemy's buffs to defensives here:
+-- HELPFUL|INCLUDE_NAME_PLATE_ONLY is every buff they have (the game's own plates
+-- narrow that list in Lua by spell), so the slot showed a blessing instead.
 Auras.BIG_DEFENSIVES = {}
 for _, id in ipairs({
     642, 1020,              -- Divine Shield

@@ -8,9 +8,10 @@
 ## Notes-esMX: Un conjunto de interfaz suave y minimalista. Este es el núcleo; carga junto a él los módulos que quieras.
 ## Notes-deDE: Ein sanftes, schlichtes UI-Paket. Das ist der Kern; lade die gewünschten Module dazu.
 ## Author: Daylight
+## Category: DaylightUI
 ## X-Curse-Project-ID: 1712997
 ## X-Wago-ID: n6VYLONd
-## Version: 2.2.3
+## Version: 2.4.1
 ## IconTexture: Interface\AddOns\DaylightUI\Media\logo-64.png
 ## SavedVariables: DaylightUIDB
 ## AddonCompartmentFunc: DaylightUI_OpenOptions
@@ -53,6 +54,9 @@ WorldWatch.lua
 Gradients.lua
 BarFx.lua
 BarFxStyles.lua
+BarFxSoft.xml
+BarFxSoft.lua
+BarFxDaybreak.lua
 Movers.lua
 Fade.lua
 FadeUpgrade.lua
@@ -87,6 +91,7 @@ InstallerPlugins.lua
 InstallerLooks.lua
 InstallerDuel.lua
 Welcome.lua
+Clashes.lua
 Profiles.lua
 Alts.lua
 Plugins.lua

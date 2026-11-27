@@ -239,8 +239,11 @@ T.test("social: a friend picked: Invite (their game account) and Whisper (Battle
     T.eq(panel(page), "Invite, Whisper")
     stub.Key(function() page.detail.buttons[1]:Click() end)
     T.eq(SW.Calls("InviteFriend")[1][1], 100 + #"Thessaly Moor")
+    local asked = {}
+    DaylightUI.Widgets.Prompt = function(text) asked[#asked + 1] = text end
     stub.Key(function() page.detail.buttons[2]:Click() end)
-    T.eq(SW.Calls("SendBNetTell")[1][1], "Kit")
+    T.eq(asked[1], "Whisper Kit", "Daylight UI's own box asks for the words")
+    T.eq(#SW.Calls("SendBNetTell"), 0, "the game's chat box is never opened from here")
     -- Sol plays another game: no invite.
     local sol = rows(page.stack, "friend")[6]
     stub.Key(function() sol:Click() end)
@@ -1246,12 +1249,26 @@ T.test("social: the card's titles are tan with a rule under them", function()
     clean()
 end)
 
+-- A recent ally's class comes from C_CreatureInfo.GetClassInfo, the one the game has.
+T.test("social: a recent ally's class is read from C_CreatureInfo", function()
+    local ns = load({ allies = SW.Allies() })
+    open(ns)
+    tab(ns, "allies")
+    local found
+    for _, b in ipairs(rows(ns.Allies.page.stack, "ally")) do
+        if b.spec.ally.name == "Odessa Reed" then found = b.spec.ally end
+    end
+    T.eq(found and found.class, "SHAMAN")
+    T.falsy(_G.C_ClassInfo, "the game has no C_ClassInfo.GetClassInfo, and the fake game doesn't teach it")
+    clean()
+end)
+
 -- An ally's race, faction and realm come from the character's race id and realm.
 T.test("social: an ally's card has race, faction and server from the game's data", function()
-    _G.C_CreatureInfo = {
-        GetRaceInfo = function(id) return { raceName = id == 3 and "Dwarf" or "Human" } end,
-        GetFactionInfo = function(id) return { groupTag = "Alliance", name = "Alliance" } end,
-    }
+    local creature = _G.C_CreatureInfo
+    local race, faction = creature.GetRaceInfo, creature.GetFactionInfo
+    creature.GetRaceInfo = function(id) return { raceName = id == 3 and "Dwarf" or "Human" } end
+    creature.GetFactionInfo = function(id) return { groupTag = "Alliance", name = "Alliance" } end
     local list = SW.Allies()
     for _, a in ipairs(list) do a.characterData.realmName = "CAMWOW US1 Realm 8 PvP" end
     local ns = load({ allies = list })
@@ -1274,7 +1291,7 @@ T.test("social: an ally's card has race, faction and server from the game's data
     T.falsy(all:find("CAMWOW", 1, true), "no Server block on an ally: " .. all)
     T.falsy(all:find("Server", 1, true), "none: " .. all)
     T.truthy(all:find("Faction: Alliance|History:", 1, true), "History comes under the faction: " .. all)
-    _G.C_CreatureInfo = nil
+    creature.GetRaceInfo, creature.GetFactionInfo = race, faction
     clean()
 end)
 
@@ -1539,13 +1556,13 @@ T.test("social: your BattleTag is in the header on every tab, and a click shows 
     T.truthy(f.tag:IsShown(), "your tag is there")
     T.eq(f.tag.text:GetText(), "Curt#1674")
     local _, rel = f.tagDot:GetPoint(1)
-    T.eq(rel, f.status, "right after the status, on its row")
-    local _, tagAt = f.tag:GetPoint(1)
+    T.eq(rel, f.status.text, "right after the status, on its row")
+    local _, tagAt = f.tag.text:GetPoint(1)
     T.eq(tagAt, f.tagDot, "the tag follows the separator")
+    local _, linkAt = f.tag:GetPoint(1)
+    T.eq(linkAt, f.tag.text, "its mouse area is its words")
     local _, onlineAt = f.online:GetPoint(1)
-    T.eq(onlineAt, f.tag, "and the friends online follow the tag")
-    local _, stop = f.tag.text:GetPoint(2)
-    T.eq(stop, f.tabs[1], "the text stops short of the tabs, whatever the window's measures")
+    T.eq(onlineAt, f.tag.text, "and the friends online follow the tag")
     for _, id in ipairs({ "allies", "requests", "raid" }) do
         stub.Key(function() ns.Window.ShowTab(id, true) end)
         frame(20)
@@ -1571,6 +1588,36 @@ T.test("social: your BattleTag is in the header on every tab, and a click shows 
     clean()
 end)
 
+-- Tabs wider than the header (a bigger font, a long translation) leave the title no
+-- width, and the client then gives it no height either: a status row hung under the
+-- title rode up into the tabs, its dots between them and the BattleTag link under
+-- Recent allies. The fake game doesn't lay frames out, so this checks what each
+-- piece of the row hangs from: never the squeezed title, never a tab, and each text
+-- by its top so a tab's middle can't move it.
+T.test("social: the status row keeps its line under the tabs when the tabs leave the title no room", function()
+    local ns = load()
+    local f = open(ns, "friends")
+    local _, subAt = f.sub:GetPoint(1)
+    T.truthy(subAt ~= f.title, "the sub line doesn't hang from the title the tabs squeeze")
+    T.eq(subAt, f.titleLine, "it hangs from a line of the title's size")
+    T.eq(f.titleLine:GetNumPoints(), 1, "which nothing squeezes")
+    local tabs = {}
+    for _, b in ipairs(f.tabs) do tabs[b] = true end
+    for name, piece in pairs({ statusDot = f.statusDot, status = f.status, statusText = f.status.text,
+        tagDot = f.tagDot, tag = f.tag, tagText = f.tag.text, online = f.online }) do
+        for i = 1, piece:GetNumPoints() do
+            local point, rel = piece:GetPoint(i)
+            T.falsy(tabs[rel], name .. " never hangs from a tab")
+            T.truthy(rel ~= f.title, name .. " never hangs from the title")
+            if i == 1 and piece:GetObjectType() == "FontString" and piece ~= f.status.text then
+                T.truthy(point:find("TOP"), name .. " hangs by its top: " .. point)
+            end
+        end
+    end
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    clean()
+end)
+
 T.test("social: without a BattleTag (not connected) the header has none", function()
     local old = _G.BNGetInfo
     local ns = load()
@@ -1579,7 +1626,7 @@ T.test("social: without a BattleTag (not connected) the header has none", functi
     T.eq(f.tag:IsShown(), false)
     T.eq(f.tagDot:IsShown(), false, "no lone separator either")
     local _, onlineAt = f.online:GetPoint(1)
-    T.eq(onlineAt, f.status, "the friends online follow the status")
+    T.eq(onlineAt, f.status.text, "the friends online follow the status")
     _G.BNGetInfo = old
     clean()
 end)

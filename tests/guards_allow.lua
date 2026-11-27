@@ -132,6 +132,9 @@ return {
         ["DaylightUI_ActionBars/CdmImport.lua"] = 10,
         ["DaylightUI_ActionBars/CdmOwn.lua"] = 11,
         ["DaylightUI_ActionBars/CdmRows.lua"] = 2,
+        -- A group's lead can be a plugin's frame, and some refuse a read on purpose (a
+        -- nameplate's anchoring is restricted at login), so CdmTether's one read stays a pcall.
+        ["DaylightUI_ActionBars/CdmTether.lua"] = 1,
         ["DaylightUI_ActionBars/Cooldowns.lua"] = 11,
         ["DaylightUI_ActionBars/Diag.lua"] = 1,
         ["DaylightUI_ActionBars/Keys.lua"] = 2,
@@ -187,6 +190,7 @@ return {
         ["DaylightUI_Nameplates/Manager.lua"] = 16,
         ["DaylightUI_Nameplates/Plate.lua"] = 21,
         ["DaylightUI_Nameplates/Range.lua"] = 3,
+        ["DaylightUI_Procs/Game.lua"] = 1,
         ["DaylightUI_QoL/Afk.lua"] = 3,
         ["DaylightUI_QoL/AfkFacts.lua"] = 2,
         ["DaylightUI_QoL/Camera.lua"] = 2,
@@ -230,7 +234,7 @@ return {
         ["DaylightUI_UnitFrames/GroupParts.lua"] = 4,
         ["DaylightUI_UnitFrames/Indicators.lua"] = 2,
         ["DaylightUI_UnitFrames/Texts.lua"] = 1,
-        ["DaylightUI_UnitFrames/UnitFrames.lua"] = 4,
+        ["DaylightUI_UnitFrames/UnitFrames.lua"] = 3,
         ["Dots.lua"] = 6,
         ["DotsDraw.lua"] = 1,
         ["EditMode.lua"] = 5,
@@ -286,7 +290,6 @@ return {
         ["DaylightUI_Bags/Slots.lua"] = "the bag bar shows the bags already on: nothing to compare them with",
     },
     rules = {
-        ["Pad.lua|open-chat"] = "Pad.Whisper and Pad.Share, the one place: they open the game's chat box only with the controller UI off",
-        ["DaylightUI_Bags/Bank.lua|static-popup"] = "the account bank's Withdraw and Deposit: the game's own gold boxes (BANK_MONEY_*), which hold its money entry; a click of the player's opens them",
+        ["Motion.lua|special-frames"] = "Motion.EscapeFor, the one Escape stand-in every window of ours uses",
     },
 }

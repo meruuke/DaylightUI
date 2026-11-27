@@ -250,3 +250,200 @@ T.test("zone title: the preview and /dui zone play it", function()
     DaylightUI.RunCommand("zone")
     T.truthy(f:IsShown(), "the command plays it")
 end)
+
+-- The options page's settings.
+
+T.test("zone title: subzone, PvP line and subzone changes can each be turned off", function()
+    login()
+    DaylightUI:Set("QoL", "zoneTitleSub", false)
+    DaylightUI:Set("QoL", "zoneTitlePvP", false)
+    stub.FireEvent("ZONE_CHANGED_NEW_AREA")
+    local f = _G.DaylightUIZoneTitle
+    T.eq(f.sub:GetText(), "", "no subzone")
+    T.eq(f.pvp:GetText(), "", "no PvP line")
+    finish()
+    where.sub = "Lion's Pride Inn"
+    stub.FireEvent("ZONE_CHANGED_INDOORS")
+    T.falsy(f:IsShown(), "no subzone line on its own either")
+    DaylightUI:Set("QoL", "zoneTitleSub", true)
+    DaylightUI:Set("QoL", "zoneTitleSubAlone", false)
+    where.sub = "Goldshire"
+    stub.FireEvent("ZONE_CHANGED")
+    T.falsy(f:IsShown(), "subzone changes off: nothing for a subzone")
+    where.zone = "Westfall"
+    stub.FireEvent("ZONE_CHANGED_NEW_AREA")
+    T.truthy(f:IsShown(), "a new zone still plays")
+    T.eq(f.sub:GetText(), "Goldshire", "with its subzone")
+end)
+
+T.test("zone title: capitals and a longer hold", function()
+    login()
+    DaylightUI:Set("QoL", "zoneTitleCaps", true)
+    DaylightUI:Set("QoL", "zoneTitleHold", 6)
+    -- The fake timers run without waiting, so note how long each was asked to wait.
+    local after, waits = C_Timer.After, {}
+    C_Timer.After = function(t, fn) waits[#waits + 1] = t; return after(t, fn) end
+    stub.FireEvent("ZONE_CHANGED_NEW_AREA")
+    C_Timer.After = after
+    local f = _G.DaylightUIZoneTitle
+    T.eq(plain(f.name:GetText()), "ELWYNN FOREST")
+    local longest = 0
+    for _, t in ipairs(waits) do longest = math.max(longest, t) end
+    T.near(longest, DaylightUI.Motion.SLOW + 6, 0.001, "it leaves after the 6 s hold")
+    finish()
+end)
+
+T.test("zone title: the name's color can be the zone's PvP color, white or one color", function()
+    login()
+    local f
+    local function play(mode, custom)
+        DaylightUI:Set("QoL", "zoneTitleColor", mode)
+        if custom then DaylightUI:Set("QoL", "zoneTitleColorCustom", custom) end
+        stub.FireEvent("ZONE_CHANGED_NEW_AREA")
+        f = _G.DaylightUIZoneTitle
+        finish()
+    end
+    play("zone")
+    T.eq(f.name:GetText(), "Elwynn Forest", "plain text")
+    T.rgb({ f.name:GetTextColor() }, stub.qol.ZoneTitle.COLORS.contested, "contested amber")
+    local g = f.left.__gradient[3]
+    T.rgb({ g.r, g.g, g.b }, stub.qol.ZoneTitle.COLORS.contested, "the line too")
+    where.pvp = nil
+    play("zone")
+    T.rgb({ f.name:GetTextColor() }, { DaylightUI.Style.Accent() }, "no PvP color: the accent")
+    play("white")
+    T.rgb({ f.name:GetTextColor() }, DaylightUI.Style.INK.TITLE)
+    play("custom", { 0.3, 0.5, 0.9 })
+    T.rgb({ f.name:GetTextColor() }, { 0.3, 0.5, 0.9 })
+end)
+
+T.test("zone title: its own font and text sizes", function()
+    login()
+    stub.FireEvent("ZONE_CHANGED_NEW_AREA")
+    local f = _G.DaylightUIZoneTitle
+    local before = f.name:GetFont()
+    local pick
+    for _, name in ipairs(DaylightUI.Style.FONT_ORDER) do
+        if DaylightUI.Style.FONTS[name].file ~= before then pick = name break end
+    end
+    DaylightUI:Set("QoL", "zoneTitleFont", pick)
+    stub.RunTimers()   -- the font comes with the next repaint
+    T.eq((f.name:GetFont()), DaylightUI.Style.FONTS[pick].file, "the name in the picked font")
+    T.eq((f.sub:GetFont()), DaylightUI.Style.FONTS[pick].file, "the subzone too")
+    DaylightUI:Set("QoL", "zoneTitleNameSize", 40)
+    DaylightUI:Set("QoL", "zoneTitleSubSize", 20)
+    finish()
+    stub.FireEvent("ZONE_CHANGED_NEW_AREA")
+    T.eq(select(2, f.name:GetFont()), 40)
+    T.eq(select(2, f.sub:GetFont()), 20)
+    T.eq(select(2, f.pvp:GetFont()), 18, "the PvP line a little smaller")
+end)
+
+T.test("zone title: it has a mover, and its scale is the piece scale", function()
+    login()
+    local M = DaylightUI.Movers
+    local holder = _G.DaylightUIZoneTitleHolder
+    T.truthy(holder, "a holder for the handle")
+    M.SetPieceScale("qol.zone", 1.5)
+    T.near(holder:GetScale(), 1.5 * M.Scale(), 0.001, "the holder takes the piece scale")
+    stub.FireEvent("ZONE_CHANGED_NEW_AREA")
+    T.eq(_G.DaylightUIZoneTitle:GetParent(), holder, "the title inside it")
+end)
+
+T.test("zone title: unlock mode shows it standing still, without holding anything up", function()
+    local ZT = login()
+    DaylightUI.Movers.unlocked = true
+    DaylightUI.Fire("UnlockChanged", true)
+    local f = _G.DaylightUIZoneTitle
+    T.truthy(f:IsShown(), "the sample")
+    T.eq(f.name:GetAlpha(), 1)
+    T.falsy(ZT.Showing(), "a sample doesn't hold the reputation banner")
+    stub.RunTimers()
+    settle()
+    T.truthy(f:IsShown(), "it stays")
+    DaylightUI:Set("QoL", "zoneTitleCaps", true)
+    T.eq(plain(f.name:GetText()), "ELWYNN FOREST", "a change shows on the sample at once")
+    stub.FireEvent("ZONE_CHANGED_NEW_AREA")
+    T.truthy(ZT.Showing(), "a real zone change plays over it")
+    DaylightUI.Movers.unlocked = false
+    DaylightUI.Fire("UnlockChanged", false)
+    finish()
+    T.falsy(f:IsShown())
+end)
+
+T.test("zone title: the flourishes, a light across the name, a haze and a diamond", function()
+    login()
+    DaylightUI:Set("QoL", "zoneTitleHaze", true)
+    DaylightUI:Set("QoL", "zoneTitleGem", true)
+    stub.FireEvent("ZONE_CHANGED_NEW_AREA")
+    local f = _G.DaylightUIZoneTitle
+    T.falsy(f.gem:IsShown(), "the diamond waits for the line")
+    settle()
+    T.truthy(f.gem:IsShown(), "the diamond is in")
+    T.near(f.gem:GetWidth(), stub.qol.ZoneTitle.GEM_SIZE, 0.01)
+    T.truthy(f.haze:GetAlpha() > 0, "the haze glows")
+    stub.RunTimersOnce()
+    T.truthy(f.shine:IsShown(), "the light runs across the name")
+    finish()
+    DaylightUI:Set("QoL", "zoneTitleShine", false)
+    DaylightUI:Set("QoL", "zoneTitleHaze", false)
+    DaylightUI:Set("QoL", "zoneTitleGem", false)
+    where.zone = "Westfall"
+    stub.FireEvent("ZONE_CHANGED_NEW_AREA")
+    settle()
+    stub.RunTimersOnce()
+    T.falsy(f.gem:IsShown(), "no diamond")
+    T.eq(f.haze:GetAlpha(), 0, "no haze")
+    T.falsy(f.shine:IsShown(), "no light")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+T.test("zone title: the subzone, PvP line and line under the name each take their own color", function()
+    login()
+    local S = DaylightUI.Style
+    local f
+    local function play()
+        stub.FireEvent("ZONE_CHANGED_NEW_AREA")
+        f = _G.DaylightUIZoneTitle
+    end
+    local function line() local g = f.left.__gradient[3]; return { g.r, g.g, g.b } end
+    play()
+    T.rgb({ f.sub:GetTextColor() }, S.INK.LABEL, "subzone: tan by default")
+    T.rgb({ f.pvp:GetTextColor() }, stub.qol.ZoneTitle.COLORS.contested, "PvP: the zone's color by default")
+    finish()
+
+    DaylightUI:Set("QoL", "zoneTitleColor", "custom")
+    DaylightUI:Set("QoL", "zoneTitleColorCustom", { 0.3, 0.5, 0.9 })
+    DaylightUI:Set("QoL", "zoneTitleSubColor", "name")
+    DaylightUI:Set("QoL", "zoneTitlePvPColor", "white")
+    DaylightUI:Set("QoL", "zoneTitleLineColor", "custom")
+    DaylightUI:Set("QoL", "zoneTitleLineColorCustom", { 0.9, 0.2, 0.2 })
+    play()
+    T.rgb({ f.sub:GetTextColor() }, { 0.3, 0.5, 0.9 }, "subzone: same as the name")
+    T.rgb({ f.pvp:GetTextColor() }, S.INK.VALUE, "PvP: white")
+    T.rgb(line(), { 0.9, 0.2, 0.2 }, "the line: its own color")
+    T.rgb({ f.gem:GetVertexColor() }, { 0.9, 0.2, 0.2 }, "the diamond follows the line")
+    finish()
+
+    DaylightUI:Set("QoL", "zoneTitleSubColor", "custom")
+    DaylightUI:Set("QoL", "zoneTitleSubColorCustom", { 0.1, 0.8, 0.3 })
+    DaylightUI:Set("QoL", "zoneTitlePvPColor", "custom")
+    DaylightUI:Set("QoL", "zoneTitlePvPColorCustom", { 0.8, 0.8, 0.1 })
+    DaylightUI:Set("QoL", "zoneTitleLineColor", "zone")
+    play()
+    T.rgb({ f.sub:GetTextColor() }, { 0.1, 0.8, 0.3 }, "subzone: one color")
+    T.rgb({ f.pvp:GetTextColor() }, { 0.8, 0.8, 0.1 }, "PvP: one color")
+    T.rgb(line(), stub.qol.ZoneTitle.COLORS.contested, "the line: the zone's PvP color")
+    finish()
+
+    -- A subzone on its own takes its color too.
+    where.sub = "Lion's Pride Inn"
+    stub.FireEvent("ZONE_CHANGED_INDOORS")
+    T.rgb({ f.sub:GetTextColor() }, { 0.1, 0.8, 0.3 }, "a lone subzone in its color")
+    finish()
+    DaylightUI:Set("QoL", "zoneTitleSubColor", "name")
+    where.sub = "Goldshire"
+    stub.FireEvent("ZONE_CHANGED")
+    T.rgb({ f.sub:GetTextColor() }, { 0.3, 0.5, 0.9 }, "a lone subzone follows the name's color")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)

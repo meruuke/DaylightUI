@@ -804,7 +804,7 @@ T.test("fade: the faded alpha never goes above opacity; a bad opacity falls back
     area(DUI, "tf", { mode = "always", alpha = 0.7, mouseover = true, delay = 0, opacity = 0.4 }, { a })
     settle(F)
     T.near(a:GetAlpha(), 0.4, 1e-6, "faded 70% over opacity 40%: stays at 40%")
-    DUI.DB.General().tf.alpha = 0.2
+    DUI:Set("general", "tf.alpha", 0.2)
     settle(F)
     T.near(a:GetAlpha(), 0.2, 1e-6)
     local _, _, faded, opacity = F.State("tf")
@@ -1576,9 +1576,28 @@ T.test("fade: whole ownership follows list and setting changes while resting at 
     stub.LeaveCombat()
     T.eq(a.buffer, false, "membership was reconciled even without an alpha change")
     T.eq(b.buffer, true)
-    settings.mode = "never"
+    DUI:Set("general", "whole.mode", "never")
     F.Step()
     T.eq(b.buffer, false, "Never releases the request even while already at full opacity")
+end)
+
+-- The ticker keeps each area's settings until a setting changes; a write that skips
+-- DUI:Set (a profile filled in place) is still picked up within Fade.REREAD.
+T.test("fade: kept settings follow DUI:Set at once and a raw write within Fade.REREAD", function()
+    local DUI = stub.Load()
+    local F = DUI.Fade
+    local a = frame()
+    local s = { mode = "never", alpha = 0, mouseover = true, delay = 0 }
+    area(DUI, "tf", s, { a })
+    settle(F)
+    T.eq(a:GetAlpha(), 1, "Never: shown")
+    DUI:Set("general", "tf.mode", "always")
+    settle(F)
+    T.eq(a:GetAlpha(), 0, "a DUI:Set change is read on the next tick")
+    s.mode = "never"
+    stub.Advance(F.REREAD + 0.1)
+    settle(F)
+    T.eq(a:GetAlpha(), 1, "a raw write is picked up within Fade.REREAD")
 end)
 
 T.test("fade: re-registering an area releases old frames and keeps an independent range request", function()
@@ -1668,4 +1687,86 @@ T.test("fade: two whole-UI fades each keep theirs, the UI shows the lowest", fun
     T.eq(UIParent:GetAlpha(), 0, "the AFK screen closing leaves the NPC scene's fade")
     F.SetUIAlpha(1, "npc")
     T.eq(UIParent:GetAlpha(), 1, "both done: the UI is back")
+end)
+
+T.test("fade: Show keeps an area at its opacity while any reason asks, easing in, and back once none do", function()
+    local DUI = stub.Load()
+    local F = DUI.Fade
+    local a = frame()
+    area(DUI, "shownArea", { mode = "always", alpha = 0, mouseover = false, delay = 0, opacity = 0.8 }, { a })
+    stub.Advance(1)
+    settle(F)
+    T.eq(a:GetAlpha(), 0, "faded")
+    F.Show("shownArea", "one", true)
+    play(F, 0.05)
+    local partway = a:GetAlpha()
+    T.truthy(partway > 0 and partway < 0.8, "eases in, not at once: " .. partway)
+    settle(F)
+    T.eq(a:GetAlpha(), 0.8, "at its own opacity")
+    F.Show("shownArea", "two", true)
+    F.Show("shownArea", "one", false)
+    stub.Advance(1)
+    settle(F)
+    T.eq(a:GetAlpha(), 0.8, "shown while another reason still asks")
+    F.Show("shownArea", "two", false)
+    stub.Advance(1)
+    settle(F)
+    T.eq(a:GetAlpha(), 0, "faded again once none do")
+    F.Show("noSuchArea", "one", true)
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- Players with several monitors put it on their game screen: the welcome line
+-- has an unlock handle, and untouched it sits exactly where it always did.
+T.test("fade: the welcome line has an unlock handle; untouched it stays where it was, moved it follows", function()
+    local DUI = stub.Load({ intro = true })
+    local F = DUI.Fade
+    local M = DUI.Movers
+    DUI.DB.Character().install = "done"
+    DUI.DB.General().scale = 1.25
+    login(true, F)
+    local holder = _G.DaylightUIWelcomeHolder
+    T.truthy(M.Get("welcome") and holder, "a mover and its holder")
+    T.near(holder:GetScale(), 1, 0.001, "unscaled, as the line always was")
+    local p, rel, rp, x, y = holder:GetPoint(1)
+    T.eq(p, "CENTER"); T.eq(rel, UIParent); T.eq(rp, "CENTER"); T.eq(x, 0)
+    T.near(y, F.WELCOME.y, 0.001, "the old spot")
+    local wl = F.welcome
+    T.eq(wl:GetParent(), holder, "the line inside it")
+    local _, wrel, wrp = wl:GetPoint(1)
+    T.eq(wrel, holder); T.eq(wrp, "CENTER")
+    DUI.DB.Positions()["welcome"] = { 500, 40 }
+    M.Apply("welcome")
+    local _, rel2, rp2, x2, y2 = holder:GetPoint(1)
+    T.eq(rel2, UIParent); T.eq(rp2, "CENTER"); T.near(x2, 500, 0.001, "moved"); T.near(y2, 40, 0.001)
+    M.Unlock()
+    T.truthy(M.Handle("welcome") and M.Handle("welcome"):IsShown(), "unlock shows its handle")
+    M.Lock()
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- A Threat window set to show only in combat came up in the first fight, faded
+-- out after it, and never came back until a reload: it was hidden (off the
+-- area's list) while still painted faded, and shown again only once the area
+-- was back at full, where newcomers weren't painted.
+T.test("fade: a frame that left faded and rejoins at full gets full again", function()
+    local DUI = stub.Load()
+    local F = DUI.Fade
+    local a, w = frame(), frame()
+    local list = { a, w }
+    area(DUI, "tw", { mode = "ooc", alpha = 0, mouseover = false, delay = 0 }, list)
+    stub.Advance(3)
+    settle(F)
+    T.eq(w:GetAlpha(), 0, "out of a fight: faded")
+    -- The window goes away after the fight, still faded.
+    list[2] = nil
+    w:Hide()
+    stub.EnterCombat()
+    settle(F)
+    T.eq(a:GetAlpha(), 1, "the next fight: the area is full")
+    -- The window comes back once the area is already full.
+    w:Show()
+    list[2] = w
+    settle(F)
+    T.eq(w:GetAlpha(), 1, "the window is painted full too")
 end)

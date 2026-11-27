@@ -19,20 +19,30 @@ local UF = ns.UF
 -- disabled() helpers. get reads another setting on the same page.
 local function off(key) return function(get) return get(key) ~= true end end
 
--- A frame's flips, one per end, read by UF.UnderOf. o.right and o.left are the
--- keys, o.name labels both ("Swing timer"), o.what names the bar in the text,
--- o.note ends both descriptions, o.disabled / o.hidden gray out or hide both,
--- and o.rightOn / o.leftOn (optional) are the keys of the end's own angle switch.
--- Use as flipRows(o)[1], [2].
-local function flipRows(o)
-    local dis = o.disabled or function() return false end
-    local note = o.note and (" " .. o.note) or ""
-    local function row(key, side, on)
-        return { type = "toggle", key = key, label = o.name .. " flip " .. side .. " end", since = "2.0",
-                 desc = "Tips " .. o.what .. " " .. side .. " end the other way, so its bottom corner sticks out instead of its top. The other end keeps its own." .. note,
-                 disabled = function(get) return dis(get) or (on ~= nil and get(on) ~= true) end, hidden = o.hidden }
+-- A frame's two end menus (Options.EndRows): slant/slantUnder hold its inner
+-- end (the one the bars fill toward), slantOuter/slantUnderOuter the outer
+-- one. The target, its target and the PvP frames mirror the player, so their
+-- inner end is the left. With a portrait, the outer end stays straight while
+-- the portrait sits on the frame (UF.FrameEnds): the ring covers it.
+-- prefix is the settings table ("player", "raid", "partyPet"), name labels
+-- the rows ("Frame", "Pet bar"), note ends both descriptions.
+local INNER_END = { target = "left", targettarget = "left", arena = "left" }
+local function frameEndRows(prefix, id, name, disabled, portrait, note)
+    local k = function(s) return prefix .. "." .. s end
+    local inner = INNER_END[id] or "right"
+    local outer = inner == "right" and "left" or "right"
+    local ends = {
+        [inner] = { on = k("slant"), flip = k("slantUnder") },
+        [outer] = { on = k("slantOuter"), flip = k("slantUnderOuter") },
+    }
+    if portrait then
+        ends[outer].note = "Stays straight while the portrait sits on the frame, since the ring covers it."
+        ends[outer].disabled = function(get)
+            return get(k("portrait")) ~= "none" and get(k("portraitAt")) ~= "free"
+        end
     end
-    return { row(o.right, "right", o.rightOn), row(o.left, "left", o.leftOn) }
+    return DaylightUI.Options.EndRows({ name = name, left = ends.left, right = ends.right,
+        disabled = disabled, note = note })
 end
 
 -- A frame's own angle: a switch and its slider, read by UF.AngleOf. o.own and
@@ -470,7 +480,8 @@ local BAR_ORDER = {
     stripHeight = 1, ["media.health"] = 2, ["media.healthBack"] = 3, colorHealth = 4, colorHealthCustom = 5,
     backHealth = 6, backHealthColor = 7, backHealthBright = 8, backHealthAlpha = 9,
     showPower = 20, powerAt = 21, powerWidth = 22, powerHeight = 23, ribbonGap = 24,
-    powerSlant = 25, powerSlantBoth = 26, powerSlantUnder = 27, ["media.power"] = 28, ["media.powerBack"] = 29,
+    -- The power bar's two end menus share a rank, so they keep their order: left, then right.
+    powerSlant = 25, powerSlantBoth = 25, ["media.power"] = 28, ["media.powerBack"] = 29,
     colorPower = 30, colorPowerCustom = 31, backPower = 32, backPowerColor = 33, backPowerBright = 34, backPowerAlpha = 35,
     reverseFill = 40, predictHeals = 41, predictAbsorbs = 42,
 }
@@ -683,6 +694,113 @@ local function spellName(id)
     if type(name) == "string" and not DaylightUI.IsSecret(name) then return name end
 end
 
+-- Your cast bar's spell colors: a name box to add a spell, then a line per
+-- spell with its icon, name, color swatch and an X.
+local SPELL_LINE, SPELL_ADD_H, SPELL_NOTE = 28, 42, 22
+local function spellColorLine(row)
+    local W, Style, Motion = DaylightUI.Widgets, DaylightUI.Style, DaylightUI.Motion
+    local CB = ns.CastBar
+    local line = CreateFrame("Frame", nil, row.list)
+    line:SetHeight(SPELL_LINE)
+    line.icon = line:CreateTexture(nil, "ARTWORK")
+    line.icon:SetSize(SPELL_LINE - 8, SPELL_LINE - 8)
+    line.icon:SetPoint("LEFT", line, "LEFT", 2, 0)
+    Style.CropIcon(line.icon)
+    line.delete = W.DeleteButton(line)
+    line.delete:SetPoint("RIGHT", line, "RIGHT", 0, 0)
+    line.swatch = W.Swatch(line, line, function()
+        local e = (CB.cfg.spellColors or {})[line.index]
+        return e and e.color
+    end, function(rgb) CB.SetSpellColor(line.index, rgb) end)
+    line.swatch:SetPoint("RIGHT", line.delete, "LEFT", -8, 0)
+    line.text = W.Font(line, W.BODY, Style.SIZE.body, W.COLORS.text)
+    line.text:SetPoint("LEFT", line.icon, "RIGHT", 8, 0)
+    line.text:SetPoint("RIGHT", line.swatch, "LEFT", -8, 0)
+    line.delete:SetScript("OnClick", function()
+        if line.going then return end
+        line.going = true
+        Motion.Fade(line, 1, 0, Motion.FAST)
+        local i = line.index
+        C_Timer.After(Motion.FAST, function()
+            line.going = nil
+            CB.RemoveSpellColor(i)
+        end)
+    end)
+    return line
+end
+
+local spellColorItem = {
+    type = "custom", label = "Spell colors", since = "2.2.5",
+    build = function(row)
+        local W, Style, L = DaylightUI.Widgets, DaylightUI.Style, DaylightUI.L
+        local CB = ns.CastBar
+        row.lines = {}
+        row.input = W.Input(row, { hint = L["A spell's name or ID"], maxLetters = 80 })
+        row.input:SetPoint("TOPLEFT", row, "TOPLEFT", W.PAD, -8)
+        row.input:SetPoint("TOPRIGHT", row, "TOPRIGHT", -(W.PAD + 90), -8)
+        row.add = W.Button(row, ADD or L["Add"], W.INPUT_H)
+        row.add:SetWidth(80)
+        row.add:SetPoint("TOPRIGHT", row, "TOPRIGHT", -W.PAD, -8)
+        local function add()
+            local name, why = CB.AddSpellColor(row.input:GetText())
+            row.why = why
+            if name then
+                row.fresh = name
+                row.input:SetText("")
+            end
+            -- A refused name changes no setting, and an added one should fade in.
+            local panel = DaylightUI.OptionsPanel
+            if panel and panel.IsShown() then panel.Refresh() end
+        end
+        row.add:SetScript("OnClick", add)
+        row.input:SetScript("OnEnterPressed", add)
+        W.Complete(row.input, CB.SuggestSpells)
+        row.note = W.Font(row, W.BODY, Style.SIZE.small, Style.INK.WARN)
+        row.note:SetPoint("TOPLEFT", row, "TOPLEFT", W.PAD, -SPELL_ADD_H)
+        row.note:SetPoint("TOPRIGHT", row, "TOPRIGHT", -W.PAD, -SPELL_ADD_H)
+        row.list = CreateFrame("Frame", nil, row)
+        row.empty = W.Font(row.list, W.BODY, Style.SIZE.body, Style.INK.LABEL)
+        row.empty:SetPoint("TOPLEFT", row.list, "TOPLEFT", 0, -6)
+        row.empty:SetText(L["No spells yet."])
+    end,
+    update = function(row)
+        local W, Motion = DaylightUI.Widgets, DaylightUI.Motion
+        local list = ns.CastBar.cfg.spellColors or {}
+        local top = SPELL_ADD_H + (row.why and SPELL_NOTE or 0)
+        row.note:SetText(row.why or "")
+        row.note:SetShown(row.why ~= nil)
+        row.list:ClearAllPoints()
+        row.list:SetPoint("TOPLEFT", row, "TOPLEFT", W.PAD, -top)
+        row.list:SetPoint("TOPRIGHT", row, "TOPRIGHT", -W.PAD, -top)
+        for i, e in ipairs(list) do
+            local line = row.lines[i]
+            if not line then
+                line = spellColorLine(row)
+                row.lines[i] = line
+            end
+            line.index = i
+            line:ClearAllPoints()
+            line:SetPoint("TOPLEFT", row.list, "TOPLEFT", 0, -(i - 1) * SPELL_LINE)
+            line:SetPoint("TOPRIGHT", row.list, "TOPRIGHT", 0, -(i - 1) * SPELL_LINE)
+            line.icon:SetTexture(e.icon or 134400)
+            line.text:SetText(e.name or "")
+            line.swatch.Refresh()
+            W.Stripe(line, i % 2 == 0)
+            line:Show()
+            if e.name == row.fresh then Motion.Fade(line, 0, 1, Motion.FAST)
+            elseif not line.going then line:SetAlpha(1) end
+        end
+        row.fresh = nil
+        for i = #list + 1, #row.lines do row.lines[i]:Hide() end
+        row.count, row.top = #list, top
+        row.empty:SetShown(#list == 0)
+        row.list:SetHeight(math.max(SPELL_LINE, #list * SPELL_LINE))
+    end,
+    height = function(row)
+        return (row.top or SPELL_ADD_H) + math.max(1, row.count or 0) * SPELL_LINE + 6
+    end,
+}
+
 -- Your spells with a range, highest rank, by name. A pick saved on another
 -- character stays listed so the menu never shows a blank.
 local function rangeSpellChoices()
@@ -782,6 +900,38 @@ end
 -- Each group's name in its rows' labels.
 local GROUP_KINDS = { debuffs = { one = "Debuff", many = "debuffs" }, cc = { one = "Crowd control", many = "crowd control icons" },
                       buffs = { one = "Buff", many = "buffs" } }
+-- The frame's icon borders (Auras.SetBorder), one card per frame. key(s):
+-- the full settings key of s in the frame's aura settings. glow: the frame's
+-- icons have the soft light behind what you can dispel or purge (target and focus).
+local function borderCard(key, gate, glow)
+    local function k(s) return key("iconBorder." .. s) end
+    local dis = gate and off(gate) or nil
+    local items = {
+        { type = "slider", key = k("px"), label = "Icon border size", min = 0, max = ns.Auras.BORDER_MAX, step = 1,
+          unit = "px", since = "2.4.1", disabled = dis,
+          desc = "How thick the border round each buff and debuff icon is. At 0 the icons have none." },
+        { type = "dropdown", key = k("debuff"), label = "Debuff border color", since = "2.4.1", disabled = dis,
+          values = { dispel = "Dispel type color", wine = "Dark red", plain = "Plain" }, order = { "dispel", "wine", "plain" },
+          desc = "Dispel type color shows Magic in blue, Poison in green and so on, so you see what you can remove. Dark red marks every debuff the same, and Plain matches the buffs." },
+        { type = "dropdown", key = k("noType"), label = "Untyped debuff border color", since = "2.4.1",
+          values = { wine = "Dark red", plain = "Plain" }, order = { "wine", "plain" },
+          desc = "The border of a debuff nothing can dispel, while Debuff border color is Dispel type color.",
+          disabled = function(get) return (dis and dis(get)) or get(k("debuff")) ~= "dispel" end },
+        { type = "dropdown", key = k("buff"), label = "Buff border color", since = "2.4.1", disabled = dis,
+          values = { plain = "Plain", accent = "Accent color", class = "Class color", custom = "One color" },
+          order = { "plain", "accent", "class", "custom" },
+          desc = "Plain is the frame's own dark border. Accent color follows your accent (General > Appearance), Class color is your class's." },
+        { type = "color", key = k("color"), label = "Custom buff border color", since = "2.4.1", disabled = dis,
+          desc = "The buffs' border when Buff border color is One color.",
+          hidden = function(get) return get(k("buff")) ~= "custom" end },
+    }
+    if glow then
+        items[#items + 1] = { type = "toggle", key = k("glow"), label = "Dispel and purge glow", since = "2.4.1", disabled = dis,
+            desc = "A soft light behind a debuff you can dispel and a buff you can purge or steal. Turn it off for plain icons." }
+    end
+    return { label = "Icon borders", desc = "The border round this frame's buff and debuff icons.", items = items }
+end
+
 local function auraCards(k, gate)
     local AG, Spots = ns.AuraGroups, ns.Spots
     local cards = {}
@@ -815,6 +965,7 @@ local function auraCards(k, gate)
             for _, card in ipairs(indicatorCards(k, gate)) do cards[#cards + 1] = card end
         end
     end
+    cards[#cards + 1] = borderCard(k, gate)
     return cards
 end
 
@@ -888,6 +1039,11 @@ local function growRows(keyOf, lines, gate, rowKey)
               if v == "up" or v == "down" then write("growUp", v == "up") else write("growLeft", v == "left") end
           end,
           default = function() return across() and "down" or "right" end },
+        { type = "toggle", key = rowKey("growCenter"), since = "2.2.4", label = "Grow from the middle", disabled = gate,
+          desc = "The frames start from the middle of the line instead of its end, so a group that isn't full stays centered.",
+          get = function() return read("growCenter") == true end,
+          set = function(v) write("growCenter", v == true) end,
+          default = function() return false end },
     }
 end
 
@@ -1092,7 +1248,8 @@ local function unitAuraCards(prefix, own, desc)
     for _, it in ipairs(spotItems(prefix, "debuff", k("debuffs"))) do debuffs[#debuffs + 1] = it end
     for _, it in ipairs(spotItems(prefix, "buff", k("buffs"))) do buffs[#buffs + 1] = it end
     return { { label = "Debuffs", desc = desc.debuffs, items = debuffs },
-             { label = "Buffs", desc = desc.buffs, items = buffs } }
+             { label = "Buffs", desc = desc.buffs, items = buffs },
+             borderCard(k, nil, not own) }
 end
 
 local TARGET_AURA_GROUPS = unitAuraCards("targetAuras", false, {
@@ -1153,8 +1310,10 @@ local function fontRow(key, label, what, dis)
 end
 -- Which frame strata a piece draws in (ns.STRATA), for frames that overlap.
 local STRATA_HOW = " Where two pieces overlap, the higher layer draws on top: Background, Low, Medium, High, then Dialogue."
-local function strataRow(key, label, what, dis, more)
-    return { type = "dropdown", key = key, label = label, values = ns.STRATA_LABELS, order = ns.STRATA,
+local function strataRow(key, label, what, dis, more, withFrame)
+    return { type = "dropdown", key = key, label = label,
+             values = withFrame and ns.CASTBAR_STRATA_LABELS or ns.STRATA_LABELS,
+             order = withFrame and ns.CASTBAR_STRATA or ns.STRATA,
              desc = what .. STRATA_HOW .. (more or ""), disabled = dis }
 end
 
@@ -1204,16 +1363,10 @@ local function swingBarCard()
               desc = "The time to the next swing, written on the bar, attached or detached.", disabled = textOff },
             { type = "toggle", key = b("showIcon"), label = name .. " bar weapon icon",
               desc = "The weapon's picture at the start of the bar. Only when detached on its own.", disabled = dis, hidden = attached },
-            { type = "toggle", key = b("slant"), label = name .. " bar angled right end",
-              desc = "Cuts the " .. lower .. " bar's right end at an angle. Only when detached on its own.", disabled = dis, hidden = attached },
-            { type = "toggle", key = b("slantLeft"), label = name .. " bar angled left end",
-              desc = "Cuts the " .. lower .. " bar's left end at an angle. Only when detached on its own.", disabled = dis, hidden = attached },
-            flipRows({ right = b("slantUnder"), left = b("slantUnderLeft"), rightOn = b("slant"), leftOn = b("slantLeft"),
-                       name = name .. " bar", what = "the " .. lower .. " bar's", note = "Only when detached on its own.",
-                       disabled = dis, hidden = attached })[1],
-            flipRows({ right = b("slantUnder"), left = b("slantUnderLeft"), rightOn = b("slant"), leftOn = b("slantLeft"),
-                       name = name .. " bar", what = "the " .. lower .. " bar's", note = "Only when detached on its own.",
-                       disabled = dis, hidden = attached })[2],
+            DaylightUI.Options.EndRows({ name = name .. " bar", note = "Only when detached on its own.", disabled = dis, hidden = attached,
+                left = { on = b("slantLeft"), flip = b("slantUnderLeft") }, right = { on = b("slant"), flip = b("slantUnder") } })[1],
+            DaylightUI.Options.EndRows({ name = name .. " bar", note = "Only when detached on its own.", disabled = dis, hidden = attached,
+                left = { on = b("slantLeft"), flip = b("slantUnderLeft") }, right = { on = b("slant"), flip = b("slantUnder") } })[2],
             angleRows({ own = b("ownAngle"), lean = b("lean"), name = name .. " bar", what = "the " .. lower .. " bar's", since = "2.0",
                         note = "Only when detached on its own.", hidden = attached,
                         disabled = function(get) return dis(get) or (get(b("slant")) ~= true and get(b("slantLeft")) ~= true) end })[1],
@@ -1480,8 +1633,8 @@ local function petCard()
           desc = "Each pet's health bar fills bottom to top instead of across, for tall, narrow pet bars.", disabled = petOff },
         barRows(p("media.health"), "the pets' health bars", "Pet health bar", petOff)[1],
         barRows(p("media.health"), "the pets' health bars", "Pet health bar", petOff)[2],
-        { type = "toggle", key = p("slant"), label = "Pet angled end",
-          desc = "Cuts one end of each pet bar at an angle. When off, the ends are straight.", disabled = petOff },
+        frameEndRows("partyPet", "partyPet", "Pet bar", petOff)[1],
+        frameEndRows("partyPet", "partyPet", "Pet bar", petOff)[2],
         { type = "dropdown", key = p("color"), label = "Pet bar color", values = ns.PartyPets.COLORS, order = ns.PartyPets.COLOR_ORDER,
           desc = "Its owner's class tells at a glance whose pet it is.", disabled = petOff },
         { type = "toggle", key = p("showPower"), label = "Pet power bar",
@@ -1568,11 +1721,11 @@ end
 -- Tabs on a frame page: Basics first (position, size and shape, when it
 -- shows), then its bars, text, auras and the rest. A card's tab is decided by
 -- its title, and cards are sorted by tab while keeping their order within one.
-local TAB_ORDER = { "Basics", "Bars", "Portrait", "Name", "Text", "Cast bar", "Auras", "Extras" }
-local TAB_OF = { Portrait = "Portrait", ["Raid size"] = "Basics", ["Quick looks"] = "Basics", Layout = "Basics", Frame = "Basics", Position = "Basics",
+local TAB_ORDER = { "Basics", "Bars", "Portrait", "Name", "Text", "Cast bar", "Auras", "Extras", "Layers" }
+local TAB_OF = { Layers = "Layers", Portrait = "Portrait", ["Raid size"] = "Basics", ["Quick looks"] = "Basics", Layout = "Basics", Frame = "Basics", Position = "Basics",
     [DaylightUI.Fade.CARD_LABEL] = "Basics", ["Health and power"] = "Bars", ["Health bar"] = "Bars",
     ["Border and shadow"] = "Bars", ["Bar animation"] = "Bars", Text = "Text", Name = "Name", ["Name tab"] = "Name", Debuffs = "Auras", Buffs = "Auras",
-    ["Heal indicators"] = "Auras", Dispels = "Auras" }
+    ["Heal indicators"] = "Auras", Dispels = "Auras", ["Icon borders"] = "Auras" }
 local function tabOf(label)
     if TAB_OF[label] then return TAB_OF[label] end
     if string.find(label, "^Extra text") then return "Text" end
@@ -1637,8 +1790,8 @@ end
 -- Frame card (bar textures and colors, power, heals and absorbs) becomes its
 -- "Health and power" card.
 local BASIC_FIELDS = { enabled = true, style = true, width = true, height = true, spacing = true,
-    tabHeight = true, slant = true, fillVertical = true,
-    showInParty = true, direction = true, growLeft = true, growUp = true, sortBy = true, groups = true, groupSpacing = true, perLine = true, hideSelf = true,
+    tabHeight = true, slant = true, slantOuter = true, fillVertical = true,
+    showInParty = true, direction = true, growLeft = true, growUp = true, growCenter = true, sortBy = true, groups = true, groupSpacing = true, perLine = true, hideSelf = true,
     strata = true }
 -- The portrait's own rows get a card (and tab) of their own.
 local PORTRAIT_FIELDS = { portrait = true, portraitShape = true, portraitLook = true, portraitAt = true, portraitIconsStay = true, portraitRing = true,
@@ -1749,8 +1902,9 @@ local function framePage(id, label, desc, opts)
             disabled = shown }
     end
     if opts.power then
-        frame[#frame + 1] = { type = "slider", key = k("powerHeight"), label = "Power bar height", min = 2, max = 20, step = 1,
-            desc = "How tall the power bar is.", disabled = powerOff, hidden = onLine }
+        frame[#frame + 1] = { type = "slider", key = k("powerHeight"), label = "Power bar height", min = 2, max = opts.maxHeight or 80,
+            step = 1, desc = "How tall the power bar is. Inside the frame, the frame grows to keep some health showing.",
+            disabled = powerOff, hidden = onLine }
         if styled then
             frame[#frame + 1] = { type = "slider", key = k("powerHeight"), label = "Power line height", min = 2, max = 20,
                 step = 1, desc = "The thin power bar under the health bar.", disabled = powerOff, hidden = noLine }
@@ -1778,24 +1932,21 @@ local function framePage(id, label, desc, opts)
             disabled = powerOff }
         frame[#frame + 1] = { type = "slider", key = k("powerWidth"), label = "Power bar width", min = 40, max = 500, step = 1,
             desc = "How wide the power bar is. Only while it's on its own.", disabled = notFree }
-        frame[#frame + 1] = { type = "toggle", key = k("powerSlant"), label = "Power bar angled end",
-            desc = "Cuts the power bar's end at an angle, on the same side as the frame's. Only while it's on its own. When off, both ends are straight.", disabled = notFree }
-        frame[#frame + 1] = { type = "toggle", key = k("powerSlantBoth"), label = "Power bar angled at both ends",
-            desc = "Angles its other end too, and a cast bar hung under it follows both. Only while the power bar is on its own with its angled end on.",
-            disabled = function(get) return notFree(get) or get(k("powerSlant")) == false end }
-        -- A cast bar sliding out from under it continues its angle, which a flipped end can't do.
-        local slidesOut = function(get)
-            return id == "player" and get("playerCastbar.enabled") == true and get("playerCastbar.at") == "below"
-                and get("playerCastbar.from") == "power"
-        end
-        local powerFlip = flipRows({ right = k("powerSlantUnder"), left = k("powerSlantUnderLeft"), name = "Power bar", what = "the power bar's",
-            note = "Only on an angled end, while the power bar is on its own, and not while your cast bar slides out from under it.",
-            disabled = function(get) return notFree(get) or get(k("powerSlant")) == false or slidesOut(get) end })
-        frame[#frame + 1] = powerFlip[1]
-        frame[#frame + 1] = powerFlip[2]
+        -- Its ends: powerSlant is the end on the frame's angled side, powerSlantBoth
+        -- the other; the flips go by left and right.
+        local inner = INNER_END[id] or "right"
+        local pends = {
+            [inner] = { on = k("powerSlant") },
+            [inner == "right" and "left" or "right"] = { on = k("powerSlantBoth") },
+        }
+        pends.right.flip, pends.left.flip = k("powerSlantUnder"), k("powerSlantUnderLeft")
+        local powerEnds = DaylightUI.Options.EndRows({ name = "Power bar", left = pends.left, right = pends.right,
+            note = "Only while it's on its own. A cast bar hung under it follows its ends.", disabled = notFree })
+        frame[#frame + 1] = powerEnds[1]
+        frame[#frame + 1] = powerEnds[2]
         local powerAngle = angleRows({ own = k("powerOwnAngle"), lean = k("powerLean"), name = "Power bar", what = "the power bar's", since = "2.0",
             note = "Only while the power bar is on its own. A cast bar sliding out from under it continues the line.",
-            disabled = function(get) return notFree(get) or get(k("powerSlant")) == false end })
+            disabled = function(get) return notFree(get) or (get(k("powerSlant")) == false and get(k("powerSlantBoth")) ~= true) end })
         frame[#frame + 1] = powerAngle[1]
         frame[#frame + 1] = powerAngle[2]
     end
@@ -1879,8 +2030,9 @@ local function framePage(id, label, desc, opts)
             desc = "How big the portrait ring is next to the frame's height.",
             disabled = function(get) return shown(get) or tooShort(get) end, hidden = onCard }
     end
-    frame[#frame + 1] = { type = "toggle", key = k("slant"), label = "Angled end",
-        desc = opts.slantDesc or "Cuts the frame's inner end at an angle; the bars follow it.", disabled = shown }
+    for _, row in ipairs(frameEndRows(id, id, "Frame", shown, opts.portrait, opts.endNote)) do
+        frame[#frame + 1] = row
+    end
     frame[#frame + 1] = { type = "toggle", key = k("predictHeals"), label = "Incoming heals",
         desc = "Heals on their way, as a soft green stretch past the health.", disabled = shown }
     frame[#frame + 1] = { type = "toggle", key = k("predictAbsorbs"), label = "Absorbs",
@@ -2073,7 +2225,8 @@ local function framePage(id, label, desc, opts)
         } })
     end
     if opts.tab then groups[#groups + 1] = tabCard(id, noTabStyle) end
-    groups[#groups + 1] = DaylightUI.Fade.Card(id .. ".fade.", fadeExtra, shown, nil, { noFloat = ns.FLOAT[id] == false })
+    groups[#groups + 1] = DaylightUI.Fade.Card(id .. ".fade.", fadeExtra, shown, nil,
+        { noFloat = ns.FLOAT[id] == false, noTarget = ns.WITH_TARGET[id] == true })
     groups[#groups + 1] = { label = "Text", items = ordered(text, TEXT_ORDER) }
     local extras = {}
     local needHome, homeDis = "", shown
@@ -2146,6 +2299,10 @@ local function framePage(id, label, desc, opts)
             order = { "off", "spark", "trail", "line" },
             desc = "After you cast a spell that costs mana, a light crosses your mana bar for the 5 seconds until your Spirit regen is back. Shows on your player frame and personal display.",
             disabled = powerSpellOff, hidden = function() return not ns.PowerBar.HasMana() end }
+        extras[#extras + 1] = { type = "toggle", key = k("regenTicks"), since = "2.2.4", label = "Keep ticking",
+            desc = "After the 5 seconds, a softer light runs to each mana regen tick until your mana is full. It learns the tick from your mana's own gains, so it starts after the first two.",
+            disabled = function(get) return powerSpellOff(get) or get(k("regenSweep")) == "off" end,
+            hidden = function() return not ns.PowerBar.HasMana() end }
         extras[#extras + 1] = { type = "toggle", key = k("showResting"), label = "Resting",
             desc = "Zzz on your portrait ring while you rest in an inn or city.", disabled = shown }
         extras[#extras + 1] = { type = "slider", key = k("restSize"), label = "Resting size", min = 0.5, max = 2, step = 0.05, unit = "%",
@@ -2263,6 +2420,7 @@ local function framePage(id, label, desc, opts)
         table.insert(groups, 1, { label = "Layout", items = {
             growRows(k, "Lines", shown)[1],
             growRows(k, "Lines", shown)[2],
+            growRows(k, "Lines", shown)[3],
             { type = "slider", key = k("perLine"), label = "Frames per line", min = 1, max = 5, step = 1,
               desc = "At 5 the party is one line. Fewer makes a grid.", disabled = shown },
             { type = "slider", key = k("groupSpacing"), label = "Line spacing", min = 0, max = 80, step = 1,
@@ -2298,6 +2456,10 @@ local function framePage(id, label, desc, opts)
         end
     end
     groups[#groups + 1] = barFxCard(id, (opts.power or opts.powerToggle) and powerOff or nil, shown, opts.pets)
+    if ns.Layers.PARTS[id] then
+        groups[#groups + 1] = { label = "Layers", items = ns.Layers.Rows(id, shown),
+            desc = "Which part draws on top where this frame's parts overlap. A part higher in the list draws over the ones below it. A part standing on its own can also take a layer of its own." }
+    end
     groups[#groups + 1] = copyCard(id)
     return { id = id, label = label, desc = desc, groups = tabbed(groups), preview = preview,
              sample = function(parent) return ns.PageSample.New(id, parent) end }
@@ -2437,14 +2599,13 @@ end
 local attached = notOwnSize("player")
 -- Between the frames, the bar takes the gap's width, has no icon, and fills left to right.
 local function notMiddleOwn(get) return attached(get) or atOf(get, "player") == "middle" end
--- Flipping needs an angled end, on a bar with its own shape.
-local function flipRow(unit, who, notOwn)
-    return flipRows({ right = unit .. "Castbar.slantUnder", left = unit .. "Castbar.slantUnderLeft",
-        rightOn = unit .. "Castbar.slant", leftOn = unit .. "Castbar.slantLeft",
-        name = CAST_WHO[unit], what = who .. " cast bar's",
-        note = unit == "player" and "Not while under the frame, between the frames or under the personal display."
-            or (unit == "target" or unit == "focus") and "Not inside the frame or sliding out under it." or "Not inside the frame.",
-        disabled = function(get) return notOwn(get) or (unit == "player" and atOf(get, "player") == "personal") end })
+-- A cast bar's two end menus (Options.EndRows). rightDis / leftDis gray out
+-- one end, note ends both descriptions.
+local function castEnds(unit, rightDis, leftDis, note)
+    local k = function(s) return unit .. "Castbar." .. s end
+    return DaylightUI.Options.EndRows({ name = CAST_WHO[unit], note = note,
+        left = { on = k("slantLeft"), flip = k("slantUnderLeft"), disabled = leftDis },
+        right = { on = k("slant"), flip = k("slantUnder"), disabled = rightDis } })
 end
 -- Its own angle, on the same bars the flip works on.
 local function castAngle(unit, who, notOwn)
@@ -2474,6 +2635,8 @@ local function raidPage(size)
                  function(f) return "raid." .. f end)[1],
         growRows(function(f) return ns.Raid.MapKey("raid." .. f, size) end, "Lines", off("raid.enabled"),
                  function(f) return "raid." .. f end)[2],
+        growRows(function(f) return ns.Raid.MapKey("raid." .. f, size) end, "Lines", off("raid.enabled"),
+                 function(f) return "raid." .. f end)[3],
         { type = "dropdown", key = "raid.sortBy", label = "Sort frames by",
           values = RAID_SORT_VALUES, order = RAID_SORT_ORDER, desc = SORT_DESC, disabled = off("raid.enabled") },
         { type = "slider", key = "raid.groups", label = "Show groups up to", min = 1, max = 8, step = 1,
@@ -2500,14 +2663,13 @@ local function raidPage(size)
           disabled = off("raid.enabled") },
         { type = "toggle", key = "raid.hideSelf", invert = true, label = "Show yourself",
           desc = "Your own tile sits with the raid's. When off, only the rest of the raid shows.", disabled = off("raid.enabled") },
-        { type = "toggle", key = "raid.slant", label = "Angled end",
-          desc = "Cuts each tile's right end at an angle, like your own frame; the bars follow it.",
-          disabled = off("raid.enabled") },
+        frameEndRows("raid", "raid", "Tile", off("raid.enabled"))[1],
+        frameEndRows("raid", "raid", "Tile", off("raid.enabled"))[2],
         { type = "toggle", key = "raid.fillVertical", label = "Fill upward",
           desc = "The health bar fills bottom to top instead of across.", disabled = off("raid.enabled") },
         { type = "toggle", key = "raid.showPower", label = "Power bar",
           desc = "A thin mana, rage or energy bar at the foot of each tile.", disabled = off("raid.enabled") },
-        { type = "slider", key = "raid.powerHeight", label = "Power bar height", min = 2, max = 20, step = 1,
+        { type = "slider", key = "raid.powerHeight", label = "Power bar height", min = 2, max = 80, step = 1,
           desc = "How tall each tile's power bar is.", disabled = offAny("raid.enabled", "raid.showPower") },
         barRows("raid.media.power", "the raid tiles' power bars", "Power bar", offAny("raid.enabled", "raid.showPower"))[1],
         barRows("raid.media.power", "the raid tiles' power bars", "Power bar", offAny("raid.enabled", "raid.showPower"))[2],
@@ -2633,10 +2795,9 @@ local PLAYER_CAST = {
         atChoice("player", "Under the frame it continues the frame's angle and slides out as you cast. Between your frame and the target's it fills the gap, both ends angled like the frames beside it, with the swing timers fanning out under it. Above the frame or on its own it has its own size."),
         { type = "dropdown", key = "playerCastbar.from", label = "Your cast bar slides out from",
           values = { frame = "The player frame", power = "The power bar" }, order = { "frame", "power" },
-          desc = "With the power bar on its own (Player > Power bar), the cast bar and the swing timer under it can slide out from under the power bar instead of the frame. Not while the power bar's angles are flipped.",
+          desc = "With the power bar on its own (Player > Power bar), the cast bar and the swing timer under it can slide out from under the power bar instead of the frame. Under a flipped end of the power bar they lean back in.",
           disabled = function(get)
               return get("playerCastbar.enabled") ~= true or get("playerCastbar.at") ~= "below" or get("player.powerAt") ~= "free"
-                  or get("player.powerSlantUnder") == true or get("player.powerSlantUnderLeft") == true
           end },
         nudge("player", "x"),
         nudge("player", "y"),
@@ -2649,14 +2810,12 @@ local PLAYER_CAST = {
         fontRow("playerCastbar.media.font", "Your cast bar font", "The spell name and time on your cast bar", off("playerCastbar.enabled")),
         { type = "toggle", key = "playerCastbar.showIcon", label = "Your cast bar spell icon",
           desc = "The spell's icon at the end of your cast bar. Not while under the frame, where the portrait ring covers that spot, or between the frames.", disabled = notMiddleOwn },
-        { type = "toggle", key = "playerCastbar.slant", label = "Your cast bar angled right end",
-          desc = "Cuts the right end at an angle. Under the frame it continues the frame's angle, and between the frames both ends lean. When off, its ends are straight.",
-          disabled = off("playerCastbar.enabled") },
-        { type = "toggle", key = "playerCastbar.slantLeft", label = "Your cast bar angled left end",
-          desc = "Cuts the left end at an angle, leaning like the target frame's end. Not while under the frame, between the frames or under the personal display.",
-          disabled = function(get) return notMiddleOwn(get) or atOf(get, "player") == "personal" end },
-        flipRow("player", "your", notMiddleOwn)[1],
-        flipRow("player", "your", notMiddleOwn)[2],
+        castEnds("player", off("playerCastbar.enabled"),
+            function(get) return notMiddleOwn(get) or atOf(get, "player") == "personal" end,
+            "Under the frame it follows the frame's own ends (Straight there keeps it square), between the frames both ends lean, and under the personal display it takes the display's.")[1],
+        castEnds("player", off("playerCastbar.enabled"),
+            function(get) return notMiddleOwn(get) or atOf(get, "player") == "personal" end,
+            "Under the frame it follows the frame's own ends (Straight there keeps it square), between the frames both ends lean, and under the personal display it takes the display's.")[2],
         castAngle("player", "your", notMiddleOwn)[1],
         castAngle("player", "your", notMiddleOwn)[2],
         { type = "toggle", key = "playerCastbar.reverseFill", label = "Your cast bar fills right to left",
@@ -2666,6 +2825,7 @@ local PLAYER_CAST = {
             " Under the frame, between the frames or under the personal display, it draws with the frame instead."),
     } },
     castShell("playerCastbar"),
+    DaylightUI.Fade.Card("playerCastbar.fade.", nil, off("playerCastbar.enabled"), "Your cast bar", { noFloat = true }),
     castTextCard("player", "Player", "your"),
 }
 local TARGET_CAST = {
@@ -2688,21 +2848,15 @@ local TARGET_CAST = {
         { type = "toggle", key = "targetCastbar.showIcon", label = "Target cast bar spell icon",
           desc = "The spell's icon at the end of your target's cast bar. Not inside the frame or sliding out under it.",
           disabled = notOwnBar("target") },
-        { type = "toggle", key = "targetCastbar.slant", label = "Target cast bar angled right end",
-          desc = "Cuts the right end of your target's cast bar at an angle. When off, its end is straight. Not inside the frame or sliding out under it.",
-          disabled = notOwnBar("target") },
-        { type = "toggle", key = "targetCastbar.slantLeft", label = "Target cast bar angled left end",
-          desc = "Cuts the left end of your target's cast bar at an angle, leaning like the frame's own end, so a bar above or below it can match. Not inside the frame or sliding out under it.",
-          disabled = notOwnBar("target") },
-        flipRow("target", "your target's", notOwnBar("target"))[1],
-        flipRow("target", "your target's", notOwnBar("target"))[2],
+        castEnds("target", notOwnBar("target"), notOwnBar("target"), "Not inside the frame or sliding out under it, where it follows the frame's own ends.")[1],
+        castEnds("target", notOwnBar("target"), notOwnBar("target"), "Not inside the frame or sliding out under it, where it follows the frame's own ends.")[2],
         castAngle("target", "your target's", notOwnBar("target"))[1],
         castAngle("target", "your target's", notOwnBar("target"))[2],
         { type = "toggle", key = "targetCastbar.reverseFill", label = "Target cast bar fills right to left",
           desc = "Your target's cast bar fills from the right. Not inside the frame or sliding out under it.",
           disabled = notOwnBar("target") },
         strataRow("targetCastbar.strata", "Target cast bar layer", "The layer your target's cast bar draws in.",
-            notOwnBar("target"), " Inside the frame or sliding out under it, it draws with the frame instead."),
+            notOwnBar("target"), " Inside the frame or sliding out under it, it draws with the frame instead. Same as frame keeps it with the frame wherever it stands.", true),
     } },
     castTextCard("target", "Target", "your target's", true),
 }
@@ -2726,21 +2880,15 @@ local FOCUS_CAST = {
         { type = "toggle", key = "focusCastbar.showIcon", label = "Focus cast bar spell icon",
           desc = "The spell's icon at the end of your focus's cast bar. Not inside the frame or sliding out under it.",
           disabled = notOwnBar("focus") },
-        { type = "toggle", key = "focusCastbar.slant", label = "Focus cast bar angled right end",
-          desc = "Cuts the right end of your focus's cast bar at an angle. When off, its end is straight. Not inside the frame or sliding out under it.",
-          disabled = notOwnBar("focus") },
-        { type = "toggle", key = "focusCastbar.slantLeft", label = "Focus cast bar angled left end",
-          desc = "Cuts the left end of your focus's cast bar at an angle. When off, its end is straight. Not inside the frame or sliding out under it.",
-          disabled = notOwnBar("focus") },
-        flipRow("focus", "your focus's", notOwnBar("focus"))[1],
-        flipRow("focus", "your focus's", notOwnBar("focus"))[2],
+        castEnds("focus", notOwnBar("focus"), notOwnBar("focus"), "Not inside the frame or sliding out under it, where it follows the frame's own ends.")[1],
+        castEnds("focus", notOwnBar("focus"), notOwnBar("focus"), "Not inside the frame or sliding out under it, where it follows the frame's own ends.")[2],
         castAngle("focus", "your focus's", notOwnBar("focus"))[1],
         castAngle("focus", "your focus's", notOwnBar("focus"))[2],
         { type = "toggle", key = "focusCastbar.reverseFill", label = "Focus cast bar fills right to left",
           desc = "Your focus's cast bar fills from the right. Not inside the frame or sliding out under it.",
           disabled = notOwnBar("focus") },
         strataRow("focusCastbar.strata", "Focus cast bar layer", "The layer your focus's cast bar draws in.",
-            notOwnBar("focus"), " Inside the frame or sliding out under it, it draws with the frame instead."),
+            notOwnBar("focus"), " Inside the frame or sliding out under it, it draws with the frame instead. Same as frame keeps it with the frame wherever it stands.", true),
     } },
     castTextCard("focus", "Focus", "your focus's"),
 }
@@ -2766,28 +2914,40 @@ local PARTY_CAST = {
         fontRow("partyCastbar.media.font", "Party cast bar font", "The spell name and time on the party's cast bars", off("partyCastbar.enabled")),
         { type = "toggle", key = "partyCastbar.showIcon", label = "Party cast bar spell icon",
           desc = "The spell's icon at the end of each detached cast bar.", disabled = notOwnBar("party") },
-        { type = "toggle", key = "partyCastbar.slant", label = "Party cast bar angled end",
-          desc = "Cuts the end of each detached cast bar at an angle. When off, its end is straight.", disabled = notOwnBar("party") },
+        castEnds("party", notOwnBar("party"), notOwnBar("party"), "Each detached cast bar. Sliding out under its frame, it follows the frame's own ends.")[1],
+        castEnds("party", notOwnBar("party"), notOwnBar("party"), "Each detached cast bar. Sliding out under its frame, it follows the frame's own ends.")[2],
         { type = "toggle", key = "partyCastbar.reverseFill", label = "Party cast bar fills right to left",
           desc = "Each detached cast bar fills from the right.", disabled = notOwnBar("party") },
     } },
     castTextCard("party", "Party", "each party member's", true),
 }
 
+-- The combo pips' two end menus. Their inner end (slant) is the one by the
+-- frame's angled end: the left under the target, the right under the player.
+-- One pair per placement, the other hidden.
+local function comboEnds(inner, hidden)
+    local outer = inner == "right" and "left" or "right"
+    local ends = {
+        [inner] = { on = "combo.slant", flip = "combo.slantUnder" },
+        [outer] = { on = "combo.slantOuter", flip = "combo.slantUnderOuter" },
+    }
+    return DaylightUI.Options.EndRows({ name = "Combo point", left = ends.left, right = ends.right,
+        disabled = off("combo.enabled"), hidden = hidden })
+end
+
 ns.OPTIONS = { pages = {
     framePage("player", "Player", "Your own frame.",
         { castCards = PLAYER_CAST, power = true, powerToggle = true, powerFree = true, portraitFree = true, powerPos = true, tab = true, healthText = true, textPos = true, big = true, portrait = true, dragon = true, combat = true, auras = PLAYER_AURA_GROUPS,
-          slantDesc = "Cuts the right end at an angle; the bars and an attached cast bar follow it." }),
+          endNote = "The bars, and a cast bar hung under the frame, follow it." }),
     framePage("target", "Target", "Mirrors the player frame, with raid markers, the elite crest, and its buffs and debuffs.",
-        { castCards = TARGET_CAST, power = true, powerToggle = true, powerFree = true, portraitFree = true, powerPos = true, tab = true, healthText = true, textPos = true, big = true, marker = true, crest = true, portrait = true, threat = true, threatTag = true, auras = TARGET_AURA_GROUPS, dots = true,
-          slantDesc = "Cuts the left end at an angle; the bars follow it." }),
+        { castCards = TARGET_CAST, power = true, powerToggle = true, powerFree = true, portraitFree = true, powerPos = true, tab = true, healthText = true, textPos = true, big = true, marker = true, crest = true, portrait = true, threat = true, threatTag = true, auras = TARGET_AURA_GROUPS, dots = true }),
     framePage("focus", "Focus", "The unit you set as focus.",
         { castCards = FOCUS_CAST, power = true, powerToggle = true, powerFree = true, portraitFree = true, powerPos = true, tab = true, healthText = true, textPos = true, marker = true, portrait = true, threat = true,
           auras = FOCUS_AURA_GROUPS }),
     framePage("party", "Party", "Your party: bars like your own frame, or square tiles (Portrait None and Name on the bar). Set how they line up, what shows, and move them as one in unlock mode.",
         { castCards = PARTY_CAST, power = true, powerPos = true, tab = true, healthText = true, textPos = true, big = true, marker = true, portrait = true, groupThreat = true,
           spacing = true, auraGroups = true, role = true, targetMark = true, pets = true,
-          layout = true, tile = true, powerToggle = true, minWidth = 20, maxHeight = 120, strataWhat = "The layer the party frames draw in.", slantDesc = "Cuts the right end at an angle; the bars follow it.",
+          layout = true, tile = true, powerToggle = true, minWidth = 20, maxHeight = 120, strataWhat = "The layer the party frames draw in.",
           showDesc = "Turn the party frames on or off. While Use raid frames in a party (Unit Frames > Raid 10) is on, the raid frames show in a party instead and the rows on this page do nothing." }),
     raidPage(10), raidPage(20), raidPage(40),
     framePage("arena", "PvP Frames", "Enemy players carrying a flag in a battleground, one frame each. Right-click one to set it as your focus.",
@@ -2795,15 +2955,15 @@ ns.OPTIONS = { pages = {
           strataWhat = "The layer the PvP frames draw in.",
           showLabel = "Show the PvP frames", showDesc = "Turn the PvP frames on or off. When off, the game shows its own after a reload." }),
     framePage("targettarget", "Target of Target", "Who your target is looking at.", { healthText = true, textPos = true, flip = true,
-        power = true, powerToggle = true, powerPos = true }),
+        power = true, powerToggle = true, powerPos = true, portrait = true }),
     framePage("focustarget", "Focus Target", "Who your focus is looking at.", { healthText = true, textPos = true,
-        power = true, powerToggle = true, powerPos = true }),
+        power = true, powerToggle = true, powerPos = true, portrait = true }),
     framePage("partyTarget", "Party Targets", "Who each party member is targeting, in a small frame beside them. Click one to target it too.",
         { healthText = true, textPos = true, flip = true, power = true, powerToggle = true, powerPos = true, place = true,
           strataWhat = "The layer the party targets draw in.",
           showLabel = "Show party targets", showDesc = "A small frame beside each party member showing who they're targeting." }),
     framePage("pet", "Pet", "Your pet or minion.", { happiness = true, power = true, powerToggle = true, powerPos = true, healthText = true, textPos = true,
-        tab = true, small = true, auras = PET_AURA_GROUPS }),
+        tab = true, small = true, portrait = true, auras = PET_AURA_GROUPS }),
 
     { id = "colors", label = "Look", desc = "The frames' shape, class icons, and the bars' and names' colors on every unit frame.", groups = {
         { label = "Frame shape", items = {
@@ -2952,6 +3112,9 @@ ns.OPTIONS = { pages = {
             { type = "color", key = "casts.locked", label = "Can't be interrupted", hidden = fillIs("casts.fill", "pair"),
               desc = "The bar's color while the cast can't be interrupted." },
         }, stopsRows("casts.customGradient", "casts.fill", "cast bar", "your cast bar")) },
+        { label = "Spell colors",
+          desc = "Your cast bar in a color of its own for the spells you pick, like Drain Life in green and Drain Soul in purple. Every rank takes it, whatever the fill style. A cast that can't be interrupted keeps its warning color.",
+          items = { spellColorItem } },
         { label = "Other cast bars' colors", items = DaylightUI.Options.Join({
             { type = "toggle", key = "targetCasts.classColor", label = "Class color on other cast bars",
               desc = "A player's casts in their class color, or their class's gradient with a two-color fill. Creatures' casts keep the fill style. Not with the Daylight gradient or a custom gradient.",
@@ -3002,16 +3165,10 @@ ns.OPTIONS = { pages = {
               desc = "How tall each swing timer bar is.", disabled = off("swing.enabled") },
             barRows("swing.media.bar", "the swing timer", "Swing timer", off("swing.enabled"))[1],
             barRows("swing.media.bar", "the swing timer", "Swing timer", off("swing.enabled"))[2],
-            { type = "toggle", key = "swing.slant", label = "Swing timer angled right end",
-              desc = "Cuts the bars' right end at an angle. Only when detached as a group. Under the personal display they're cut like it.", disabled = groupAttached },
-            { type = "toggle", key = "swing.slantLeft", label = "Swing timer angled left end",
-              desc = "Cuts the bars' left end at an angle. Only when detached as a group.", disabled = groupAttached },
-            flipRows({ right = "swing.slantUnder", left = "swing.slantUnderLeft", rightOn = "swing.slant", leftOn = "swing.slantLeft",
-                       name = "Swing timer", what = "the swing timer's", note = "Only when detached as a group.",
-                       disabled = groupAttached })[1],
-            flipRows({ right = "swing.slantUnder", left = "swing.slantUnderLeft", rightOn = "swing.slant", leftOn = "swing.slantLeft",
-                       name = "Swing timer", what = "the swing timer's", note = "Only when detached as a group.",
-                       disabled = groupAttached })[2],
+            DaylightUI.Options.EndRows({ name = "Swing timer", disabled = groupAttached, note = "Hung under the frame it follows the frame's own ends.",
+                left = { on = "swing.slantLeft", flip = "swing.slantUnderLeft" }, right = { on = "swing.slant", flip = "swing.slantUnder" } })[1],
+            DaylightUI.Options.EndRows({ name = "Swing timer", disabled = groupAttached, note = "Hung under the frame it follows the frame's own ends.",
+                left = { on = "swing.slantLeft", flip = "swing.slantUnderLeft" }, right = { on = "swing.slant", flip = "swing.slantUnder" } })[2],
             angleRows({ own = "swing.ownAngle", lean = "swing.lean", name = "Swing timer", what = "the swing timer's", since = "2.0",
                         note = "Only when detached as a group.",
                         disabled = function(get) return groupAttached(get) or (get("swing.slant") ~= true and get("swing.slantLeft") ~= true) end })[1],
@@ -3034,6 +3191,7 @@ ns.OPTIONS = { pages = {
             strataRow("swing.strata", "Swing timer layer", "The layer the swing timer draws in when detached, as a group or a bar on its own.",
                 off("swing.enabled"), " Hung under the player frame or the cast bar, it draws with them instead."),
         } },
+        DaylightUI.Fade.Card("swing.fade.", nil, off("swing.enabled"), "Swing timer", { noFloat = true }),
         shellCard("swing", "swing.enabled", true),
         DaylightUI.Options.BarFxCard({ module = "UnitFrames", choices = {
             { id = "swing", label = "Swing timer", base = "swing.barFx.", kind = "swing", gate = off("swing.enabled") },
@@ -3104,10 +3262,12 @@ ns.OPTIONS = { pages = {
         { label = "Bars", items = {
             { type = "slider", key = "personal.width", label = "Personal display width", min = 60, max = 400, step = 1, unit = "px",
               desc = "How wide the bars are.", disabled = off("personal.enabled") },
-            { type = "toggle", key = "personal.slant", label = "Personal display angled right end",
-              desc = "Cuts the right end at an angle, docked cast and swing bars too. When off, it's square.", disabled = off("personal.enabled") },
-            { type = "toggle", key = "personal.slantLeft", label = "Personal display angled left end",
-              desc = "Cuts the left end at an angle too, docked cast and swing bars included.", disabled = off("personal.enabled") },
+            DaylightUI.Options.EndRows({ name = "Personal display", disabled = off("personal.enabled"),
+                note = "Docked cast and swing bars are cut at the same ends, leaning the usual way.",
+                left = { on = "personal.slantLeft", flip = "personal.slantUnderLeft" }, right = { on = "personal.slant", flip = "personal.slantUnder" } })[1],
+            DaylightUI.Options.EndRows({ name = "Personal display", disabled = off("personal.enabled"),
+                note = "Docked cast and swing bars are cut at the same ends, leaning the usual way.",
+                left = { on = "personal.slantLeft", flip = "personal.slantUnderLeft" }, right = { on = "personal.slant", flip = "personal.slantUnder" } })[2],
             angleRows({ own = "personal.ownAngle", lean = "personal.lean", name = "Personal display", what = "the personal display's", since = "2.0",
                         note = "Docked cast and swing bars lean with it.",
                         disabled = function(get) return get("personal.enabled") ~= true or (get("personal.slant") ~= true and get("personal.slantLeft") ~= true) end })[1],
@@ -3169,6 +3329,7 @@ ns.OPTIONS = { pages = {
         personalTextCard(),
         PERSONAL_AURA_GROUPS[1],
         PERSONAL_AURA_GROUPS[2],
+        PERSONAL_AURA_GROUPS[3],
         DaylightUI.Fade.Card("personal.fade.", nil, off("personal.enabled"), "Personal display"),
     } },
 
@@ -3204,8 +3365,10 @@ ns.OPTIONS = { pages = {
             barRows("combo.media.bar", "the combo points", "Combo point", off("combo.enabled"))[2],
             { type = "slider", key = "combo.border", label = "Combo point border", min = 0, max = 4, step = 1, unit = "px",
               desc = "How thick the border round each pip is. 0 leaves none.", disabled = off("combo.enabled") },
-            { type = "toggle", key = "combo.slant", label = "Angled ends",
-              desc = "Each pip leans like the frames' angled ends. When off, their ends are straight.", disabled = off("combo.enabled") },
+            comboEnds("left", function(get) return get("combo.anchor") == "player" end)[1],
+            comboEnds("left", function(get) return get("combo.anchor") == "player" end)[2],
+            comboEnds("right", function(get) return get("combo.anchor") ~= "player" end)[1],
+            comboEnds("right", function(get) return get("combo.anchor") ~= "player" end)[2],
             { type = "dropdown", key = "combo.colorMode", label = "Combo point colors",
               values = { color = "One color", blend = "Color to full color", class = "Class color",
                          gradient = "One gradient", points = "A gradient per point", customGradient = "Custom gradient" },

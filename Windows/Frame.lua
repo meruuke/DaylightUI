@@ -193,8 +193,16 @@ function Win.Header(f, spec)
     f.title:SetWordWrap(false)
     Style.InkText(f.title, "VALUE")
     if not spec.compact then
+        -- The title is squeezed by the tabs, and with no room left (wide tabs, a
+        -- bigger font, a long translation) it has no width and so no height, and a
+        -- sub line hung under it would ride up into the tabs. So the sub line hangs
+        -- under an unseen line of the title's size that nothing squeezes.
+        f.titleLine = Style.Text(f, Win.TITLE_SIZE, "LEFT")
+        f.titleLine:SetPoint("TOPLEFT", f, "TOPLEFT", left, Win.TITLE_Y)
+        f.titleLine:SetText("A")   -- any letter: only its line height counts
+        f.titleLine:Hide()
         f.sub = Style.Text(f, Win.SUB_SIZE, "LEFT")
-        f.sub:SetPoint("TOPLEFT", f.title, "BOTTOMLEFT", 0, -4)
+        f.sub:SetPoint("TOPLEFT", f.titleLine, "BOTTOMLEFT", 0, -4)
         f.sub:SetPoint("RIGHT", f, "RIGHT", -40, 0)
         f.sub:SetWordWrap(false)
         f.sub:SetTextColor(Win.DIM[1], Win.DIM[2], Win.DIM[3])
@@ -236,8 +244,11 @@ function Win.HeaderIcon(f, icon, tip, onClick)
     return b
 end
 
-function Win.Tabs(f, tabs, onPick)
+-- opts.onReorder(ids): the tabs can be dragged into another order, and this is
+-- told the new order of ids after a drop.
+function Win.Tabs(f, tabs, onPick, opts)
     f.tabs, f.onTab = {}, onPick
+    f.onReorder = opts and opts.onReorder or nil
     local right = f.headerRight or f.close
     for i = #tabs, 1, -1 do
         local t = tabs[i]
@@ -245,12 +256,21 @@ function Win.Tabs(f, tabs, onPick)
         b.id = t.id
         b:SetPoint("RIGHT", right, "LEFT", -Win.TAB_GAP, 0)
         b:SetScript("OnClick", function()
-            if f.tab == b.id then return end
+            if f.tab == b.id or Win.TabDropped(f) then return end
             Win.PickTab(f, b.id)
             if f.onTab then f.onTab(b.id) end
         end)
+        if f.onReorder then
+            b:RegisterForDrag("LeftButton")
+            b:SetScript("OnDragStart", function() Win.TabDragStart(f, b) end)
+            b:SetScript("OnDragStop", function() Win.TabDragStop(f) end)
+        end
         table.insert(f.tabs, 1, b)
         right = b
+    end
+    if f.onReorder and not f.tabDragHooked then
+        f.tabDragHooked = true
+        f:HookScript("OnHide", function() Win.TabDragStop(f) end)
     end
     Win.FitTabs(f)
     if not f.fitTabsOnShow then
@@ -274,6 +294,130 @@ function Win.FitTabs(f)
     if f.sub then f.sub:SetPoint("RIGHT", f, "RIGHT", -room, 0) end
 end
 
+-- Dragging a tab along the header: it follows the mouse, the others glide
+-- aside (FAST), and the drop tells onReorder. Spots are each tab's right edge
+-- as an offset from whatever the last tab hangs on (the X or a header icon).
+local function tabAnchor(f) return f.headerRight or f.close end
+
+local function placeTab(f, b, off)
+    b:ClearAllPoints()
+    b:SetPoint("RIGHT", tabAnchor(f), "LEFT", off, 0)
+end
+
+local function tabSlots(order)
+    local out, off = {}, -Win.TAB_GAP
+    for i = #order, 1, -1 do
+        out[i] = off
+        off = off - order[i]:GetWidth() - Win.TAB_GAP
+    end
+    return out, off + Win.TAB_GAP
+end
+
+-- The mouse along the header, in the same offsets as the spots.
+local function cursorOff(f)
+    local x = GetCursorPosition()
+    local left = tabAnchor(f):GetLeft()
+    if type(x) ~= "number" or type(left) ~= "number" then return nil end
+    return x / f:GetEffectiveScale() - left
+end
+
+local function slideTab(f, d, b, to)
+    b.tabSlide = b.tabSlide or {}
+    local M = DUI.Motion
+    M.Tween(b.tabSlide, d.seen[b], to, M.FAST, function(v) d.seen[b] = v; placeTab(f, b, v) end)
+end
+
+-- Clicks right after a drop are its own release, not a click.
+Win.TAB_DROP_GRACE = 0.05
+function Win.TabDropped(f)
+    return f.tabDropAt ~= nil and GetTime() - f.tabDropAt <= Win.TAB_DROP_GRACE
+end
+
+function Win.TabDragStart(f, b)
+    if not (f.onReorder and f.tabs) or #f.tabs < 2 or f.tabDrag then return end
+    local x = cursorOff(f)
+    if not x then return end
+    local slots, leftmost = tabSlots(f.tabs)
+    local d = { b = b, order = {}, seen = {}, level = b:GetFrameLevel() }
+    for i, o in ipairs(f.tabs) do
+        d.order[i], d.seen[o] = o, slots[i]
+        if o == b then d.at = i end
+        placeTab(f, o, slots[i])
+    end
+    if not d.at then return end
+    d.grab = x - slots[d.at]
+    d.min, d.max = leftmost + b:GetWidth(), -Win.TAB_GAP
+    f.tabDrag = d
+    b:SetFrameLevel(d.level + 5)
+    f.tabDragger = f.tabDragger or CreateFrame("Frame", nil, f)
+    f.tabDragger:SetScript("OnUpdate", function() Win.TabDragMove(f) end)
+end
+
+function Win.TabDragMove(f)
+    local d = f.tabDrag
+    if not d then return end
+    -- The release can land on another frame (a secure caster over the tab), so
+    -- the button itself says when it's over.
+    if type(IsMouseButtonDown) == "function" and not IsMouseButtonDown("LeftButton") then
+        return Win.TabDragStop(f)
+    end
+    local x = cursorOff(f)
+    if not x then return end
+    local b, w = d.b, d.b:GetWidth()
+    local right = math.max(d.min, math.min(d.max, x - d.grab))
+    d.seen[b] = right
+    placeTab(f, b, right)
+    local rest = {}
+    for _, o in ipairs(d.order) do if o ~= b then rest[#rest + 1] = o end end
+    local best, bestDist
+    for j = 1, #rest + 1 do
+        local trial = {}
+        for k, o in ipairs(rest) do trial[k] = o end
+        table.insert(trial, j, b)
+        local dist = math.abs(tabSlots(trial)[j] - right)
+        if not bestDist or dist < bestDist then best, bestDist = j, dist end
+    end
+    if best == d.at then return end
+    table.insert(rest, best, b)
+    d.order, d.at = rest, best
+    local slots = tabSlots(rest)
+    for i, o in ipairs(rest) do
+        if o ~= b then slideTab(f, d, o, slots[i]) end
+    end
+end
+
+function Win.TabDragStop(f)
+    local d = f.tabDrag
+    if not d then return end
+    f.tabDrag = nil
+    if f.tabDragger then f.tabDragger:SetScript("OnUpdate", nil) end
+    f.tabDropAt = GetTime()
+    local moved = false
+    for i, o in ipairs(d.order) do if f.tabs[i] ~= o then moved = true end end
+    f.tabs = d.order
+    local slots = tabSlots(f.tabs)
+    local b = d.b
+    b.tabSlide = b.tabSlide or {}
+    local M = DUI.Motion
+    M.Tween(b.tabSlide, d.seen[b], slots[d.at], M.FAST, function(v) placeTab(f, b, v) end, function()
+        -- Chained again, so a later label width change still lays them out.
+        local right = tabAnchor(f)
+        for i = #f.tabs, 1, -1 do
+            local o = f.tabs[i]
+            if o.tabSlide and o ~= b then M.Tween(o.tabSlide, 0, 0) end   -- a slide still going would re-place it
+            o:ClearAllPoints()
+            o:SetPoint("RIGHT", right, "LEFT", -Win.TAB_GAP, 0)
+            right = o
+        end
+        b:SetFrameLevel(d.level)
+    end)
+    if moved and f.onReorder then
+        local ids = {}
+        for i, o in ipairs(f.tabs) do ids[i] = o.id end
+        DUI.SafeCall(f.onReorder, ids)
+    end
+end
+
 -- Repaints colors the core restyle doesn't cover. Call on style changes.
 function Win.Repaint(f)
     if f.topLine then Style.PaintAccent(f.topLine, 0.7) end
@@ -295,6 +439,15 @@ function Win.New(spec)
     Style.Shell(f, { window = spec.back or true })   -- spec.back: module whose opacity setting applies (Style.WindowBack)
     Win.Header(f, spec)
     DUI.Pad.Follow(f, function() f.close:Click() end)
+    -- The game's Escape and losing control close the window, in a fight too,
+    -- through its own close. A window that follows a game window passes
+    -- escape = false: the game closes its own window, and this one with it.
+    if spec.escape ~= false then
+        local esc = DUI.Motion.EscapeFor(function() if Win.IsOpen(f) then f.close:Click() end end)
+        f.escapeStandIn = esc
+        f:HookScript("OnShow", function() if Win.IsOpen(f) then DUI.Motion.EscapeShown(esc, true) end end)
+        f:HookScript("OnHide", function() DUI.Motion.EscapeShown(esc, false) end)
+    end
     f.host = CreateFrame("Frame", nil, f)
     f.host:SetPoint("TOPLEFT", f, "TOPLEFT", 0, -Win.HEADER - 1)
     f.host:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, 0)
@@ -700,9 +853,12 @@ function Win.GoalGrowth(page)
     return f.goalW - now
 end
 
+-- f.duiGameSounds = { open, close }: the game's own kits for a window that stands
+-- in for one of the game's, played when the player picks the game's sounds (as
+-- Motion.Window does). false: the game's window makes no sound there.
 function Win.Open(f)
     if Feel.IsOpen(f) then return end
-    if DUI.Sound then DUI.Sound.Play("open") end
+    if DUI.Sound then DUI.Sound.Play("open", f.duiGameSounds and f.duiGameSounds.open) end
     Feel.Open(f)
     Win.Glow(f)
     local page = f.current and f.pages[f.current]
@@ -711,7 +867,7 @@ end
 
 function Win.Close(f, done)
     if not Feel.IsOpen(f) then if done then done() end return end
-    if DUI.Sound then DUI.Sound.Play("close") end
+    if DUI.Sound then DUI.Sound.Play("close", f.duiGameSounds and f.duiGameSounds.close) end
     Feel.Close(f, done)
 end
 

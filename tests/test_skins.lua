@@ -520,6 +520,21 @@ T.test("skins: trade slots, money frames and the Trade/Cancel buttons", function
     T.eq(TradeFrameTradeButton:GetWidth(), TradeFrameCancelButton:GetWidth())
 end)
 
+-- The game's own trade layout (tests/tradeworld.lua): each side's item, enchant
+-- and money boxes are InsetFrameTemplates with marble art, named but not keyed,
+-- so the window walk never finds them as insets.
+T.test("skins: trade's marble boxes become the dark inset every skinned window has", function()
+    local TW, f = require("tradeworld"), nil
+    local S = login(function() f = TW.Install() end)
+    TW.Fill(f, { mine = { { name = "Linen Cloth" } } })
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    for _, name in ipairs({ "TradePlayerItemsInset", "TradePlayerEnchantInset", "TradePlayerInputMoneyInset",
+                            "TradeRecipientItemsInset", "TradeRecipientEnchantInset", "TradeRecipientMoneyInset" }) do
+        T.eq(_G[name].Bg:GetAlpha(), 0, name .. ": the marble gone")
+        T.truthy(S.Kit.ShadeOf(_G[name]), name .. ": the dark inset instead")
+    end
+end)
+
 T.test("skins: trade shows the other side's accept in the good color, easing in", function()
     login()
     local h = TradeHighlightRecipient
@@ -816,6 +831,80 @@ T.test("skins: no Daylight UI code runs inside a confirm box while the game open
     pop:Hide()
     T.falsy(Kit.quietPoller:IsShown(), "nothing runs once the box is gone")
     T.falsy(s2.down, "back to rest when the box closes")
+end)
+
+-- The game's macro window, as Blizzard_MacroUI.xml builds it.
+local function macroWindow()
+    local f = window("MacroFrame")
+    f.SelectedMacroButton = CreateFrame("CheckButton", "MacroFrameSelectedMacroButton", f)
+    f.SelectedMacroButton.Icon = f.SelectedMacroButton:CreateTexture()
+    f.MacroSelector = CreateFrame("Frame", nil, f)
+    local box = list(f.MacroSelector)
+    box.ScrollTarget = CreateFrame("Frame", nil, box)
+    f.MacroSelector.ScrollBox = box
+    for i = 1, 3 do
+        local b = CreateFrame("Button", nil, box.ScrollTarget)
+        b:SetSize(36, 36)
+        -- SelectorButtonTemplate: its icon is its normal texture.
+        b.Icon = b:CreateTexture()
+        function b:GetNormalTexture() return self.Icon end
+        b.Name = b:CreateFontString()
+        box.rows[i] = b
+    end
+    rows(unpack(box.rows))
+    local bar = CreateFrame("EventFrame", nil, f.MacroSelector)
+    bar.Track = CreateFrame("Frame", nil, bar)
+    bar.Track.Thumb = CreateFrame("Button", nil, bar.Track)
+    bar.Back, bar.Forward = CreateFrame("Button", nil, bar), CreateFrame("Button", nil, bar)
+    f.MacroSelector.ScrollBar = bar
+    local sf = CreateFrame("ScrollFrame", "MacroFrameScrollFrame", f)
+    CreateFrame("EditBox", "MacroFrameText", sf)
+    for _, name in ipairs({ "MacroEditButton", "MacroCancelButton", "MacroSaveButton",
+                            "MacroDeleteButton", "MacroNewButton", "MacroExitButton" }) do
+        local b = button(name, f)
+        b:GetFontString():SetText(name)
+    end
+    for i = 1, 2 do
+        -- PanelTopTabButtonTemplate
+        local tab = CreateFrame("Button", "MacroFrameTab" .. i, f)
+        tab:SetID(i)
+        tab.Left, tab.Middle, tab.Right = tab:CreateTexture(), tab:CreateTexture(), tab:CreateTexture()
+        tab.LeftActive, tab.MiddleActive, tab.RightActive = tab:CreateTexture(), tab:CreateTexture(), tab:CreateTexture()
+        tab.Text = tab:CreateFontString()
+        tab.Text:SetText(i == 1 and "General Macros" or "Character Macros")
+    end
+    return f
+end
+
+-- With the controller UI on, the macro window's footer (X binds a macro to the
+-- controller bars) refreshes at the end of each tab switch, right after the game
+-- enables and disables the New, Edit and Delete buttons, the macro slots and the
+-- tabs. Daylight UI code on any of those ran first and tainted the footer, and
+-- the game then refused SetPreferredGamepadInteractTarget, blamed on the skins.
+T.test("skins: no Daylight UI code runs inside the macro window while the game switches its tab", function()
+    local f
+    login(function() f = macroWindow() end)
+    stub.loadedAddOns.Blizzard_MacroUI = true
+    stub.FireEvent("ADDON_LOADED", "Blizzard_MacroUI")
+    stub.RunTimers()
+    f:Show()
+    stub.RunTimers()
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    local Kit = stub.skins.Kit
+    T.truthy(Kit.ShellOf(f), "our window")
+    T.truthy(Kit.ButtonOf(MacroNewButton), "our buttons")
+    T.truthy(Kit.TabOf(MacroFrameTab2), "our tabs")
+    local inside = stub.AddonScriptsInside(f, { "OnShow", "OnHide", "OnSizeChanged", "OnEnable", "OnDisable" })
+    T.eq(#inside, 0, "Daylight UI code inside the macro window: " .. table.concat(inside, ", "))
+
+    -- The quiet pieces still follow the game: a grayed-out button, the picked tab.
+    MacroDeleteButton:Disable()
+    Kit.quietPoller:GetScript("OnUpdate")(Kit.quietPoller, 0.016)
+    T.truthy(Kit.ButtonOf(MacroDeleteButton).off, "a disabled button shows as off")
+    f.selectedTab = 2
+    MacroFrameTab2:Disable()
+    Kit.quietPoller:GetScript("OnUpdate")(Kit.quietPoller, 0.016)
+    T.truthy(Kit.TabOf(MacroFrameTab2).picked or Kit.TabOf(MacroFrameTab2).on, "the character tab shows as picked")
 end)
 
 T.test("skins: the stack split box: our window, arrows and buttons, the amount in the accent", function()
@@ -1182,6 +1271,28 @@ T.test("skins: a list with no view yet is left until its rows come, with no erro
     stub.RunTimers()
     T.eq(calls, 1, "its rows done once the list fills")
     T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+end)
+
+-- The players' stack: a window's walk (Kit.Auto) reaches a list whose view
+-- isn't set yet, as the macro window's lists are right after /m.
+T.test("skins: a window walk past a list with no view yet makes no error", function()
+    login()
+    local Kit = stub.skins.Kit
+    local f = CreateFrame("Frame", nil, UIParent)
+    local box = list(f)
+    box.ScrollTarget = CreateFrame("Frame", nil, box)
+    box.rows[1] = button(nil, box.ScrollTarget)
+    local view = box.view
+    box.view = nil
+    Kit.Auto(f)
+    for _ = 1, 10 do stub.RunOnUpdate(Kit.walker, 1 / 60) end
+    stub.RunTimers()
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    box.view = view
+    box:Update()
+    stub.RunTimers()
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    T.truthy(Kit.ShellOf(box.rows[1]), "its rows styled once the list fills")
 end)
 
 T.test("skins: /dui skins profile toggles", function()
@@ -2590,7 +2701,7 @@ T.test("skins: unexplored areas show dimmed on the map, from the game's pieces l
     stub.RunTimers()
     T.eq(R.frame:IsShown(), true)
     T.eq(R.frame:GetParent(), f.ScrollContainer.Child, "over the map's canvas")
-    T.eq(R.frame:GetFrameLevel(), 2002, "at the game's exploration level")
+    T.eq(R.frame:GetFrameLevel(), 2001, "just under the game's exploration level")
     -- Every Durotar tile but the explored piece's one.
     local want = 0
     for _, piece in ipairs(stub.skins.MapRevealData[1411]) do
@@ -2619,6 +2730,69 @@ T.test("skins: unexplored areas show dimmed on the map, from the game's pieces l
     DaylightUI:Set("Skins", "mapReveal", false)
     stub.RunTimers()
     T.eq(R.frame:IsShown(), false)
+end)
+
+-- The game draws the explored pieces on its exploration pin (MapExplorationPinMixin,
+-- one frame at PIN_FRAME_LEVEL_MAP_EXPLORATION's startLevel, tiles on ARTWORK).
+-- Two frames at one level draw in no set order, tile by tile, so an explored
+-- piece's bright tiles and Daylight UI's dimmed ones overlapping it came out in a
+-- different mix on each open: sharp bright squares in the dimmed areas (seen in
+-- game in Duskwood, gone after a /reload). The dimmed tiles must sit under the
+-- game's, on every map and every open, and still over the map's own art.
+T.test("skins: unexplored areas always draw under the game's explored pieces, on every map and open", function()
+    local f, defs
+    local mapSet = {}
+    login(function()
+        _G.EventRegistry = { RegisterCallback = function(_, event, fn, owner)
+            if event == "MapCanvas.MapSet" then mapSet[#mapSet + 1] = function(...) fn(owner, ...) end end
+        end }
+        f = window("WorldMapFrame")
+        f.ScrollContainer = CreateFrame("ScrollFrame", nil, f)
+        f.ScrollContainer.Child = CreateFrame("Frame", nil, f.ScrollContainer)
+        f.mapID = 1431   -- Duskwood
+        defs = { PIN_FRAME_LEVEL_DEFAULT = { startLevel = 2000, range = 1 },
+                 PIN_FRAME_LEVEL_WOW_LABS_AREA = { startLevel = 2001, range = 1 },
+                 PIN_FRAME_LEVEL_MAP_EXPLORATION = { startLevel = 2002, range = 1 } }
+        f.pinFrameLevelsManager = { definitions = defs }
+        _G.C_MapExplorationInfo = { GetExploredMapTextures = function(id)
+            -- The Twilight Grove explored; its neighbors' art overlaps it.
+            if id == 1431 then return { { textureWidth = 384, textureHeight = 512, offsetX = 298, offsetY = 79,
+                fileDataIDs = { 8061711, 8061712, 8061713, 8061714 } } } end
+            return {}
+        end }
+        _G.C_Map = _G.C_Map or {}
+        C_Map.GetMapArtLayers = function() return { { tileWidth = 256, tileHeight = 256 } } end
+    end)
+    local R = stub.skins.MapReveal
+    -- The game's own pieces: its detail layer (the map's art) and its exploration
+    -- pin, as MapCanvasMixin and MapExplorationPinMixin:ApplyFrameLevel place them.
+    local canvas = f.ScrollContainer.Child
+    local detail = CreateFrame("Frame", nil, canvas)
+    local pin = CreateFrame("Frame", nil, canvas)
+    local function gamePin() pin:SetFrameLevel(defs.PIN_FRAME_LEVEL_MAP_EXPLORATION.startLevel) end
+    gamePin()
+    f:Show()
+    DaylightUI:Set("Skins", "mapReveal", true)
+    stub.RunTimers()
+    local function check(why)
+        T.truthy(R.frame:GetFrameLevel() < pin:GetFrameLevel(), why .. ": under the explored pieces ("
+            .. R.frame:GetFrameLevel() .. " vs the game's " .. pin:GetFrameLevel() .. ")")
+        T.truthy(R.frame:GetFrameLevel() > detail:GetFrameLevel(), why .. ": over the map's own art")
+    end
+    check("opened")
+    for _, id in ipairs({ 1429, 1431, 1436, 1431 }) do   -- Elwynn, Duskwood, Westfall, Duskwood
+        f.mapID = id
+        for _, fn in ipairs(mapSet) do fn(id) end
+        check("map " .. id)
+    end
+    -- Another addon's pin level put under the exploration level moves it up; the
+    -- game's pin follows on its next refresh, and so does the overlay on the next open.
+    defs.PIN_FRAME_LEVEL_MAP_EXPLORATION.startLevel = 2003
+    f:Hide()
+    gamePin()
+    f:Show()
+    check("reopened after the pin levels moved")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
 end)
 
 -- The client draws the game's quest area pin (a Blob) at its own alpha, so it
@@ -3037,6 +3211,55 @@ T.test("skins: the guild window: its side tabs, guild cards and roster rows ours
     card:GetScript("OnMouseUp")(card, "LeftButton")
     stub.RunTimers()
     T.eq(Kit.RowOf(card).fill:GetAlpha(), 0, "and clear again")
+end)
+
+-- Clicking a guild member opens their card (GuildRoster.lua DisplayMember). On
+-- the way the game resizes the card, shows or hides the rank menu and enables or
+-- disables Remove, then reads the member's details, which can be secret: only
+-- the game's own untainted code may compare them. Daylight UI code on any piece
+-- inside the card ran first and tainted the rest, so the card never opened and
+-- promote, demote and remove were out of reach.
+T.test("skins: no Daylight UI code runs inside the guild member card while the game fills it", function()
+    local f, memberCard
+    login(function()
+        f = guildWindow()
+        memberCard = f.GuildMemberDetailFrame
+        -- GuildRoster.xml: CommunitiesGuildMemberDetailFrameTemplate's pieces.
+        memberCard.CloseButton = CreateFrame("Button", nil, memberCard)
+        local xArt = memberCard.CloseButton:CreateTexture()
+        function memberCard.CloseButton:GetNormalTexture() return xArt end
+        memberCard.RemoveButton = button(nil, memberCard)
+        memberCard.RemoveButton:GetFontString():SetText("Remove")
+        memberCard.GroupInviteButton = button(nil, memberCard)
+        memberCard.GroupInviteButton:GetFontString():SetText("Group Invite")
+        local dd = CreateFrame("Button", nil, memberCard)
+        dd:SetSize(120, 24)
+        dd.Text = dd:CreateFontString()
+        dd.Arrow, dd.Background = dd:CreateTexture(), dd:CreateTexture()
+        memberCard.RankDropdown = dd
+        memberCard.OfficerNoteBackground = CreateFrame("Frame", nil, memberCard)
+        memberCard.Name = memberCard:CreateFontString()
+        memberCard:Hide()
+        stub.loadedAddOns.Blizzard_Communities = true
+    end)
+    f:Show()
+    stub.RunTimers()
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    local Kit = stub.skins.Kit
+    T.truthy(Kit.ShellOf(memberCard), "the card still a panel of ours")
+    T.truthy(Kit.ButtonOf(memberCard.RemoveButton), "Remove still our button")
+    T.truthy(Kit.ButtonOf(memberCard.GroupInviteButton), "Group Invite still our button")
+    local inside = stub.AddonScriptsInside(memberCard, { "OnShow", "OnHide", "OnSizeChanged", "OnEnable", "OnDisable" })
+    T.eq(#inside, 0, "Daylight UI code inside the member card: " .. table.concat(inside, ", "))
+    local own = memberCard:GetScript("OnSizeChanged")
+    T.falsy(own and stub.IsAddonHandler(own), "nor on the card's own resize")
+
+    -- The quiet buttons still follow the game while the card is up.
+    memberCard:Show()
+    memberCard.RemoveButton:Disable()
+    Kit.quietPoller:GetScript("OnUpdate")(Kit.quietPoller, 0.016)
+    T.truthy(Kit.ButtonOf(memberCard.RemoveButton).off, "Remove grays out when the game disables it")
+    memberCard:Hide()
 end)
 
 -- The collections journal's lists (Blizzard_MountCollection.xml,
@@ -4852,4 +5075,70 @@ T.test("skins: the hunter's stable (PetStableFrame) wears our window look, its p
     f.__center = { 500, 400 }
     barDrag:GetScript("OnDragStop")(barDrag)
     T.truthy(stub.skins.WindowMove.Spot("PetStableFrame"), "its spot saved")
+end)
+
+-- A game button whose frame has secret anchoring (the guild roster's member
+-- details showing a name under the client's restrictions) answers its size
+-- with secret numbers. Closing the window mid-dungeon hides it, and the trace
+-- resets: a player got "attempt to perform arithmetic on local 'w' (a secret
+-- number value)" from tr.Draw. A tween already running hit it on its next tick too.
+T.test("skins: a traced game button with a secret size hides and tweens without doing math on it", function()
+    login()
+    local Kit = stub.skins.Kit
+    local holder = CreateFrame("Frame", nil, UIParent)
+    local b = button(nil, holder)
+    b:SetSize(96, 22)
+    Kit.Button(b)
+    local tr = Kit.TraceOf(b)
+    T.truthy(tr, "the hover trace")
+    b:GetScript("OnEnter")(b)
+    stub.RunOnUpdate(DaylightUI.Motion.Driver(), 0.02)
+    T.truthy(tr.p > 0 and tr.p < 1, "half traced")
+    stub.HeldSecret(b)
+    -- In game a secret number answers type() with "number"; the fake one is a table.
+    local realType, realCheck = type, issecretvalue
+    local function fake(v) return realType(v) == "table" and rawget(v, "__secret") == true end
+    _G.issecretvalue = fake
+    _G.type = function(v)
+        if fake(v) and realType(rawget(v, "__value")) == "number" then return "number" end
+        return realType(v)
+    end
+    local ok1, err1 = pcall(stub.RunOnUpdate, DaylightUI.Motion.Driver(), 0.02)
+    local ok2, err2 = pcall(holder.Hide, holder)
+    _G.type, _G.issecretvalue = realType, realCheck
+    T.truthy(ok1, tostring(err1))
+    T.truthy(ok2, tostring(err2))
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    T.eq(tr.p, 0, "back at rest")
+    T.falsy(tr.top:IsShown() or tr.left:IsShown(), "no half-drawn trace left for the next show")
+    -- Plain again: the trace draws as before.
+    stub.HeldSecret(b, false)
+    holder:Show()
+    b:GetScript("OnEnter")(b)
+    for _ = 1, 40 do stub.RunOnUpdate(DaylightUI.Motion.Driver(), 0.02) end
+    T.eq(tr.p, 1)
+    T.truthy(tr.right:IsShown(), "traced all round")
+end)
+
+T.test("bar ends: the breath bar's ends each on their own, its fill leans with the right end", function()
+    local t
+    local S = login(function()
+        local c = CreateFrame("Frame", "MirrorTimerContainer", UIParent)
+        t = CreateFrame("Frame", nil, c)
+        t.StatusBar = CreateFrame("StatusBar", nil, t)
+        t.Text = t:CreateFontString()
+        t.Setup = function() end
+        c.mirrorTimers = { t }
+    end)
+    local Style = DaylightUI.Style
+    local h = S.Breath.holders[t]
+    DaylightUI:Set("Skins", "breathSlantLeft", true)
+    DaylightUI:Set("Skins", "breathUnder", true)
+    local sl = Style.GetSlant(h)
+    T.eq(sl.side, "both"); T.eq(sl.under, "right", "both ends angled, the right one flipped")
+    local _, _, under = Style.GetFillAngle(h.bar)
+    T.eq(under, true, "the fill leans like the right end")
+    DaylightUI:Set("Skins", "breathSlant", false)
+    T.eq(Style.GetSlant(h).side, "left", "the left end alone")
+    T.falsy(Style.GetFillAngle(h.bar), "the fill square toward a straight end")
 end)

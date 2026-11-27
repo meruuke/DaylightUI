@@ -1,12 +1,14 @@
 -- Welcome to Daylight UI 2.0: shown once per account to players who had
 -- Daylight UI before, in the setup guide's window. The first slide is the
 -- sunrise banner with what's new; then one slide per new look (portraits,
--- tooltips) where both are drawn side by side and the player picks one.
+-- tooltips, Proc Alerts) where both are drawn side by side and the player
+-- picks one, and a slide showing the new bar animations moving, with where to
+-- pick them. A player who saw it before gets only the slides added since.
 -- Nothing is written until Finish; closing it early asks again next login.
 -- A brand-new account never sees it: the setup guide asks the same things.
 --
 -- Saved: DB.Root().welcome = the version seen (Welcome.VERSION).
--- /dui welcome opens it any time.
+-- /dui welcome opens it any time, /dui whatsnew only the newest slides.
 
 local _, DUI = ...
 local L = DUI.L
@@ -18,7 +20,7 @@ local C = W.COLORS
 local Welcome = {}
 DUI.Welcome = Welcome
 
-Welcome.VERSION = 2
+Welcome.VERSION = 4
 Welcome.LOGIN_DELAY = 2  -- after the plugins' guides look (1 s), before the portrait question would (3 s)
 Welcome.WAIT = 5         -- while the guide's window is busy, look again this often
 Welcome.TRIES = 24       -- for about two minutes
@@ -44,8 +46,68 @@ Welcome.LIFT = 10          -- how far each piece lifts in
 Welcome.STAGGER = 0.1      -- between one card and the next
 Welcome.AFTER_SUN = 0.3    -- the words wait this long for the sunrise to start
 
--- The slides after the news, one per new look (InstallerLooks.KINDS).
-Welcome.CHOICES = { "portraitLook", "tooltipStyle", "plateClassIcon" }
+-- The slides after the news: one per new look (InstallerLooks.KINDS), or a
+-- slide that only shows something (Welcome.SHOWS).
+Welcome.CHOICES = { "portraitLook", "tooltipStyle", "plateClassIcon", "procAlerts", "barFx" }
+-- A slide added after the 2.0 welcome: the version it came with. A player who
+-- saw an earlier one gets only these, without the news.
+Welcome.SINCE = { procAlerts = 3, barFx = 4 }
+
+-- The bar animations new since the last welcome, in the order shown, each
+-- with a line about it. One that isn't in this build is left out.
+Welcome.BAR_STYLES = {
+    { key = "daybreak", text = "A soft crescent of light rides the end of the bar." },
+    { key = "pixelsparks", text = "Pixel-art sparks fly off the end of the bar." },
+    { key = "pixelblaze", text = "Pixel-art flames burn at the end of the bar." },
+    { key = "pixelarc", text = "A crackling arc of pixel light at the end of the bar." },
+    { key = "slosh", text = "Water sloshes inside the bar." },
+    { key = "molten", text = "Soft lava glows inside the bar." },
+    { key = "cinders", text = "Soft embers drift inside the bar." },
+}
+Welcome.BAR_CARD_H = 92   -- a style's card: its name, its line and the bar
+Welcome.BAR_H = 20        -- the sample bar, as tall as a player frame's health
+Welcome.BAR_PAD = 14
+
+function Welcome.BarStyles()
+    local out, defs = {}, DUI.BarFx and DUI.BarFx.DEFS or {}
+    for _, s in ipairs(Welcome.BAR_STYLES) do
+        if defs[s.key] then out[#out + 1] = s.key end
+    end
+    return out
+end
+
+-- The player frame's options page, where Bar animation sits.
+local function barFxPage()
+    local page = DUI.InstallerPages.Find("UnitFrames", "player.barFx.health.style")
+    return page and page.id or nil
+end
+
+-- Slides that only show something: nothing to pick, Next is there at once.
+Welcome.SHOWS = {
+    barFx = {
+        title = "New bar animations", rail = "Bar animations",
+        desc = "Here is each one, in your accent color. Pick one for any bar on a unit frame's page, Bars tab, under Bar animation.",
+        available = function()
+            return DUI.BarFx ~= nil and DUI:GetModule("UnitFrames") ~= nil and #Welcome.BarStyles() > 0
+                and barFxPage() ~= nil
+        end,
+        -- On every unit frame's page, on its Bars tab; the link opens the
+        -- player frame's.
+        later = barFxPage, laterKey = "player.barFx.health.style",
+        laterSay = "Find them in /dui > Unit Frames > any frame > Bars tab",
+    },
+}
+
+local function available(kind)
+    local show = Welcome.SHOWS[kind]
+    if not show then return DUI.InstallerLooks.Available(kind) end
+    local on = false
+    DUI.SafeCall(function() on = show.available() == true end)
+    return on
+end
+
+-- Whether a slide waits for a pick before Next.
+local function needsPick(kind) return kind ~= "news" and not Welcome.SHOWS[kind] end
 
 -- What's new: the first one is the tall card. go = a choice slide the card
 -- opens; hue = its icon's spot along the Daylight sweep.
@@ -70,16 +132,40 @@ function Welcome.Running() return run ~= nil end
 function Welcome.Slide() return run and run.slides[run.at] end
 function Welcome.Page() return run and run.pages[run.at] end
 
+local function seen() return tonumber(DUI.DB.Root().welcome) or 0 end
+
+-- The slides: the news, then each look that can show. After an earlier
+-- welcome (seen), only the looks added since; all of them for /dui welcome.
+local function slides(after)
+    local out = {}
+    if not after or after < 2 then
+        out[1] = "news"
+        after = 0
+    end
+    for _, kind in ipairs(Welcome.CHOICES) do
+        if (Welcome.SINCE[kind] or 2) > after and available(kind) then out[#out + 1] = kind end
+    end
+    return out
+end
+Welcome.Slides = slides
+
 -- Due on an account that had Daylight UI before, on a character that's set up.
 function Welcome.Due()
     local DB = DUI.DB
     local root = DB.Root()
-    if (tonumber(root.welcome) or 0) >= Welcome.VERSION then return false end
+    local was = seen()
+    if was >= Welcome.VERSION then return false end
     if DB.fresh then
         root.welcome = Welcome.VERSION
         return false
     end
-    return DUI.Installer.State() == "installed"
+    if DUI.Installer.State() ~= "installed" then return false end
+    -- Nothing new that can show here (its module is off): nothing to ask.
+    if #slides(was) == 0 then
+        root.welcome = Welcome.VERSION
+        return false
+    end
+    return true
 end
 
 function Welcome.MarkSeen()
@@ -87,15 +173,6 @@ function Welcome.MarkSeen()
     root.welcome = Welcome.VERSION
     -- It asked the portrait question, so the module's own never comes.
     root.portraitLookAsked = true
-end
-
--- The slides: the news, then each look that can show.
-local function slides()
-    local out = { "news" }
-    for _, kind in ipairs(Welcome.CHOICES) do
-        if DUI.InstallerLooks.Available(kind) then out[#out + 1] = kind end
-    end
-    return out
 end
 
 local function nextText(i)
@@ -408,6 +485,63 @@ local function buildChoice(parent, width, kind)
     return page
 end
 
+-- The bar animations slide: a card for each new style, two a row, its name,
+-- a line about it and a sample health bar wearing it, moving, filled with the
+-- player's own accent. The cards take no clicks: the picking is done on the
+-- unit frames' pages.
+
+local function buildBarFx(parent, width)
+    local Cards, BarFx = DUI.InstallerCards, DUI.BarFx
+    local page = CreateFrame("Frame", nil, parent)
+    page:SetWidth(width)
+    page.cards = {}
+    local gap, pad = Cards.GAP, Welcome.BAR_PAD
+    local cw = (width - gap) / 2
+    local lines = {}
+    for _, s in ipairs(Welcome.BAR_STYLES) do lines[s.key] = s.text end
+    for i, key in ipairs(Welcome.BarStyles()) do
+        local c = Cards.Card(page)
+        c:EnableMouse(false)
+        c:SetSize(cw, Welcome.BAR_CARD_H)
+        local col, row = (i - 1) % 2, math.floor((i - 1) / 2)
+        c:SetPoint("TOPLEFT", page, "TOPLEFT", col * (cw + gap), -row * (Welcome.BAR_CARD_H + gap))
+        c.title = W.Font(c.inner, W.TITLE, SIZE.head, C.value)
+        c.title:SetPoint("TOPLEFT", c.inner, "TOPLEFT", pad, -pad)
+        local label = BarFx.STYLES[key]
+        c.title:SetText(type(label) == "function" and label() or label)
+        c.text = Cards.Text(c, L[lines[key]])
+        c.text:SetPoint("TOPLEFT", c.title, "BOTTOMLEFT", 0, -4)
+        c.text:SetPoint("RIGHT", c.inner, "RIGHT", -pad, 0)
+        c.sample = BarFx.Sample(c.inner, { "health" }, { force = key, bare = true, height = Welcome.BAR_H })
+        c.sample.frame:SetPoint("BOTTOMLEFT", c.inner, "BOTTOMLEFT", pad, pad)
+        -- The accent instead of the health colors, read each time the slide
+        -- shows: the player can change it any time.
+        local holder = c.sample.bars[1]
+        function holder.Paint()
+            Style.PaintAccentBar(holder.bar)
+            Style.AngleFill(holder.bar, "right", math.max(2, (holder:GetHeight() or 12) * 0.5))
+        end
+        holder:SetScript("OnSizeChanged", holder.Paint)
+        c.sample.Refresh(cw - 2 * pad + 8)
+        page.cards[i] = c
+    end
+    function page.Refresh()
+        for _, c in ipairs(page.cards) do
+            c.sample.bars[1].Paint()
+            c.sample.Apply()
+        end
+    end
+    local rows = math.ceil(#page.cards / 2)
+    page:SetHeight(rows * Welcome.BAR_CARD_H + math.max(0, rows - 1) * gap)
+    function page.Play()
+        local M = DUI.Motion
+        for i, c in ipairs(page.cards) do
+            DUI.Win.Feel.Piece(c, i * Welcome.STAGGER, M.SLOW, Welcome.LIFT)
+        end
+    end
+    return page
+end
+
 -- Moving between slides
 
 function Welcome.Go(i)
@@ -422,6 +556,8 @@ function Welcome.Go(i)
     if not page then
         if kind == "news" then
             page = buildNews(UI.Body(), UI.ContentWidth(false))
+        elseif kind == "barFx" then
+            page = buildBarFx(UI.Body(), UI.ContentWidth(true))
         else
             page = buildChoice(UI.Body(), UI.ContentWidth(true), kind)
         end
@@ -431,15 +567,22 @@ function Welcome.Go(i)
     if kind == "news" then
         UI.SetPage(page, { full = true, veil = true, still = true, dir = dir })
     else
-        local spec = Looks.KINDS[kind]
+        local show = Welcome.SHOWS[kind]
+        local spec = show or Looks.KINDS[kind]
+        -- A lone slide (only Proc Alerts are new) needs no "Step 1 of 1".
+        local first = run.slides[1] == "news" and 1 or 0
+        local total = #run.slides - first
         UI.SetPage(page, {
-            dir = dir, rail = true, veil = true, still = true, step = i - 1, total = #run.slides - 1,
-            title = L[spec.title], desc = L[spec.desc], later = Looks.Later(kind), back = true,
-            next = run.picks[kind] ~= nil and nextText(i) or nil,
+            dir = dir, rail = true, veil = true, still = true, step = total > 1 and i - first or nil, total = total,
+            title = L[spec.title], desc = L[spec.desc], back = i > 1,
+            later = show and show.later() or Looks.Later(kind),
+            laterSay = show and L[show.laterSay] or nil, laterKey = show and show.laterKey or nil,
+            next = (not needsPick(kind) or run.picks[kind] ~= nil) and nextText(i) or nil,
         })
         local steps = {}
         for n, s in ipairs(run.slides) do
-            steps[n] = { id = n, label = s == "news" and L["What's new"] or L[Looks.KINDS[s].rail or Looks.KINDS[s].title] }
+            local k = Welcome.SHOWS[s] or Looks.KINDS[s]
+            steps[n] = { id = n, label = s == "news" and L["What's new"] or L[k.rail or k.title] }
         end
         UI.SetRail(steps, i, run.visited, Welcome.Go)
     end
@@ -455,7 +598,7 @@ function Welcome.Next()
     if not run then return end
     if run.at < #run.slides then
         local kind = run.slides[run.at]
-        if kind ~= "news" and run.picks[kind] == nil then return end
+        if needsPick(kind) and run.picks[kind] == nil then return end
         return Welcome.Go(run.at + 1)
     end
     Welcome.Finish()
@@ -469,7 +612,7 @@ function Welcome.Finish()
         return
     end
     for n, kind in ipairs(run.slides) do
-        if kind ~= "news" and run.picks[kind] == nil then return Welcome.Go(n) end
+        if needsPick(kind) and run.picks[kind] == nil then return Welcome.Go(n) end
     end
     local picks = run.picks
     run = nil
@@ -484,16 +627,20 @@ function Welcome.OnClosed()
     run = nil
 end
 
--- False when the guide's window is busy with something else.
-function Welcome.Show()
+-- False when the guide's window is busy with something else. after = the
+-- welcome this account saw, to show only what came since (at login); nil
+-- shows every slide (/dui welcome).
+function Welcome.Show(after)
     if run then return true end
     if InCombatLockdown() then
-        DUI.AfterCombat(Welcome.Show, "welcome")
+        DUI.AfterCombat(function() Welcome.Show(after) end, "welcome")
         return true
     end
     local UI = DUI.InstallerUI
     if UI.IsShown() then return false end
-    run = { slides = slides(), picks = {}, pages = {}, visited = {} }
+    local list = slides(after)
+    if #list == 0 then return true end
+    run = { slides = list, picks = {}, pages = {}, visited = {} }
     UI.Open({
         width = Welcome.WIDTH, height = Welcome.HEIGHT, lit = true,
         close = Welcome.OnClosed,
@@ -510,7 +657,7 @@ local function atLogin()
     if not Welcome.Due() then return end
     -- The welcome asks about portraits itself.
     DUI.DB.Root().portraitLookAsked = true
-    if Welcome.Show() then return end
+    if Welcome.Show(seen()) then return end
     tries = tries + 1
     if tries < Welcome.TRIES then C_Timer.After(Welcome.WAIT, atLogin) end
 end
@@ -523,4 +670,7 @@ DUI.RegisterEvent("PLAYER_LOGIN", function()
 end)
 
 DUI.RegisterCommand("welcome", function() Welcome.Show() end,
-    L["/dui welcome - what's new in Daylight UI 2.0, and the new portraits and tooltips to pick from"])
+    function() return L["/dui welcome - what's new in Daylight UI 2.0, and the new looks and Proc Alerts to pick from"] end)
+-- Only the slides this version's welcome added.
+DUI.RegisterCommand("whatsnew", function() Welcome.Show(Welcome.VERSION - 1) end,
+    function() return L["/dui whatsnew - the newest slides of the welcome, like the new bar animations"] end)

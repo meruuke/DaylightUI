@@ -50,6 +50,33 @@ Panel.LINE_SPACING = 3 -- between the lines of a wrapped sentence
 
 local panels = setmetatable({}, { __mode = "k" }) -- tooltip -> panel
 
+-- Whether a card switch is on (a missing one is: every one defaults on).
+function Panel.Wants(key)
+    local c = ns.Tooltip.Config()
+    return not (type(c) == "table" and DUI.DB.GetPath(c, key) == false)
+end
+
+-- Compact rows (the "Row spacing" setting): every card's rows and rules
+-- closer together.
+Panel.COMPACT_ROW_GAP, Panel.COMPACT_RULE_GAP = 3, 6
+function Panel.Compact()
+    local c = ns.Tooltip.Config()
+    return type(c) == "table" and c.cardRows == "compact"
+end
+
+-- The cards' width setting (times each kind's own width).
+function Panel.WidthScale()
+    local c = ns.Tooltip.Config()
+    local k = type(c) == "table" and tonumber(c.cardWidth) or 1
+    return math.max(0.8, math.min(1.3, k or 1))
+end
+
+-- The cut corner, unless switched off.
+function Panel.Cut(p)
+    local cut = Panel.Wants("cardCut") and Panel.CUT or 0
+    if Style.GetCut(p) ~= cut then Style.CutShell(p, cut) end
+end
+
 local function W() return DUI.Widgets end
 local function font() return ns.MEDIA and ns.MEDIA.font end
 
@@ -187,6 +214,9 @@ function Panel.For(tip)
     p:EnableMouse(false)
     p:Hide()
     p.tip = tip
+    -- The tooltip's own X (a clicked link) follows the card as it comes and goes.
+    p:HookScript("OnShow", function() ns.Tooltip.PlaceClose(tip, true) end)
+    p:HookScript("OnHide", function() ns.Tooltip.PlaceClose(tip, false) end)
     p.shell = Style.Shell(p, { look = ns.Tooltip.LOOK, cornerPx = 0, noBevel = true, bgAlpha = ns.Tooltip.BackAlpha("rich") })
     Style.CutShell(p, Panel.CUT)
     -- The top light: two pieces, so a quality light can fade out along its
@@ -501,9 +531,12 @@ end
 
 -- A label on the left, its value on the right. s: their text size (body);
 -- valueSize lets the value stand out bigger than its label (a sell price).
-function Panel.Row(p, label, value, valueColor, labelColor, s, valueSize)
-    local item = add(p, { kind = "row" })
-    item.label = text(p, s or Style.SIZE.body, labelColor or Style.INK.LABEL)
+-- wrap: a label too long for its room wraps onto more lines instead of being cut
+-- (not a secret one, which can't be measured).
+function Panel.Row(p, label, value, valueColor, labelColor, s, valueSize, wrap)
+    wrap = wrap and type(label) == "string" and not isSecret(label)
+    local item = add(p, { kind = "row", wrap = wrap or nil, words = label })
+    item.label = text(p, s or Style.SIZE.body, labelColor or Style.INK.LABEL, wrap)
     item.label:SetText(label or "")
     if value and value ~= "" then
         item.value = text(p, valueSize or s or Style.SIZE.body, valueColor or Style.INK.VALUE)
@@ -757,6 +790,26 @@ local function longestWord(fs, text)
     return best
 end
 
+-- How many lines a text takes wrapped at room, word by word as the client
+-- wraps it, measured on the fs itself (its text put back after). At least 2:
+-- it's only asked once the text is already too wide for one.
+Panel.TITLE_LINES = 3
+local function wrappedLines(fs, text, room)
+    if type(text) ~= "string" then return 2 end
+    local lines, row = 1, ""
+    for word in text:gmatch("%S+") do
+        local try = row == "" and word or (row .. " " .. word)
+        fs:SetText(try)
+        if row ~= "" and widthOf(fs) > room then
+            lines, row = lines + 1, word
+        else
+            row = try
+        end
+    end
+    fs:SetText(text)
+    return math.max(2, lines)
+end
+
 function place.header(p, item, y, inner)
     local x = padX(p)
     local spec, h = item.spec, 0
@@ -799,11 +852,14 @@ function place.header(p, item, y, inner)
         end
     end
     if not isSecret(item.spec.title) and widthOf(item.title) > room + 1 then
+        -- As many lines as its words need (a book page's long name on a narrow
+        -- card took three), so it never ends in "...".
+        local lines = math.min(Panel.TITLE_LINES, wrappedLines(item.title, item.spec.title, room))
         item.title:SetWidth(room)
         item.title:SetWordWrap(true)
-        item.title:SetMaxLines(2)
+        item.title:SetMaxLines(lines)
         item.title:SetSpacing(Panel.LINE_SPACING)
-        th = 2 * one + Panel.LINE_SPACING
+        th = lines * one + (lines - 1) * Panel.LINE_SPACING
     end
     -- Everything under the title has the room right of the icon, the whole way.
     local wide = inner + padX(p) - x
@@ -908,7 +964,19 @@ function place.row(p, item, y, inner)
     if item.value then
         item.value:SetPoint("TOPRIGHT", p, "TOPRIGHT", -padX(p), -y)
         local room = inner - widthOf(item.value) - Panel.ROW_GAP_X
-        if widthOf(item.label) > room + 1 then item.label:SetWidth(math.max(1, room)) end
+        if widthOf(item.label) > room + 1 then
+            item.label:SetWidth(math.max(1, room))
+            -- A secret label can't be measured or split into words: it stays cut.
+            if item.wrap and type(item.words) == "string" and not isSecret(item.words) then
+                local sh = item.label:GetStringHeight()
+                if type(sh) == "number" and not isSecret(sh) and sh > h then
+                    h = sh
+                else
+                    local lines = wrappedLines(item.label, item.words, room)
+                    h = lines * h + (lines - 1) * Panel.LINE_SPACING
+                end
+            end
+        end
         -- A bigger value: the label sits on the same baseline, not up at its top.
         local vh = lineHeight(item.value.size, item.value.slot)
         if vh > h then drop, h = vh - h, vh end
@@ -1063,7 +1131,8 @@ function Panel.Finish(p)
     p:SetScale(Panel.Scale())
     local widest = 0
     for i = 1, p.count do widest = math.max(widest, natural(p.items[i])) end
-    local most = Panel.WIDTH[p.kind] or Panel.WIDTH.other
+    local most = (Panel.WIDTH[p.kind] or Panel.WIDTH.other) * Panel.WidthScale()
+    if Panel.Compact() then p.rowGap, p.ruleGap = Panel.COMPACT_ROW_GAP, Panel.COMPACT_RULE_GAP end
     -- Rounded up: a card a fraction short of its widest text cut it with "...".
     local w = math.ceil(math.min(most, math.max(Panel.MIN_W, widest + 2 * padX(p))))
     if Panel.FIXED[p.kind] then
@@ -1082,13 +1151,16 @@ function Panel.Finish(p)
         -- Rows sit ROW_GAP apart; a rule or a gap brings its own room.
         if last and SPACED[item.kind] ~= false and SPACED[last] ~= false then y = y + rowGap end
         item.y = y
-        y = y + place[item.kind](p, item, y, inner)
+        -- Its height, for the Design sample's hotspots (Rich/Design.lua).
+        item.tall = place[item.kind](p, item, y, inner)
+        y = y + item.tall
         last = item.kind
     end
     measuring = nil
     local h = math.floor(y + Panel.PAD_BOTTOM + 0.5)
     p.wantW, p.wantH = w, h
     Panel.Pin(p)
+    Panel.Cut(p)
     alignTags(p)
     -- Where the game puts the tooltip may come a frame later.
     C_Timer.After(0, function() if p:IsShown() then alignTags(p) end end)
@@ -1106,7 +1178,7 @@ function Panel.PaintLight(p)
     local a, b = p.light[1], p.light[2]
     -- A plugin painting the light (API Paint "tooltip", owns "light") colors it.
     if Panel.Owned("light") then return end
-    if not pair then
+    if not pair or not Panel.Wants("cardLight") then
         a:Hide()
         b:Hide()
         return
@@ -1150,7 +1222,7 @@ function Panel.PaintWash(p)
             break
         end
     end
-    if not (c and header and header.kind == "header") then
+    if not (c and header and header.kind == "header") or not Panel.Wants("cardWash") then
         a:Hide()
         b:Hide()
         return
@@ -1190,7 +1262,7 @@ end
 Panel.SWEEP_LIFT = 0.5
 function Panel.Sweep(p, c)
     local M = DUI.Motion
-    if InCombatLockdown() or not (p.lightPair and type(c) == "table" and M.On()) then return end
+    if InCombatLockdown() or not (p.lightPair and type(c) == "table" and M.On() and Panel.Wants("cardLight")) then return end
     local k = Panel.SWEEP_LIFT
     local r, g, b = c[1] + (1 - c[1]) * k, c[2] + (1 - c[2]) * k, c[3] + (1 - c[3]) * k
     local left, right = p.sweep.halves[1], p.sweep.halves[2]
@@ -1247,8 +1319,9 @@ end
 function Panel.Chrome(p)
     Panel.Begin(p, p.kind, p.lightPair, p.lightFade)
     p.chrome = true
-    p.wantW, p.wantH = nil, nil
+    p.wantW, p.wantH, p.padded = nil, nil, nil
     if p.pinned then Panel.Stretch(p, p.tip) end
+    Panel.Cut(p)
     Panel.PaintLight(p)
     Panel.PaintWash(p)
     p:Show()
@@ -1271,15 +1344,34 @@ function Panel.Fit(p)
     -- The card's size in the tooltip's own units.
     local k = p:GetScale() or 1
     local dw, dh = p.wantW * k - w, p.wantH * k - h
-    if math.abs(dw) < 0.5 and math.abs(dh) < 0.5 then return true end
+    local r, b, l, t = tip:GetPadding()
+    r, b, l, t = tonumber(r) or 0, tonumber(b) or 0, tonumber(l) or 0, tonumber(t) or 0
+    if math.abs(dw) < 0.5 and math.abs(dh) < 0.5 then
+        p.padded = { r, b }
+        return true
+    end
     -- Tried once already this fill and it didn't move: the client won't take
     -- that padding. Leave it rather than ask every frame.
     if p.fitTried and math.abs(p.fitTried[1] - w) < 0.5 and math.abs(p.fitTried[2] - h) < 0.5 then return true end
-    local r, b, l, t = tip:GetPadding()
-    r, b, l, t = tonumber(r) or 0, tonumber(b) or 0, tonumber(l) or 0, tonumber(t) or 0
     tip:SetPadding(r + dw, b + dh, l, t)
     p.fitTried = { w, h }
+    p.padded = { r + dw, b + dh }
     return true
+end
+
+-- The tooltip was hidden and shown again in one frame (an owner's refill
+-- starts with SetOwner, which hides it), and the game cleared its padding on
+-- the way. The client takes a new padding only when it lays the frame out,
+-- so the size read back is still the old one and measuring finds nothing to
+-- fix: the cleared padding would win and draw the tooltip at its bare lines'
+-- size for a frame, its compare tooltips jumping with its edge. The padding it
+-- had goes back first; the fit then corrects it if the content changed.
+function Panel.KeepSize(p)
+    local kept = p and p.padded
+    if not kept then return end
+    local tip = p.tip
+    local _, _, l, t = tip:GetPadding()
+    tip:SetPadding(kept[1], kept[2], tonumber(l) or 0, tonumber(t) or 0)
 end
 
 -- ---------------------------------------------------------------------
@@ -1377,7 +1469,8 @@ end
 function Panel.Release(p)
     if not p then return end
     Panel.Unmute(p)
-    if p.fitTried then
+    -- p.padded stays: a show in the same frame puts it back (Panel.KeepSize).
+    if p.fitTried or p.padded then
         local tip = p.tip
         local _, _, l, t = tip:GetPadding()
         tip:SetPadding(0, 0, tonumber(l) or 0, tonumber(t) or 0)

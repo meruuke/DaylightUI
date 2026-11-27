@@ -46,7 +46,8 @@ local sections, pages = {}, {}
 
 local KNOWN = { toggle = true, slider = true, dropdown = true, button = true, text = true, custom = true, color = true, gradient = true }
 local VALUE = { toggle = true, slider = true, dropdown = true, color = true, gradient = true }
-local UNITS = { ["%"] = true, px = true, x = true }
+-- s = seconds, c = copper.
+local UNITS = { ["%"] = true, px = true, x = true, s = true, c = true }
 Options.VALUE = VALUE
 
 -- Runs on every page at login, so it allocates nothing for valid items.
@@ -74,6 +75,16 @@ function Options.Validate(items, defaults, errors, where)
             if type(item.func) ~= "function" then fail("button without func") end
         elseif item.type == "custom" then
             if type(item.build) ~= "function" then fail("custom without build") end
+        elseif item.ends ~= nil then
+            -- A bar end's menu (Options.EndRows): two switches behind one dropdown.
+            local e = item.ends
+            if item.type ~= "dropdown" or type(e) ~= "table" or (e.side ~= "left" and e.side ~= "right") then
+                fail("ends needs a dropdown and a side")
+            elseif item.key ~= e.on then
+                fail("ends: key is not its angled switch")
+            elseif type(DUI.DB.GetPath(defaults, e.on)) ~= "boolean" or type(DUI.DB.GetPath(defaults, e.flip or "")) ~= "boolean" then
+                fail("ends: " .. tostring(e.on) .. " or " .. tostring(e.flip) .. " has no true/false default")
+            end
         elseif VALUE[item.type] and (item.get or item.set) then
             if type(item.get) ~= "function" or type(item.set) ~= "function" then fail("get without set")
             elseif item.default ~= nil and type(item.default) ~= "function" then fail("default is not a function") end
@@ -296,7 +307,42 @@ end
 -- "Show X" without changing anyone's saved value.
 local function saved(page, item)
     if item.get then return item.get() end
+    local e = item.ends
+    if e then
+        return DUI.Style.EndGlyph(e.side, DUI:Get(page.scope, Options.Key(page, e.on)),
+            DUI:Get(page.scope, Options.Key(page, e.flip)))
+    end
     return DUI:Get(page.scope, Options.Key(page, item.key))
+end
+
+-- The choices of every bar end's menu, in order.
+Options.END_VALUES = { straight = "Straight", slash = "Leans /", backslash = "Leans \\" }
+Options.END_ORDER = { "straight", "slash", "backslash" }
+
+-- A bar's two end menus, one per end, each read from and written to two
+-- switches: whether that end is angled, and whether it's flipped (its bottom
+-- corner out). o.name names the bar in both labels ("Cast bar"), o.left and
+-- o.right are { on = key, flip = key } plus their own optional disabled,
+-- hidden and note; o.disabled, o.hidden, o.note and o.since apply to both.
+-- Returns the two rows, left first.
+function Options.EndRows(o)
+    local rows = {}
+    for _, side in ipairs({ "left", "right" }) do
+        local e = o[side]
+        local note = (e.note and (" " .. e.note) or "") .. (o.note and (" " .. o.note) or "")
+        local own, all = e.disabled, o.disabled
+        local ownH, allH = e.hidden, o.hidden
+        rows[#rows + 1] = {
+            type = "dropdown", key = e.on, alsoKeys = { e.flip },
+            ends = { side = side, on = e.on, flip = e.flip },
+            label = o.name .. " " .. side .. " end", since = o.since,
+            values = Options.END_VALUES, order = Options.END_ORDER,
+            desc = "Straight, or angled either way. On the right end / puts the top corner out and \\ the bottom one; on the left end it's the other way round. Each end is set on its own." .. note,
+            disabled = (own or all) and function(get) return (all and all(get)) or (own and own(get)) or false end or nil,
+            hidden = (ownH or allH) and function(get) return (allH and allH(get)) or (ownH and ownH(get)) or false end or nil,
+        }
+    end
+    return rows
 end
 
 function Options.Get(page, item)
@@ -327,6 +373,12 @@ function Options.Set(page, item, value)
     local ok
     if item.set then
         ok = item.set(value) ~= false   -- only an explicit false means refused
+    elseif item.ends then
+        -- Straight clears the flip too, so nothing is left saved for that end.
+        local e = item.ends
+        local on, flip = DUI.Style.EndFromGlyph(e.side, value)
+        ok = DUI:Set(page.scope, Options.Key(page, e.flip), flip)
+        ok = DUI:Set(page.scope, Options.Key(page, e.on), on) and ok
     else
         ok = DUI:Set(page.scope, Options.Key(page, item.key), value)
     end
@@ -350,7 +402,15 @@ end
 
 function Options.Default(page, item)
     local d
-    if item.get then d = item.default and item.default() else d = DUI.DB.GetPath(page.defaults or {}, Options.Key(page, item.key)) end
+    if item.get then
+        d = item.default and item.default()
+    elseif item.ends then
+        local e, defaults = item.ends, page.defaults or {}
+        d = DUI.Style.EndGlyph(e.side, DUI.DB.GetPath(defaults, Options.Key(page, e.on)),
+            DUI.DB.GetPath(defaults, Options.Key(page, e.flip)))
+    else
+        d = DUI.DB.GetPath(page.defaults or {}, Options.Key(page, item.key))
+    end
     if item.invert and d ~= nil then return d ~= true end
     return d
 end
@@ -365,8 +425,12 @@ end
 
 local function copyRGB(c) return { c[1], c[2], c[3] } end
 
+-- A row with its own get and item.reset (no default) is changed while
+-- item.isSet() says it holds a value. Its reset clears it to nil.
 function Options.IsDefault(page, item)
-    if not VALUE[item.type] or (item.get and not item.default) then return true end
+    if not VALUE[item.type] then return true end
+    if item.get and item.reset and item.isSet then return not item.isSet() end
+    if item.get and not item.default then return true end
     local v, d = Options.Get(page, item), Options.Default(page, item)
     if type(v) == "number" and type(d) == "number" then return math.abs(v - d) < 1e-6 end
     if item.type == "gradient" and type(v) == "table" and type(d) == "table" then
@@ -378,6 +442,10 @@ end
 
 function Options.ResetItem(page, item)
     if Options.Locked(page, item) or Options.IsDefault(page, item) then return end
+    if item.get and item.reset and not item.default then
+        Options.Set(page, item, nil)
+        return
+    end
     local d = Options.Default(page, item)
     -- Copy colors so the setting never shares the default's table.
     if item.type == "gradient" and type(d) == "table" then
@@ -485,6 +553,31 @@ function Options.NewSinceChoices()
     end
     order[#order + 1] = "none"
     return values, order
+end
+
+-- The languages Daylight UI's text comes in, each named in its own words,
+-- after Automatic (the game's language).
+function Options.LanguageChoices()
+    local names = {}
+    for _, lang in ipairs(DUI.LANGUAGES) do names[lang[1]] = lang[2] end
+    local client = names[DUI.LANGUAGE_FILE[DUI.CLIENT_LOCALE] or DUI.CLIENT_LOCALE]
+    local values = { auto = client and string.format(L["Automatic (%s)"], client) or L["Automatic"] }
+    local order = { "auto" }
+    for _, lang in ipairs(DUI.LANGUAGES) do
+        values[lang[1]] = lang[2]
+        order[#order + 1] = lang[1]
+    end
+    return values, order
+end
+
+-- A language's name drawn in a font that has its letters: the options' own
+-- font may have no Russian, Korean or Chinese ones.
+function Options.LanguageFont(locale)
+    local body = DUI.Widgets.BODY
+    local alphabet = DUI.OptionsTheme.ALPHABET[locale]
+    if not alphabet or locale == DUI.CLIENT_LOCALE then return body end
+    if alphabet == "russian" and DUI.Style.HasCyrillic(body) then return body end
+    return DUI.Style.ALPHABET_FONTS[alphabet]
 end
 
 -- Typing "new" (any case, stray spaces too) also lists every row tagged NEW.
@@ -1239,6 +1332,15 @@ Options.RegisterPage({
         { label = "", items = { GREETING } },
         { label = "", items = { SHARED_PROFILES } },
         { label = "Quick actions", items = { PREVIEW, UNLOCK, RESET_POSITIONS, SETUP, TOUR } },
+        { label = "Language", items = {
+            { type = "dropdown", label = "Daylight UI's language", since = "2.2.5", reload = true,
+              search = "Language Translation",
+              desc = "The language of Daylight UI's own text: these options, the setup guide and its frames. "
+                  .. "The game's own text, such as spell and item names, stays in your game's language. Shows after a /reload.",
+              choices = Options.LanguageChoices, preview = "font", fetch = Options.LanguageFont,
+              get = function() return DUI.DB.Root().language or "auto" end,
+              set = function(v) DUI.DB.Root().language = v ~= "auto" and v or nil end },
+        } },
         { label = "New options", items = {
             { type = "dropdown", label = "Show NEW on options added since", noSearch = true,
               desc = "Rows added after this version carry a NEW tag as you go through the pages. Search for new to list them all.",
@@ -1482,7 +1584,7 @@ local function barFxItems(spec, c)
           hidden = function(get) return get(base .. "colors") ~= "custom" end, disabled = none,
           desc = "The other end of the custom pair." },
         { type = "toggle", key = base .. "react", label = "React to hits and heals", since = "1.8.5",
-          hidden = function() return c.kind ~= "health" end, disabled = none, desc = "Animations that react (Tide) move with every heal and hit. When off, they keep their steady pace." },
+          hidden = function() return c.kind ~= "health" end, disabled = none, desc = "Animations that react (Tide, Daybreak) move with every heal and hit. When off, they keep their steady pace." },
         { type = "slider", key = base .. "reactSize", label = "Reaction size", min = 0.25, max = 2, step = 0.05, unit = "x", since = "1.8.5",
           hidden = function() return c.kind ~= "health" end, disabled = function(get) return none(get) or get(base .. "react") == false end,
           desc = "How big a reaction is. The game doesn't say how big a hit or heal was, so every one moves the same." },

@@ -133,8 +133,10 @@ ns.DEFAULTS = {
     lootFeedNameColor = "quality", -- quality | white
     lootFeedBack = true,    -- the ribbon's background
     lootFeedFrame = DaylightUI.Style.LookDefaults(), -- border, shadow and opacity, or General's
-    lootFeedSlant = true,   -- the ribbons' angled ends; off = straight
-    lootFeedSlantSide = "both", -- which ends are angled: both | left | right
+    -- Each end of the ribbons on its own: angled or straight, and flipped
+    -- against the lean it has (parallel ends, leaning with the side the feed
+    -- lines up on). A core step split the old lootFeedSlant / lootFeedSlantSide.
+    lootFeedLeft = true, lootFeedRight = true, lootFeedFlipLeft = false, lootFeedFlipRight = false,
     lootFeedBorderColor = "normal", -- normal | quality | accent | custom
     lootFeedBorderCustom = { DaylightUI.Style.ACCENT[1], DaylightUI.Style.ACCENT[2], DaylightUI.Style.ACCENT[3] },
     lootFeedShine = true,   -- the light that runs across a new line
@@ -164,6 +166,25 @@ ns.DEFAULTS = {
     sewingScene = true,     -- a spool, a tide of cloth and a growing seam while you tailor (Fishing.lua)
     levelUp = true,         -- the level-up animation, in place of the game's banner (LevelUp.lua)
     zoneTitle = true,       -- the zone title animation, in place of the game's zone text (ZoneTitle.lua)
+    zoneTitleSub = true,    -- the subzone under the name
+    zoneTitlePvP = true,    -- the PvP line (Contested Territory...)
+    zoneTitleSubAlone = true, -- a subzone change on its own shows its name, small
+    zoneTitleCaps = false,  -- the name in capitals
+    zoneTitleHold = 2.5,    -- seconds the whole title stays
+    zoneTitleColor = "accent", -- accent | zone (its PvP color) | white | custom
+    zoneTitleColorCustom = { DaylightUI.Style.ACCENT[1], DaylightUI.Style.ACCENT[2], DaylightUI.Style.ACCENT[3] },
+    zoneTitleLineColor = "name", -- name (follows it) | accent | zone | white | custom
+    zoneTitleLineColorCustom = { DaylightUI.Style.ACCENT[1], DaylightUI.Style.ACCENT[2], DaylightUI.Style.ACCENT[3] },
+    zoneTitleSubColor = "label", -- label (tan) | name | accent | white | custom
+    zoneTitleSubColorCustom = { DaylightUI.Style.INK.LABEL[1], DaylightUI.Style.INK.LABEL[2], DaylightUI.Style.INK.LABEL[3] },
+    zoneTitlePvPColor = "zone",  -- zone (its PvP color) | label | white | custom
+    zoneTitlePvPColorCustom = { DaylightUI.Style.INK.TEXT[1], DaylightUI.Style.INK.TEXT[2], DaylightUI.Style.INK.TEXT[3] },
+    zoneTitleFont = DaylightUI.Media.GENERAL, -- its own font, or General's (Media slot qol.zone.font)
+    zoneTitleNameSize = 26,
+    zoneTitleSubSize = 15,
+    zoneTitleShine = true,  -- a light runs across the name as it lands
+    zoneTitleHaze = false,  -- a soft haze behind the name
+    zoneTitleGem = false,   -- a small diamond in the middle of the line
     repBanner = true,       -- a reputation standing gone up shows at the top of the screen (RepBanner.lua)
     campfire = true,        -- sitting by a campfire warms the screen and hushes bars and unit frames (Campfire.lua)
     campfireAll = true,     -- the campfire fades every Daylight UI area (buffs, info panel, quests, chat...), not just bars and unit frames
