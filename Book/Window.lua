@@ -34,6 +34,8 @@ ns.Window = Book
 
 Book.NAME = "DaylightUIBook"
 Book.SIZE = { spells = { 600, 600 }, talents = { 720, 563 }, training = { 600, 600 } }
+-- Retail's class, hero and spec trees side by side need about twice the width.
+if (select(4, GetBuildInfo()) or 0) >= 100000 then Book.SIZE.talents = { 1240, 660 } end
 Book.TOP = -104   -- fallback when there's no game frame to read: the game's center panel spot
 
 -- Fallback class icons from the core media, used when the UnitFrames module

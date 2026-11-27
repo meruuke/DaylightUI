@@ -420,7 +420,7 @@ function Texts.AddKind(spec)
             end
             if not pluginEvents[event] then
                 pluginEvents[event] = {}
-                DUI.SafeCall(eventFrame.RegisterEvent, eventFrame, event)
+                DUI.SafeRegister(eventFrame, "RegisterEvent", event)
             end
             pluginEvents[event][key] = true
         end

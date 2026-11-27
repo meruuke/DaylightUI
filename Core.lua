@@ -337,6 +337,18 @@ function DUI.SafeCall(fn, ...)
     return report(xpcall(fn, withStack, ...))
 end
 
+-- frame:RegisterEvent / RegisterUnitEvent (method) for an event this client
+-- may not have, such as UNIT_HAPPINESS or COMBO_TARGET_CHANGED on retail.
+-- An event the client doesn't know is skipped quietly instead of reported.
+function DUI.SafeRegister(frame, method, event, ...)
+    local valid = C_EventUtils and C_EventUtils.IsEventValid
+    if type(valid) == "function" then
+        local ok, known = pcall(valid, event)
+        if ok and known == false then return false end
+    end
+    return DUI.SafeCall(frame[method], frame, event, ...)
+end
+
 -- Keeps an error for /dui bug without handing it to the error handler: for a
 -- failure that already has its own one-line message (another addon's window
 -- changed and its skin was left off), where an error box would only blame

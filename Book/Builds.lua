@@ -134,8 +134,184 @@ function Builds.Load(build)
     return staged
 end
 
+-- ---------------------------------------------------------------------
+-- Retail: the game's own loadouts (C_ClassTalents), handled the way
+-- Blizzard_ClassTalentsFrame.lua does. Builds above stay for Forever.
+-- ---------------------------------------------------------------------
+
+local function retail() return ns.TalentData and ns.TalentData.RETAIL end
+local function CT() return type(C_ClassTalents) == "table" and C_ClassTalents or nil end
+local function trim(s) return type(s) == "string" and string.match(s, "^%s*(.-)%s*$") or "" end
+
+local function specID()
+    local id = type(PlayerUtil) == "table" and call(PlayerUtil.GetCurrentSpecID)
+    if type(id) == "number" then return id end
+    local S = C_SpecializationInfo
+    local index = type(S) == "table" and call(S.GetSpecialization) or call(GetSpecialization)
+    id = index and (type(S) == "table" and call(S.GetSpecializationInfo, index) or call(GetSpecializationInfo, index))
+    return type(id) == "number" and id or nil
+end
+
+-- The spec's saved loadouts, in the game's order: { { id, name } }.
+function Builds.Loadouts()
+    local C, spec, out = CT(), specID(), {}
+    local ids = C and spec and call(C.GetConfigIDsBySpecID, spec)
+    for _, id in ipairs(type(ids) == "table" and ids or {}) do
+        local info = call(C_Traits.GetConfigInfo, id)
+        if type(info) == "table" then out[#out + 1] = { id = id, name = info.name or "" } end
+    end
+    return out
+end
+
+-- The loadout the game shows as selected, or nil (none, or not retail).
+function Builds.Selected()
+    if not retail() then return nil end
+    local C, spec = CT(), specID()
+    local id = C and spec and call(C.GetLastSelectedSavedConfigID, spec)
+    return type(id) == "number" and id or nil
+end
+
+local function nameOf(id)
+    local info = id and call(C_Traits.GetConfigInfo, id)
+    return type(info) == "table" and info.name or ""
+end
+
+local function markSelected(id)
+    local C, spec = CT(), specID()
+    if C and spec then pcall(C.UpdateLastSelectedSavedConfigID, spec, id) end
+end
+
+-- Switch to a loadout and apply it. Returns ok and "same", "loading",
+-- "ready" (staged, Apply finishes it) or, when not ok, why.
+function Builds.LoadSaved(id)
+    if InCombatLockdown() then return false, ERR_NOT_IN_COMBAT or L["Not in combat."] end
+    if ns.Spend.committing then return false, L["Wait for the talents being applied."] end
+    local C = CT()
+    if not (C and id) then return false end
+    if ns.Spend.HasChanges() then ns.Spend.Undo() end
+    local ok, result, err = pcall(C.LoadConfig, id, true)
+    if not ok then return false, tostring(result) end
+    local R = type(Enum) == "table" and Enum.LoadConfigResult or {}
+    if result == (R.Error or 0) then
+        return false, type(err) == "string" and err ~= "" and err or L["That loadout can't be loaded right now."]
+    end
+    markSelected(id)
+    if result == (R.LoadInProgress or 2) then ns.Spend.Begin(); return true, "loading" end
+    if ns.Talents then ns.Talents.Soon() end
+    if result == (R.Ready or 3) then return true, "ready" end
+    return true, "same"
+end
+
+local function sayLoaded(id, ok, how)
+    local name = nameOf(id)
+    if not ok then Builds.Say(how or L["That loadout can't be loaded right now."], true)
+    elseif how == "loading" then Builds.Say(string.format(L["Switching to %s..."], name))
+    elseif how == "ready" then Builds.Say(string.format(L["%s is ready: Apply to learn it."], name))
+    else Builds.Say(string.format(L["Now using %s."], name)) end
+end
+
+-- A new loadout from the talents you have now. The game answers with
+-- TRAIT_CONFIG_CREATED; the new loadout is then selected.
+function Builds.NewLoadout(name)
+    name = trim(name)
+    if name == "" then return false, L["Give it a name."] end
+    local C = CT()
+    if not (C and call(C.CanCreateNewConfig)) then
+        return false, TALENT_FRAME_NEW_LOADOUT_DISABLED_TOOLTIP or L["You have as many loadouts as the game allows."]
+    end
+    if call(C.RequestNewConfig, name) ~= true then return false, L["The game refused the new loadout."] end
+    Builds.creating = true
+    return true
+end
+
+function Builds.RenameLoadout(id, name)
+    name = trim(name)
+    local C = CT()
+    if name == "" or not (C and id) then return false, L["Give it a name."] end
+    call(C.RenameConfig, id, name)
+    return true
+end
+
+function Builds.DeleteLoadout(id)
+    local C = CT()
+    if not (C and id) then return false end
+    local was = Builds.Selected() == id
+    call(C.DeleteConfig, id)
+    if was then markSelected(nil) end
+    return true
+end
+
+-- The game's own loadout string code (Blizzard_ClassTalentImportExport.lua),
+-- pointed at the active config instead of the game's talent frame.
+local function gameIO()
+    if type(ClassTalentImportExportMixin) ~= "table" then
+        local load = (type(C_AddOns) == "table" and C_AddOns.LoadAddOn) or LoadAddOn
+        pcall(load, "Blizzard_PlayerSpells")
+    end
+    local M = ClassTalentImportExportMixin
+    if type(M) ~= "table" or type(CreateFromMixins) ~= "function" then return nil end
+    local configID = ns.Spend.Config()
+    local info = configID and call(C_Traits.GetConfigInfo, configID)
+    local treeID = type(info) == "table" and type(info.treeIDs) == "table" and info.treeIDs[1]
+    if not treeID then return nil end
+    local io = CreateFromMixins(M)
+    io.IsInspecting = function() return false end
+    io.GetConfigID = function() return configID end
+    io.GetTreeInfo = function() return call(C_Traits.GetTreeInfo, configID, treeID) or { ID = treeID } end
+    io.ShowImportError = function(self, text) self.err = text end
+    io.OnTraitConfigCreateStarted = function() end
+    return io
+end
+
+-- Import a pasted string as a new loadout, like the game's Import dialog.
+function Builds.ImportLoadout(text)
+    text = trim(text)
+    if text == "" then return false, LOADOUT_ERROR_BAD_STRING or L["Paste a talent string first."] end
+    local C = CT()
+    if not (C and call(C.CanCreateNewConfig)) then
+        return false, TALENT_FRAME_NEW_LOADOUT_DISABLED_TOOLTIP or L["You have as many loadouts as the game allows."]
+    end
+    local io = gameIO()
+    if not io then return false, L["The game's talent tools aren't available."] end
+    local name = string.format(L["Imported %d"], #Builds.Loadouts() + 1)
+    local ok, took = pcall(io.ImportLoadout, io, text, name)
+    if ok and took then Builds.creating = true; return true end
+    return false, io.err or (not ok and tostring(took)) or LOADOUT_ERROR_IMPORT_FAILED or L["That string didn't import."]
+end
+
+-- A new loadout is ready once the game has filled it (IsConfigPopulated),
+-- as in ClassTalentsFrameMixin:OnEvent.
+local function created(id)
+    Builds.creating, Builds.waitFor = nil, nil
+    local ok, how = Builds.LoadSaved(id)
+    if ok and how == "same" then Builds.Say(string.format(L["Saved %s."], nameOf(id)))
+    else sayLoaded(id, ok, how) end
+end
+
+function Builds.Events()
+    if Builds.listening or not retail() then return end
+    Builds.listening = true
+    DUI.RegisterEvent("TRAIT_CONFIG_CREATED", function(_, info)
+        if not Builds.creating or type(info) ~= "table" then return end
+        local combat = type(Enum) == "table" and Enum.TraitConfigType and Enum.TraitConfigType.Combat or 1
+        if info.type ~= combat then return end
+        if call(CT().IsConfigPopulated, info.ID) == false then Builds.waitFor = info.ID
+        else created(info.ID) end
+    end)
+    DUI.RegisterEvent("TRAIT_CONFIG_UPDATED", function(_, id)
+        if Builds.waitFor and id == Builds.waitFor then created(id) end
+    end)
+end
+
 -- Prefer the client's GenerateImportString, fall back to the encoder here.
 function Builds.Copy()
+    if retail() then
+        local io = gameIO()
+        if io then
+            local ok, text = pcall(io.GetLoadoutExportString, io)
+            if ok and type(text) == "string" and text ~= "" then return text end
+        end
+    end
     local configID = ns.Spend.Config()
     if not configID then return nil end
     local C = type(C_Traits) == "table" and C_Traits or nil
@@ -222,6 +398,15 @@ function Builds.OpenBox(mode)
     if mode == "save" then
         box.title:SetText(L["Save these talents as"])
         box.edit:SetText(string.format(L["Build %d"], #Builds.List() + 1))
+    elseif mode == "new" then
+        box.title:SetText(L["Save these talents as a new loadout"])
+        box.edit:SetText(string.format(L["Loadout %d"], #Builds.Loadouts() + 1))
+    elseif mode == "rename" then
+        box.title:SetText(L["Rename this loadout"])
+        box.edit:SetText(nameOf(Builds.Selected()))
+    elseif mode == "import" then
+        box.title:SetText(L["Paste a talent string to import as a new loadout"])
+        box.edit:SetText("")
     elseif mode == "copy" then
         box.title:SetText(L["Talent string: press Ctrl+C to copy"])
         box.edit:SetText(Builds.Copy() or "")
@@ -248,7 +433,19 @@ function Builds.Confirm()
     if not (box and DUI.Motion.Shown(box)) then return end
     local text = box.edit:GetText() or ""
     local warn = DUI.Tips.WARN
-    if box.mode == "save" then
+    if box.mode == "new" or box.mode == "rename" or box.mode == "import" then
+        local ok, why
+        if box.mode == "new" then ok, why = Builds.NewLoadout(text)
+        elseif box.mode == "rename" then ok, why = Builds.RenameLoadout(Builds.Selected(), text)
+        else ok, why = Builds.ImportLoadout(text) end
+        if ok then
+            Builds.CloseBox()
+            if box.mode == "rename" then Builds.Say(string.format(L["Renamed to %s."], trim(text))) end
+        else
+            box.note:SetText(why or L["Nothing to change."])
+            box.note:SetTextColor(warn[1], warn[2], warn[3], 1)
+        end
+    elseif box.mode == "save" then
         if Builds.Save(text) then
             Builds.CloseBox()
             Builds.Say(string.format(L["Saved %s."], text))
@@ -271,7 +468,40 @@ function Builds.Confirm()
     end
 end
 
+-- Retail menu: the spec's loadouts (the selected one marked), then actions.
+function Builds.LoadoutMenu(owner)
+    local W = DUI.Widgets
+    local list = Builds.Loadouts()
+    local selected = Builds.Selected()
+    local keys, values = {}, {}
+    for _, l in ipairs(list) do
+        keys[#keys + 1] = l.id
+        values[l.id] = l.name
+    end
+    local function add(k, text) keys[#keys + 1] = k; values[k] = text end
+    add("new", L["New loadout from these talents..."])
+    if selected then add("rename", string.format(L["Rename %s..."], nameOf(selected))) end
+    add("copy", L["Copy talent string"])
+    add("import", L["Import talent string..."])
+    if #list > 0 then add("delete", L["Delete a loadout..."]) end
+    W.OpenMenu(owner, keys, values, selected, function(k)
+        if type(k) == "number" then
+            sayLoaded(k, Builds.LoadSaved(k))
+        elseif k == "delete" then
+            local dk, dv = {}, {}
+            for i, l in ipairs(list) do dk[i] = l.id; dv[l.id] = string.format(L["Delete %s"], l.name) end
+            W.OpenMenu(owner, dk, dv, nil, function(id)
+                local name = nameOf(id)
+                if Builds.DeleteLoadout(id) then Builds.Say(string.format(L["Deleted %s."], name)) end
+            end, 220)
+        else
+            Builds.OpenBox(k)
+        end
+    end, 220)
+end
+
 function Builds.Menu(owner)
+    if retail() then return Builds.LoadoutMenu(owner) end
     local W = DUI.Widgets
     local list = Builds.List()
     local keys, values = {}, {}
@@ -303,13 +533,20 @@ end
 function Builds.Build(page)
     Builds.page = page
     local W = DUI.Widgets
-    local b = W.Button(page, L["Builds"], 24)
-    b:SetWidth(72)
+    local b = W.Button(page, retail() and L["Loadouts"] or L["Builds"], 24)
+    b:SetWidth(retail() and 84 or 72)
     b:SetPoint("RIGHT", page.search, "LEFT", -8, 0)
     b:SetScript("OnClick", function(self) Builds.Menu(self) end)
     b:HookScript("OnEnter", function(self)
-        W.Tooltip(self, L["Builds"], L["Keep these talents under a name and put them back later, or copy and paste a talent string."])
+        if retail() then
+            local using = Builds.Selected()
+            W.Tooltip(self, L["Loadouts"], (using and string.format(L["Using %s."], nameOf(using)) .. "\n" or "")
+                .. L["Switch between your saved talent loadouts, make a new one, or copy and import a talent string."])
+        else
+            W.Tooltip(self, L["Builds"], L["Keep these talents under a name and put them back later, or copy and paste a talent string."])
+        end
     end)
+    Builds.Events()
     b:HookScript("OnLeave", function() W.HideTooltip() end)
     page.builds = b
     page.buildSay = Style.Text(page, Style.SIZE.small, "CENTER")

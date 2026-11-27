@@ -119,6 +119,18 @@ local function makeTile(parent)
     b.icon = b:CreateTexture(nil, "ARTWORK")
     b.icon:SetAllPoints(b)
     Style.CropIcon(b.icon)
+    -- Retail choice node with nothing picked: the second talent's icon on
+    -- the right half, like the game's split icon.
+    b.icon2 = b:CreateTexture(nil, "ARTWORK", nil, 1)
+    b.icon2:SetPoint("TOPLEFT", b, "TOP", 0, 0)
+    b.icon2:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", 0, 0)
+    b.icon2:Hide()
+    b.split = tex(b, "ARTWORK", 2)
+    b.split:SetPoint("TOP", b, "TOP", 0, 0)
+    b.split:SetPoint("BOTTOM", b, "BOTTOM", 0, 0)
+    b.split:SetWidth(1)
+    b.split:SetVertexColor(0, 0, 0, 0.9)
+    b.split:Hide()
     -- Wake flash over the ring, and the Apply shine across the icon.
     b.flash = tex(b, "OVERLAY", 6)
     b.flash:SetPoint("TOPLEFT", b, "TOPLEFT", -3, 3)
@@ -276,6 +288,8 @@ function Talents.PaintTile(b)
     local light = (b.over and 1) or (state == "locked" and 0.36) or (state == "avail" and Talents.AVAIL_LIGHT) or 1
     if b.over and state == "locked" then light = 0.52 end
     b.icon:SetVertexColor(light, light, light, 1)
+    b.icon2:SetDesaturated(state == "locked")
+    b.icon2:SetVertexColor(light, light, light, 1)
     b.badge:SetShown(state ~= "locked")
     b.rank:SetText(string.format("%d/%d", node.rank, node.max))
     local c = Talents.Staged(node) and Talents.STAGED or state == "max" and Talents.FULL or state == "part" and { Style.Pop() } or state == "avail" and Style.INK.LABEL or Style.INK.OFF
@@ -344,6 +358,14 @@ function Talents.Tip(b)
         Tips.Gap()
         Tips.Sub(L["Next rank:"])
         rankText(TD, Tips, node, node.rank + 1)
+    end
+    -- Retail choice node: the options, the picked one marked.
+    if node.options and #node.options > 1 then
+        Tips.Gap()
+        for _, o in ipairs(node.options) do
+            local picked = node.chosen and node.entryID == o.entryID
+            Tips.Text(o.name or "", picked and Talents.FULL or Style.INK.LABEL)
+        end
     end
     local box = b.box
     local data = (box and box.data) or Talents.data
@@ -579,13 +601,41 @@ function Talents.ArrowState(src)
     return Talents.Staged(src) and "staged" or "lit"
 end
 
+-- A file icon or, on retail's hero talents, an atlas. SetAtlas changes the
+-- texture coordinates, so a file icon is cropped again after one.
+local function setIcon(t, icon, atlas, crop)
+    if atlas and pcall(t.SetAtlas, t, atlas) then return true end
+    if icon then
+        t:SetTexture(icon)
+        if crop then Style.CropIcon(t) else t:SetTexCoord(0, 1, 0, 1) end
+        return true
+    end
+    return false
+end
+
+-- Second option's icon on the right half of an unpicked retail choice.
+local function paintSplit(b, node)
+    local o = node.options
+    local split = o and #o > 1 and not node.chosen and not node.heroPick and o[2].icon ~= nil
+    if split then
+        b.icon2:SetTexture(o[2].icon)
+        b.icon2:SetTexCoord(0.5, 0.92, 0.08, 0.92)
+    end
+    b.icon2:SetShown(split and true or false)
+    b.split:SetShown(split and true or false)
+end
+
 function Talents.FillTree(box, t, pitch, size, data, px)
     box.data = data
     box.tree = t
-    if t.icon then box.icon:SetTexture(t.icon) end
-    box.icon:SetShown(t.icon ~= nil)
+    box.icon:SetShown(setIcon(box.icon, t.icon, t.atlas, false))
     box.name:SetText(t.name)
-    box.pts:SetText(tostring(t.spent))
+    if type(t.left) == "number" and t.left > 0 then
+        local p = { Style.Pop() }
+        box.pts:SetText(string.format("%d  %s+%d|r", t.spent, hex(p[1], p[2], p[3]), t.left))
+    else
+        box.pts:SetText(tostring(t.spent))
+    end
     Style.InkText(box.pts, t.spent > 0 and "VALUE" or "OFF")
     box.name:SetTextColor(Talents.TreeColor(box.index or 1, box.token or classToken()))
     local ar, ag, ab = Style.Accent()
@@ -600,7 +650,8 @@ function Talents.FillTree(box, t, pitch, size, data, px)
         local b = tile(box, i)
         if b.node and b.node.id ~= node.id then Talents.StopSweep(b) end
         b.node = node
-        b.icon:SetTexture(node.icon)
+        setIcon(b.icon, node.icon or 134400, node.atlas, true)
+        paintSplit(b, node)
         b.at = { node.col * px, -node.row * pitch }
         b:ClearAllPoints()
         b:SetPoint("TOPLEFT", box.grid, "TOPLEFT", b.at[1], b.at[2])
@@ -626,7 +677,7 @@ function Talents.FillTree(box, t, pitch, size, data, px)
                 -- the same two talents.
                 if a.running and not (a.from and a.from.id == src.id and a.to and a.to.id == to.id) then ns.Arrows.Stop(a) end
                 a.from, a.to = src, to
-                ns.Arrows.Place(a, src, to, pitch, size, px)
+                ns.Arrows.Place(a, src, to, pitch, size, px, data and data.retail)
                 if not a.running then ns.Arrows.Paint(a, Talents.ArrowState(src)) end
                 box.links[n] = a
             end
@@ -746,7 +797,10 @@ local function paintSets(page)
     local shown = Talents.group or active
     local names = { DUAL_SPEC_PRIMARY or L["Primary"], DUAL_SPEC_SECONDARY or L["Secondary"] }
     local x = Talents.EDGE - 2
+    -- Retail has no second talent set (specs and loadouts replace it).
+    local hide = ns.TalentData.RETAIL and count < 2
     for i, b in ipairs(page.sets) do
+        b:SetShown(not hide)
         b.SetOff(i > count)
         b.text:SetText(names[i])
         b.FitWidth(2)
@@ -986,7 +1040,54 @@ end
 
 -- Lay out the trees for a window size: equal shares of the width, with the
 -- pitch fitted to the space.
+-- Retail: class, hero and spec trees side by side, each as wide as its own
+-- columns need (the hero tree is narrow), one pitch for all three, and any
+-- spare width shared out so the boxes fill the page.
+Talents.MIN_BOX = 150
+Talents.TILE_RETAIL = 0.62   -- retail talents sit closer, so smaller tiles leave room for the links
+Talents.MAX_PITCH_RETAIL = 60
+function Talents.LayoutRetail(page, data, ww, wh)
+    local pw, ph = ww, wh - Win.HEADER - 1
+    local n = #data.trees
+    local h = ph - Talents.TOP - Talents.FOOT
+    local units, rows = 0, 1
+    for _, t in ipairs(data.trees) do
+        units = units + (t.cols - 1 + Talents.TILE_RETAIL)
+        if t.rows > rows then rows = t.rows end
+    end
+    local free = pw - 2 * Talents.EDGE - (n - 1) * Talents.GAP - n * 2 * Talents.PAD
+    local pitch = math.floor(math.min(free / math.max(units, 1), (h - Talents.HEAD - Talents.PAD) / (rows - 1 + Talents.TILE_RETAIL), Talents.MAX_PITCH_RETAIL))
+    pitch = math.max(pitch, 12)
+    local size = math.floor(pitch * Talents.TILE_RETAIL)
+    local widths, total = {}, (n - 1) * Talents.GAP
+    for i, t in ipairs(data.trees) do
+        widths[i] = math.max(math.floor((t.cols - 1) * pitch + size + 2 * Talents.PAD), Talents.MIN_BOX)
+        total = total + widths[i]
+    end
+    local extra = math.max(0, math.floor((pw - 2 * Talents.EDGE - total) / n))
+    local x = Talents.EDGE
+    for i, t in ipairs(data.trees) do
+        local box = page.trees[i]
+        if not box then
+            box = Talents.MakeTree(page)
+            page.trees[i] = box
+        end
+        local w = widths[i] + extra
+        box:ClearAllPoints()
+        box:SetPoint("TOPLEFT", page, "TOPLEFT", x, -Talents.TOP)
+        box:SetSize(w, h)
+        box:Show()
+        box.index = i
+        Talents.FillTree(box, t, pitch, size, data, pitch)
+        x = x + w + Talents.GAP
+    end
+    for i = n + 1, #page.trees do page.trees[i]:Hide() end
+    page.foot:SetWidth(pw - 2 * Talents.EDGE - 8)
+    Talents.FitFoot(page)
+end
+
 function Talents.Layout(page, data, ww, wh)
+    if data.retail then return Talents.LayoutRetail(page, data, ww, wh) end
     local pw, ph = ww, wh - Win.HEADER - 1
     local n = #data.trees
     local w = math.floor((pw - 2 * Talents.EDGE - (n - 1) * Talents.GAP) / n)
@@ -1030,7 +1131,10 @@ end
 
 -- Pieces in the order they animate in when the page opens.
 function Talents.Pieces(page)
-    local out = { page.sets[1], page.sets[2], page.builds, page.search }
+    local out = {}
+    for _, b in ipairs(page.sets) do if b:IsShown() then out[#out + 1] = b end end
+    out[#out + 1] = page.builds
+    out[#out + 1] = page.search
     for _, box in ipairs(page.trees) do if box:IsShown() then out[#out + 1] = box end end
     out[#out + 1] = page.foot
     out[#out + 1] = page.actions.frame

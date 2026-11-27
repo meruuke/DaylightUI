@@ -241,8 +241,8 @@ function Happiness.Create(pet)
     -- UNIT_PET fires for every owner the client knows about, party members
     -- included, so only yours counts. UNIT_HAPPINESS stays unfiltered because
     -- the game's source doesn't show which unit token it uses on this client.
-    DUI.SafeCall(h.RegisterEvent, h, "UNIT_HAPPINESS")
-    DUI.SafeCall(h.RegisterUnitEvent, h, "UNIT_PET", "player")
+    DUI.SafeRegister(h, "RegisterEvent", "UNIT_HAPPINESS")
+    DUI.SafeRegister(h, "RegisterUnitEvent", "UNIT_PET", "player")
     h:SetScript("OnEvent", function(self) Happiness.Update(self) end)
     return h
 end

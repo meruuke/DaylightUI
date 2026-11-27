@@ -20,6 +20,12 @@ ns.TalentData = TD
 
 TD.STEP = 600   -- grid spacing between tiles, both axes
 
+-- Retail (interface 100000 and up) has one tree per config with no display
+-- groups: class, spec and hero nodes are told apart by what they cost
+-- (GetNodeCost against GetTreeCurrencyInfo, class first, spec second) and
+-- hero nodes by subTreeID. Forever reports 16001 and keeps its own path.
+TD.RETAIL = (select(4, GetBuildInfo()) or 0) >= 100000
+
 local function call(fn, ...)
     if type(fn) ~= "function" then return nil end
     local ok, a, b, c = pcall(fn, ...)
@@ -50,7 +56,9 @@ function TD.ConfigID(group)
     if type(S) == "table" then
         local id = call(S.GetCombatConfigIDForSpecGroup, group or TD.ActiveGroup())
         if type(id) == "number" then return id end
-        if group then return nil end
+        -- Retail has no GetCombatConfigIDForSpecGroup: the active set still
+        -- has the active config, only another set has none.
+        if group and group ~= TD.ActiveGroup() then return nil end
     end
     if type(C_ClassTalents) == "table" then
         local id = call(C_ClassTalents.GetActiveConfigID)
@@ -91,13 +99,58 @@ local function choicesOf(n)
     if sel and type(n.entryIDs) == "table" and #n.entryIDs > 1 then return n.entryIDs end
 end
 
-local function readNode(C, configID, id, n)
-    local entryID = type(n.activeEntry) == "table" and n.activeEntry.entryID or (type(n.entryIDs) == "table" and n.entryIDs[1]) or nil
+-- Name, icon (file ID or path), atlas and spellID of one entry. A hero tree
+-- choice's entry has no spell, only a subTreeID: its name and atlas come
+-- from GetSubTreeInfo.
+local function entryLook(C, configID, entryID)
     local entry = entryID and call(C.GetEntryInfo, configID, entryID)
+    if type(entry) == "table" and type(entry.subTreeID) == "number" then
+        local sub = call(C.GetSubTreeInfo, configID, entry.subTreeID)
+        if type(sub) == "table" then
+            return type(sub.name) == "string" and sub.name or "", nil, sub.iconElementID, nil, entry.subTreeID
+        end
+    end
     local def = type(entry) == "table" and entry.definitionID and call(C.GetDefinitionInfo, entry.definitionID) or nil
     local spellID = type(def) == "table" and def.spellID or nil
     local name, icon = spellLook(spellID, def)
-    local rank = type(n.ranksPurchased) == "number" and n.ranksPurchased or 0
+    return name, icon, nil, spellID
+end
+
+-- Every entry of a choice node, for its menu and split icon.
+local function optionsOf(C, configID, n)
+    local ids = choicesOf(n)
+    if not ids then return nil end
+    local out = {}
+    for _, entryID in ipairs(ids) do
+        local name, icon, atlas, spellID, subTreeID = entryLook(C, configID, entryID)
+        out[#out + 1] = { entryID = entryID, name = name, icon = icon, atlas = atlas, spellID = spellID, subTreeID = subTreeID }
+    end
+    return out
+end
+
+-- Bought ranks, and the rank to show. Retail counts granted and staged ranks
+-- in currentRank (the game's buttons show it); ranksPurchased stays 0 for a
+-- talent the game hands out for free.
+function TD.MaxOf(n) return type(n.maxRanks) == "number" and n.maxRanks or 1 end
+function TD.Ranks(n)
+    local bought = type(n.ranksPurchased) == "number" and n.ranksPurchased or 0
+    local rank = TD.RETAIL and type(n.currentRank) == "number" and math.max(n.currentRank, bought) or bought
+    return bought, rank
+end
+-- As the game's buttons: no buying past max, no refunding a granted rank.
+function TD.CanBuyInfo(n)
+    local _, rank = TD.Ranks(n)
+    return n.canPurchaseRank == true and rank < TD.MaxOf(n)
+end
+function TD.CanRefundInfo(n)
+    local bought = TD.Ranks(n)
+    return n.canRefundRank == true and bought > 0
+end
+
+local function readNode(C, configID, id, n)
+    local entryID = type(n.activeEntry) == "table" and n.activeEntry.entryID or (type(n.entryIDs) == "table" and n.entryIDs[1]) or nil
+    local name, icon, atlas, spellID = entryLook(C, configID, entryID)
+    local bought, rank = TD.Ranks(n)
     local active = type(n.activeRank) == "number" and n.activeRank or rank
     local edges = {}
     for _, e in ipairs(type(n.visibleEdges) == "table" and n.visibleEdges or {}) do
@@ -106,12 +159,13 @@ local function readNode(C, configID, id, n)
         end
     end
     return {
-        id = id, x = n.posX, y = n.posY, rank = rank, active = active, max = type(n.maxRanks) == "number" and n.maxRanks or 1,
-        staged = rank > active, entryID = entryID, spellID = spellID, name = name, icon = icon,
-        canBuy = n.canPurchaseRank == true, canRefund = n.canRefundRank == true,
+        id = id, x = n.posX, y = n.posY, rank = rank, bought = bought, active = active, max = TD.MaxOf(n),
+        staged = rank > active, entryID = entryID, spellID = spellID, name = name, icon = icon, atlas = atlas,
+        canBuy = TD.CanBuyInfo(n), canRefund = TD.CanRefundInfo(n),
         available = n.isAvailable ~= false and n.meetsEdgeRequirements ~= false,
         edgesMet = n.meetsEdgeRequirements ~= false, rule = rule(C, configID, n), edges = edges,
         choices = choicesOf(n), chosen = type(n.activeEntry) == "table" and n.activeEntry.entryID ~= nil,
+        options = TD.RETAIL and optionsOf(C, configID, n) or nil,
     }
 end
 
@@ -182,6 +236,153 @@ local function grid(trees, byID, o)
     end
 end
 
+-- ---------------------------------------------------------------------
+-- Retail: class, hero and spec trees from one C_Traits tree
+-- ---------------------------------------------------------------------
+
+local function specLook()
+    local S = C_SpecializationInfo
+    local index = (type(S) == "table" and call(S.GetSpecialization)) or call(GetSpecialization)
+    if type(index) ~= "number" then return nil end
+    local get = (type(S) == "table" and S.GetSpecializationInfo) or GetSpecializationInfo
+    local _, name, _, icon = call(get, index)
+    return name, icon
+end
+
+-- Columns and rows on a half-tile grid (retail offsets nodes by half a
+-- tile), from each tree's own top-left node.
+local function retailGrid(t)
+    local minX, minY
+    for _, n in ipairs(t.nodes) do
+        if not minX or n.x < minX then minX = n.x end
+        if not minY or n.y < minY then minY = n.y end
+    end
+    -- Hero trees sit on a tighter grid than class and spec, so they use
+    -- their own row gap as the step (rows have no half offsets; columns may).
+    local step = TD.STEP
+    if t.kind == "hero" and #t.nodes > 1 then
+        local ys = {}
+        for _, n in ipairs(t.nodes) do ys[#ys + 1] = n.y end
+        local s = TD.Step(ys)
+        if s and s > 50 and s < TD.STEP then step = s end
+    end
+    local half = step / 2
+    t.cols, t.rows = 1, 1
+    for _, n in ipairs(t.nodes) do
+        n.col = round((n.x - minX) / half) / 2
+        n.row = round((n.y - minY) / half) / 2 + (t.drop or 0)
+        if n.col + 1 > t.cols then t.cols = n.col + 1 end
+        if n.row + 1 > t.rows then t.rows = n.row + 1 end
+    end
+    table.sort(t.nodes, function(a, b) if a.row ~= b.row then return a.row < b.row end return a.col < b.col end)
+end
+
+local function addTo(t, node, out)
+    node.tree = t
+    t.nodes[#t.nodes + 1] = node
+    t.spent = t.spent + (node.bought or node.rank)
+    out.byID[node.id] = node
+end
+
+-- Fills out.trees with class, hero (when there's one to show) and spec.
+local function readRetail(C, configID, treeID, out, pending)
+    local cur = call(C.GetTreeCurrencyInfo, configID, treeID, false)
+    cur = type(cur) == "table" and cur or {}
+    local function curID(i) return type(cur[i]) == "table" and cur[i].traitCurrencyID or nil end
+    local className, token = UnitClass("player")
+    local specName, specIcon = specLook()
+    local class = { kind = "class", name = className or L["Class"], spent = 0, nodes = {}, cur = curID(1),
+                    icon = token and ("Interface\\Icons\\ClassIcon_" .. token) or nil }
+    local spec = { kind = "spec", name = specName or L["Specialization"], icon = specIcon, spent = 0, nodes = {}, cur = curID(2) }
+    local hero = { kind = "hero", name = L["Hero Talents"], spent = 0, nodes = {} }
+    local loose, selector = {}, nil
+    local T = Enum and Enum.TraitNodeType
+    for _, id in ipairs(call(C.GetTreeNodes, treeID) or {}) do
+        local n = call(C.GetNodeInfo, configID, id)
+        if type(n) == "table" and n.isVisible ~= false and type(n.posX) == "number" and type(n.posY) == "number" then
+            local node = readNode(C, configID, id, n)
+            if pending[id] then node.staged = true end
+            if T and n.type == T.SubTreeSelection then
+                node.heroPick = true
+                selector = node
+            elseif type(n.subTreeID) == "number" then
+                if n.subTreeActive == true then
+                    addTo(hero, node, out)
+                    if not hero.subTreeID then
+                        hero.subTreeID = n.subTreeID
+                        local sub = call(C.GetSubTreeInfo, configID, n.subTreeID)
+                        if type(sub) == "table" then
+                            hero.name = type(sub.name) == "string" and sub.name ~= "" and sub.name or hero.name
+                            hero.atlas = sub.iconElementID
+                            hero.cur = sub.traitCurrencyID
+                        end
+                    end
+                end
+            else
+                local costs = call(C.GetNodeCost, configID, id)
+                local first = type(costs) == "table" and type(costs[1]) == "table" and costs[1].ID or nil
+                if first and first == class.cur then addTo(class, node, out)
+                elseif first and first == spec.cur then addTo(spec, node, out)
+                else loose[#loose + 1] = node end
+            end
+        end
+    end
+    -- Free nodes (the spec's starting talents) go to whichever tree they sit in.
+    local function span(t)
+        local lo, hi
+        for _, n in ipairs(t.nodes) do
+            if not lo or n.x < lo then lo = n.x end
+            if not hi or n.x > hi then hi = n.x end
+        end
+        return lo, hi
+    end
+    local cLo, cHi = span(class)
+    local sLo, sHi = span(spec)
+    for _, node in ipairs(loose) do
+        local dc = cLo and (node.x < cLo and cLo - node.x or node.x > cHi and node.x - cHi or 0) or math.huge
+        local ds = sLo and (node.x < sLo and sLo - node.x or node.x > sHi and node.x - sHi or 0) or math.huge
+        addTo(ds < dc and spec or class, node, out)
+    end
+    -- The hero tree choice sits centered above the hero talents.
+    if selector then
+        hero.selector = selector
+        hero.drop = #hero.nodes > 0 and 1.25 or 0
+        selector.tree = hero
+        out.byID[selector.id] = selector
+    end
+    retailGrid(class)
+    retailGrid(spec)
+    if #hero.nodes > 0 then retailGrid(hero) end
+    if selector then
+        hero.nodes[#hero.nodes + 1] = selector
+        selector.row = 0
+        selector.col = math.max(((hero.cols or 1) - 1) / 2, 0)
+        if #hero.nodes == 1 then hero.cols, hero.rows = 1, 1 end
+        table.sort(hero.nodes, function(a, b) if a.row ~= b.row then return a.row < b.row end return a.col < b.col end)
+    end
+    local list = { class }
+    if #hero.nodes > 0 then list[#list + 1] = hero end
+    list[#list + 1] = spec
+    for _, t in ipairs(list) do
+        if #t.nodes > 0 then
+            out.trees[#out.trees + 1] = t
+            t.index = #out.trees
+            out.spent = out.spent + t.spent
+        end
+    end
+    out.retail = true
+end
+
+-- Points left per tree (t.left) and in all (data.left), from each tree's
+-- own currency. Retail has two or three pools, not just the first.
+function TD.RetailLeft(data)
+    data.left = 0
+    for _, t in ipairs(data.trees) do
+        t.left = t.cur and data.currency[t.cur] or nil
+        if t.left then data.left = data.left + t.left end
+    end
+end
+
 -- Returns { configID, trees = { { groupID, name, icon, spent, cols, rows,
 -- nodes = { ... } } }, left, spent, byID = { [nodeID] = node },
 -- currency = { [traitCurrencyID] = points left } }, or nil when there's no
@@ -213,7 +414,10 @@ function TD.Read(configID, opts)
         end
         table.sort(order, function(a, b) return a.order < b.order end)
         local whole   -- used when the tree has no display groups
-        for _, id in ipairs(call(C.GetTreeNodes, treeID) or {}) do
+        if TD.RETAIL and #order == 0 then
+            readRetail(C, configID, treeID, out, pending)
+        end
+        for _, id in ipairs(out.retail and {} or call(C.GetTreeNodes, treeID) or {}) do
             local n = call(C.GetNodeInfo, configID, id)
             if type(n) == "table" and n.isVisible ~= false and type(n.posX) == "number" and type(n.posY) == "number" then
                 local t
@@ -229,13 +433,13 @@ function TD.Read(configID, opts)
                     if pending[id] then node.staged = true end
                     node.tree = t
                     t.nodes[#t.nodes + 1] = node
-                    t.spent = t.spent + node.rank
+                    t.spent = t.spent + (node.bought or node.rank)
                     out.byID[id] = node
                 end
             end
         end
         if whole then order[#order + 1] = whole end
-        for _, t in ipairs(order) do
+        for _, t in ipairs(out.retail and {} or order) do
             if #t.nodes > 0 then out.trees[#out.trees + 1] = t; t.index = #out.trees; out.spent = out.spent + t.spent end
         end
         local cur = call(C.GetTreeCurrencyInfo, configID, treeID, false)
@@ -245,6 +449,10 @@ function TD.Read(configID, opts)
                 if c.traitCurrencyID then out.currency[c.traitCurrencyID] = (out.currency[c.traitCurrencyID] or 0) + c.quantity end
             end
         end
+    end
+    if out.retail then   -- readRetail placed the nodes already
+        TD.RetailLeft(out)
+        return out
     end
     local o = { step = opts.step or TD.STEP, span = opts.span or TD.SPAN, cols = opts.cols or 4, rows = opts.rows or 7 }
     if o.step == "auto" then
@@ -273,14 +481,14 @@ function TD.Refresh(data, ids)
         local node = data.byID[id]
         local n = node and call(C.GetNodeInfo, configID, id)
         if type(n) == "table" then
-            local rank = type(n.ranksPurchased) == "number" and n.ranksPurchased or 0
-            local delta = rank - node.rank
+            local bought, rank = TD.Ranks(n)
+            local delta = bought - (node.bought or node.rank)
             if node.tree then node.tree.spent = node.tree.spent + delta end
             data.spent = data.spent + delta
-            node.rank = rank
+            node.rank, node.bought = rank, bought
             node.active = type(n.activeRank) == "number" and n.activeRank or rank
             node.staged = pending[id] == true or rank > node.active
-            node.canBuy, node.canRefund = n.canPurchaseRank == true, n.canRefundRank == true
+            node.canBuy, node.canRefund = TD.CanBuyInfo(n), TD.CanRefundInfo(n)
             node.available = n.isAvailable ~= false and n.meetsEdgeRequirements ~= false
             node.edgesMet = n.meetsEdgeRequirements ~= false
         end
@@ -297,6 +505,7 @@ function TD.Refresh(data, ids)
                 end
             end
         end
+        if data.retail then TD.RetailLeft(data) end
     end
     return data
 end

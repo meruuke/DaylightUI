@@ -45,7 +45,10 @@ function Spend.Afford(node, data)
     if type(costs) ~= "table" then return true end
     local have = data and data.currency or {}
     for _, cost in ipairs(costs) do
-        if type(cost) == "table" and type(cost.amount) == "number" and (have[cost.ID] or 0) < cost.amount then return false end
+        -- Retail: a pool the tree read didn't list (hero points) is left to the game.
+        local held = type(cost) == "table" and have[cost.ID] or nil
+        if held == nil and not (data and data.retail) then held = 0 end
+        if type(cost) == "table" and type(cost.amount) == "number" and held ~= nil and held < cost.amount then return false end
     end
     return true
 end
@@ -58,14 +61,56 @@ function Spend.CanRefund(node)
     return node ~= nil and not Spend.Locked() and node.canRefund or false
 end
 
+-- Retail choice node (two talents, or the hero tree pick): pick one entry,
+-- as the game's selection popup does (C_Traits.SetSelection). The game
+-- refuses what isn't allowed. Returns true when it took.
+function Spend.Choose(node, entryID)
+    if not node or Spend.Locked() then return false end
+    local C, configID = traits(), Spend.Config()
+    if not (C and configID) then return false end
+    if node.chosen and node.entryID == entryID then return false end
+    return call(C.SetSelection, configID, node.id, entryID) == true
+end
+
+-- A menu of the node's entries next to the tile. Returns true when it opened.
+function Spend.AskChoice(node, owner)
+    local MU = MenuUtil
+    if not (MU and MU.CreateContextMenu and node and node.options) then return false end
+    MU.CreateContextMenu(owner, function(_, root)
+        root:CreateTitle(node.heroPick and (HERO_TALENTS_SELECTION_TITLE or "Hero Talents") or (TALENT_CHOICE or "Choose a talent"))
+        for _, o in ipairs(node.options) do
+            local mark = (o.atlas and CreateAtlasMarkup and CreateAtlasMarkup(o.atlas, 16, 16))
+                or (o.icon and ("|T" .. tostring(o.icon) .. ":16:16:0:0:64:64:5:59:5:59|t")) or ""
+            local current = node.chosen and node.entryID == o.entryID
+            local label = mark .. " " .. (o.name or "") .. (current and "  |cff8a8a8a*|r" or "")
+            root:CreateButton(label, function()
+                if Spend.Choose(node, o.entryID) then
+                    if DUI.Sound then DUI.Sound.Play("spend") end
+                    if ns.Talents then ns.Talents.Soon() end
+                end
+            end)
+        end
+    end)
+    return true
+end
+
 -- Buy and Refund return true when the game accepted the change.
-function Spend.Buy(node, data)
+function Spend.Buy(node, data, owner)
+    if node and node.options and not Spend.Locked() then
+        if Spend.AskChoice(node, owner) then return "asked" end
+    end
     if not Spend.CanBuy(node, data) then return false end
     local C, configID = traits(), Spend.Config()
-    return call(C.PurchaseRank, configID, node.id) == true
+    local ok, took = pcall(C.PurchaseRank, configID, node.id)
+    if not ok and DUI.Print then DUI.Print("Talent: " .. tostring(took)) end
+    return ok and took == true
 end
 
 function Spend.Refund(node)
+    -- Clearing a choice: SetSelection with no entry, as the game's right-click does.
+    if node and node.options and node.chosen and node.canRefund and not Spend.Locked() then
+        return call(traits().SetSelection, Spend.Config(), node.id, nil) == true
+    end
     if not Spend.CanRefund(node) then return false end
     local C, configID = traits(), Spend.Config()
     local clear = type(IsShiftKeyDown) == "function" and IsShiftKeyDown() and true or false
@@ -103,7 +148,9 @@ function Spend.Apply(staged)
     Spend.sent = staged or {}
     local token = {}
     Spend.token = token
-    if call(C_ClassTalents.CommitConfig, nil) ~= true then
+    -- Retail: commit into the selected loadout too, as the game's Apply does.
+    local saved = ns.Builds and ns.Builds.Selected and ns.Builds.Selected() or nil
+    if call(C_ClassTalents.CommitConfig, saved) ~= true then
         if Spend.token == token then Spend.committing, Spend.sent, Spend.token = nil, nil, nil end
         return false
     end
@@ -113,6 +160,19 @@ function Spend.Apply(staged)
     end)
     if ns.Talents then ns.Talents.Soon() end
     return true
+end
+
+-- A commit the game started on its own (a retail loadout loading with
+-- autoApply): wait for it like an Apply.
+function Spend.Begin()
+    Spend.committing = Spend.Config()
+    Spend.sent = {}
+    local token = {}
+    Spend.token = token
+    C_Timer.After(Spend.COMMIT_WAIT, function()
+        if Spend.token == token then Spend.Finished(false) end
+    end)
+    if ns.Talents then ns.Talents.Soon() end
 end
 
 -- Called from TRAIT_CONFIG_UPDATED, CONFIG_COMMIT_FAILED or the timeout.

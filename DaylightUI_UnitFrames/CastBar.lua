@@ -271,12 +271,12 @@ function CB.Create(unit, attachTo, into, opts)
     -- CB.Layout keeps it off the real frames.
     h.preview = opts.preview or nil
     if type(unit) == "string" and not opts.preview then
-        for _, e in ipairs(EVENTS) do DUI.SafeCall(h.RegisterUnitEvent, h, e, unit) end
+        for _, e in ipairs(EVENTS) do DUI.SafeRegister(h, "RegisterUnitEvent", e, unit) end
     end
     -- Yours counts a batch of crafts (CB.Batch).
     if h.kind == "player" and not opts.preview then
-        DUI.SafeCall(h.RegisterUnitEvent, h, "UNIT_SPELLCAST_SUCCEEDED", unit)
-        DUI.SafeCall(h.RegisterEvent, h, "UPDATE_TRADESKILL_CAST_STOPPED")
+        DUI.SafeRegister(h, "RegisterUnitEvent", "UNIT_SPELLCAST_SUCCEEDED", unit)
+        DUI.SafeRegister(h, "RegisterEvent", "UPDATE_TRADESKILL_CAST_STOPPED")
     end
     -- Something else is showing your cast (QoL's fishing water).
     if h.kind == "player" and not opts.preview then
@@ -306,7 +306,7 @@ function CB.SetUnit(h, unit)
     if DUI.APIReport then DUI.APIReport.Unit("castbar", h, type(unit) == "string" and unit or nil, false) end
     h:UnregisterAllEvents()
     if type(unit) == "string" then
-        for _, e in ipairs(EVENTS) do DUI.SafeCall(h.RegisterUnitEvent, h, e, unit) end
+        for _, e in ipairs(EVENTS) do DUI.SafeRegister(h, "RegisterUnitEvent", e, unit) end
     end
     CB.Refresh(h)
 end

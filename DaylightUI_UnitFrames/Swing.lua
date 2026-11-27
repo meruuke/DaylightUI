@@ -757,9 +757,9 @@ function ST.Create()
         end, { parent = pod, dur = DUI.Motion.NORMAL,
             done = function(sl) if sl.p == 0 then pod:Hide() end end })
     end
-    for _, e in ipairs(EVENTS) do DUI.SafeCall(h.RegisterEvent, h, e) end
-    DUI.SafeCall(h.RegisterUnitEvent, h, "UNIT_ATTACK_SPEED", "player")
-    if #ST.QueueList() > 0 then DUI.SafeCall(h.RegisterEvent, h, "ACTIONBAR_UPDATE_STATE") end
+    for _, e in ipairs(EVENTS) do DUI.SafeRegister(h, "RegisterEvent", e) end
+    DUI.SafeRegister(h, "RegisterUnitEvent", "UNIT_ATTACK_SPEED", "player")
+    if #ST.QueueList() > 0 then DUI.SafeRegister(h, "RegisterEvent", "ACTIONBAR_UPDATE_STATE") end
     h:SetScript("OnEvent", onEvent)
     -- Hung under the player frame, the bars slide out from under it (or from
     -- under the cast bar) and back. Once back under they hide, and the bars

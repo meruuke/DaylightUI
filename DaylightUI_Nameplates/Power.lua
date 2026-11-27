@@ -181,7 +181,7 @@ local function listen(p, on)
     if on == (p.powerEvents == true) then return end
     for event in pairs(Power.EVENTS) do
         if on then
-            DUI.SafeCall(p.RegisterUnitEvent, p, event, p.unit)
+            DUI.SafeRegister(p, "RegisterUnitEvent", event, p.unit)
         else
             DUI.SafeCall(p.UnregisterEvent, p, event)
         end

@@ -181,7 +181,7 @@ function Manager.GiveBackFrame(uf, nameplate)
     if type(uf) ~= "table" or not uf.SetParent or forbidden(uf) or not held[uf] then return end
     if quieted[uf] then
         quieted[uf] = nil
-        for _, e in ipairs(Manager.LOAD_EVENTS) do DUI.SafeCall(uf.RegisterEvent, uf, e) end
+        for _, e in ipairs(Manager.LOAD_EVENTS) do DUI.SafeRegister(uf, "RegisterEvent", e) end
         -- CompactUnitFrame_OnLoad is only the frame's baseline. The nameplate
         -- adds two unit events and two global events in OnUnitSet, while
         -- CompactUnitFrame_SetUnit registers its per-unit events. If a held
@@ -193,10 +193,10 @@ function Manager.GiveBackFrame(uf, nameplate)
             if type(CompactUnitFrame_UpdateUnitEvents) == "function" then
                 DUI.SafeCall(CompactUnitFrame_UpdateUnitEvents, uf)
             end
-            DUI.SafeCall(uf.RegisterUnitEvent, uf, "UNIT_FACTION", uf.unit, "player")
-            DUI.SafeCall(uf.RegisterUnitEvent, uf, "NAME_PLATE_UNIT_BEHIND_CAMERA_CHANGED", uf.unit)
-            DUI.SafeCall(uf.RegisterEvent, uf, "PLAYER_FOCUS_CHANGED")
-            DUI.SafeCall(uf.RegisterEvent, uf, "RAID_TARGET_UPDATE")
+            DUI.SafeRegister(uf, "RegisterUnitEvent", "UNIT_FACTION", uf.unit, "player")
+            DUI.SafeRegister(uf, "RegisterUnitEvent", "NAME_PLATE_UNIT_BEHIND_CAMERA_CHANGED", uf.unit)
+            DUI.SafeRegister(uf, "RegisterEvent", "PLAYER_FOCUS_CHANGED")
+            DUI.SafeRegister(uf, "RegisterEvent", "RAID_TARGET_UPDATE")
         end
     end
     moveKeepers(uf, uf)

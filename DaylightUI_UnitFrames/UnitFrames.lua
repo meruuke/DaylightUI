@@ -4105,9 +4105,9 @@ function UF.CreateCost(f, spec)
     local h = CreateFrame("Frame", nil, f)
     for _, e in ipairs({ "UNIT_SPELLCAST_START", "UNIT_SPELLCAST_STOP", "UNIT_SPELLCAST_FAILED",
         "UNIT_SPELLCAST_INTERRUPTED", "UNIT_SPELLCAST_SUCCEEDED" }) do
-        DUI.SafeCall(h.RegisterUnitEvent, h, e, "player")
+        DUI.SafeRegister(h, "RegisterUnitEvent", e, "player")
     end
-    DUI.SafeCall(h.RegisterEvent, h, "ACTIONBAR_UPDATE_STATE")
+    DUI.SafeRegister(h, "RegisterEvent", "ACTIONBAR_UPDATE_STATE")
     h:SetScript("OnEvent", function(_, event, _, _, spellID)
         if f.test then return end
         if event == "UNIT_SPELLCAST_START" then
@@ -4745,7 +4745,7 @@ local UNIT_EVENTS = {
 function UF.RegisterUnitEvents(f)
     f:UnregisterAllEvents()
     if type(f.unitToken) ~= "string" then return end
-    for event in pairs(UNIT_EVENTS) do DUI.SafeCall(f.RegisterUnitEvent, f, event, f.unitToken) end
+    for event in pairs(UNIT_EVENTS) do DUI.SafeRegister(f, "RegisterUnitEvent", event, f.unitToken) end
 end
 
 -- On this client power doesn't wait for a tick to move. The game's own frames

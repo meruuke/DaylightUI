@@ -77,13 +77,38 @@ function Arrows.New(parent)
     return a
 end
 
--- One straight segment, y measured down from the grid's top-left. Segments
--- are always horizontal or vertical.
+-- Length of a path segment { x1, y1, x2, y2 } (straight, so diagonal ones
+-- on retail measure true).
+local function segLen(s)
+    local dx, dy = s[3] - s[1], s[4] - s[2]
+    if dx == 0 or dy == 0 then return math.abs(dx) + math.abs(dy) end
+    return math.sqrt(dx * dx + dy * dy)
+end
+
+-- A diagonal piece: a horizontal strip of length len centered between the
+-- points, turned to the line's angle (y down, so the screen angle flips).
+local function turned(t, parent, x1, y1, x2, y2, thick)
+    local dx, dy = x2 - x1, y2 - y1
+    local len = math.sqrt(dx * dx + dy * dy)
+    t:ClearAllPoints()
+    t:SetPoint("CENTER", parent, "TOPLEFT", (x1 + x2) / 2, -(y1 + y2) / 2)
+    t:SetSize(math.max(len, 1), thick)
+    t:SetRotation(math.atan2(-dy, dx))
+end
+
+-- One straight segment, y measured down from the grid's top-left. Forever's
+-- segments are horizontal or vertical; retail's may run diagonally.
 local function seg(t, parent, x1, y1, x2, y2)
     local w = Arrows.WIDTH
     local left, top = math.min(x1, x2), math.min(y1, y2)
     local width, height = math.abs(x2 - x1), math.abs(y2 - y1)
     if width < 1 and height < 1 then t:Hide() return end
+    if width >= 1 and height >= 1 then
+        turned(t, parent, x1, y1, x2, y2, w)
+        t:Show()
+        return
+    end
+    if t.SetRotation then t:SetRotation(0) end
     t:ClearAllPoints()
     if width < 1 then
         t:SetPoint("TOPLEFT", parent, "TOPLEFT", left - w / 2, -top)
@@ -101,6 +126,12 @@ local function halo(t, parent, x1, y1, x2, y2)
     local w = Arrows.HALO
     local left, top = math.min(x1, x2), math.min(y1, y2)
     local width, height = math.abs(x2 - x1), math.abs(y2 - y1)
+    if width >= 1 and height >= 1 then
+        turned(t, parent, x1, y1, x2, y2, w)
+        t:SetTexCoord(0.5, 0.5, 0, 1)
+        return
+    end
+    if t.SetRotation then t:SetRotation(0) end
     t:ClearAllPoints()
     if width < 1 then
         t:SetPoint("TOPLEFT", parent, "TOPLEFT", left - w / 2, -top)
@@ -115,14 +146,33 @@ end
 
 -- from, to: { col, row }. pitch is the tile spacing (px overrides it
 -- horizontally), size is one tile.
-function Arrows.Place(a, from, to, pitch, size, px)
+-- straight (retail): a talent that isn't in line with its source gets one
+-- diagonal line from tile edge to tile edge, as in the game's tree.
+function Arrows.Place(a, from, to, pitch, size, px, straight)
     local p = a.parent
     px = px or pitch
     local half, gap, head = size / 2, Arrows.GAP, Arrows.HEAD
     local fx, fy = from.col * px, from.row * pitch
     local tx, ty = to.col * px, to.row * pitch
     local hx, hy, rot
-    if from.col == to.col then
+    a.head:SetAlpha(straight and 0 or 1)
+    if straight then
+        -- Retail: a plain link from tile edge to tile edge in any direction,
+        -- no head (talents sit too close for one), as in the game's tree.
+        -- The ring sits Talents.RING px outside the tile, so start past it.
+        local cx1, cy1, cx2, cy2 = fx + half, fy + half, tx + half, ty + half
+        local dx, dy = cx2 - cx1, cy2 - cy1
+        local len = math.max(math.sqrt(dx * dx + dy * dy), 1)
+        local ux, uy = dx / len, dy / len
+        local ring = (ns.Talents and ns.Talents.RING or 3) + 1
+        local edge = half / math.max(math.abs(ux), math.abs(uy)) + ring
+        local x1, y1 = cx1 + ux * edge, cy1 + uy * edge
+        local x2, y2 = cx2 - ux * edge, cy2 - uy * edge
+        seg(a.segs[1], p, x1, y1, x2, y2)
+        a.segs[2]:Hide()
+        a.path = { { x1, y1, x2, y2 } }
+        hx, hy, rot = x2, y2, math.atan2(dx, dy)
+    elseif from.col == to.col then
         -- straight down (or up)
         local x = fx + half
         local down = to.row > from.row
@@ -160,7 +210,7 @@ function Arrows.Place(a, from, to, pitch, size, px)
     a.total = 0
     for i, s in ipairs(a.path) do
         halo(a.halo[i], p, s[1], s[2], s[3], s[4])
-        a.total = a.total + math.abs(s[3] - s[1]) + math.abs(s[4] - s[2])
+        a.total = a.total + segLen(s)
     end
     a.bloom:ClearAllPoints()
     a.bloom:SetPoint("CENTER", p, "TOPLEFT", hx, -hy)
@@ -177,7 +227,7 @@ local drivers = setmetatable({}, { __mode = "k" })
 local function pointAt(a, d)
     local n = #a.path
     for i, s in ipairs(a.path) do
-        local len = math.abs(s[3] - s[1]) + math.abs(s[4] - s[2])
+        local len = segLen(s)
         if d <= len or i == n then
             local k = d / math.max(len, 1)
             if i > 1 then k = math.max(k, 0) end
@@ -311,7 +361,7 @@ end
 -- adjacent rows an arrow is mostly head, so the head blends in last.
 local function drawLit(a, p, c)
     local total = Arrows.HEAD
-    for _, s in ipairs(a.path or {}) do total = total + math.abs(s[3] - s[1]) + math.abs(s[4] - s[2]) end
+    for _, s in ipairs(a.path or {}) do total = total + segLen(s) end
     local left = total * p
     local into = left - (total - Arrows.HEAD)
     local k = math.max(0, math.min(into / Arrows.HEAD, 1))
@@ -320,7 +370,7 @@ local function drawLit(a, p, c)
     for i, t in ipairs(a.lit) do
         local s = a.path and a.path[i]
         if s and left > 0.5 then
-            local len = math.abs(s[3] - s[1]) + math.abs(s[4] - s[2])
+            local len = segLen(s)
             local k = len > 0 and math.min(left / len, 1) or 1
             seg(t, a.parent, s[1], s[2], s[1] + (s[3] - s[1]) * k, s[2] + (s[4] - s[2]) * k)
             t:SetVertexColor(c[1], c[2], c[3], 1)

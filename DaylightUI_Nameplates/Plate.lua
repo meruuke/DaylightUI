@@ -3308,13 +3308,13 @@ local function listen(p, unit)
     p.powerEvents = nil -- the power bar's own, re-registered by Power.Refresh
     for event in pairs(Plate.UNIT_EVENTS) do
         if event == "UNIT_FACTION" then -- your own changing counts too (a duel, PvP), as on the game's plate
-            DUI.SafeCall(p.RegisterUnitEvent, p, event, unit, "player")
+            DUI.SafeRegister(p, "RegisterUnitEvent", event, unit, "player")
         else
-            DUI.SafeCall(p.RegisterUnitEvent, p, event, unit)
+            DUI.SafeRegister(p, "RegisterUnitEvent", event, unit)
         end
     end
     if not p.friendly then
-        for event in pairs(ns.Cast.EVENTS) do DUI.SafeCall(p.RegisterUnitEvent, p, event, unit) end
+        for event in pairs(ns.Cast.EVENTS) do DUI.SafeRegister(p, "RegisterUnitEvent", event, unit) end
     end
 end
 
