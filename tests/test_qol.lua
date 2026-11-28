@@ -753,6 +753,67 @@ T.test("qol: quiet errors waits for the game's error frame if it loads late", fu
     errorsDone()
 end)
 
+-- Retail keeps BLACK_LISTED_MESSAGE_TYPES local to UIErrorsFrame.lua and only
+-- writes it through UIErrorsFrame:SetMessageTypeEnabled. Its own list hides the
+-- out-of-resource and cooldown lines. Before this, every claimed line showed twice
+-- there: the game's and Daylight UI's.
+local function retailErrorsSetup(over)
+    local shown, drawn, list = {}, { n = 0 }, nil
+    stub.Load({ qol = true, before = function()
+        for name, id in pairs(ERR) do _G["LE_GAME_ERR_" .. name] = id end
+        list = { [ERR.OUT_OF_RAGE] = true, [ERR.SPELL_COOLDOWN] = true }
+        _G.BLACK_LISTED_MESSAGE_TYPES = nil
+        _G.UIErrorsFrame = {
+            AddMessage = function(_, text) shown[#shown + 1] = text end,
+            SetMessageTypeEnabled = function(_, messageType, enabled) list[messageType] = not enabled end,
+            OnEvent = function(self, event, messageType, message)
+                if event == "UI_ERROR_MESSAGE" and not list[messageType] then self:AddMessage(message) end
+            end,
+        }
+        if over then DaylightUIDB = { modules = { QoL = over } } end
+    end })
+    local ET = stub.qol.ErrorText
+    local show = ET.Show
+    ET.Show = function(...) drawn.n = drawn.n + 1; return show(...) end
+    local function fire(name)
+        local before, was = #shown, drawn.n
+        UIErrorsFrame:OnEvent("UI_ERROR_MESSAGE", ERR[name], name)
+        stub.FireEvent("UI_ERROR_MESSAGE", ERR[name], name)
+        return #shown > before, drawn.n > was
+    end
+    return DaylightUI:GetModule("QoL"), fire, function() return list end
+end
+
+T.test("qol: on Retail a claimed error line shows once, Daylight UI's, not the game's too", function()
+    local m, fire, list = retailErrorsSetup()
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    T.eq(m.db.errorText, true)
+    local game, ours = fire("INV_FULL")
+    T.falsy(game, "the game's line is off")
+    T.truthy(ours, "Daylight UI draws it")
+    game, ours = fire("SPELL_FAILED_INTERRUPTED")
+    T.falsy(game); T.truthy(ours)
+    game, ours = fire("OUT_OF_MANA")
+    T.falsy(game, "quieted: not the game's"); T.falsy(ours, "quieted: not ours")
+    game, ours = fire("OUT_OF_RAGE")
+    T.falsy(game, "the game's own entry stays hidden"); T.falsy(ours, "and isn't drawn by Daylight UI")
+    T.eq(list()[ERR.OUT_OF_RAGE], true, "the game's own entry is never written")
+    errorsDone()
+end)
+
+T.test("qol: on Retail turning error text and quiet errors off gives the game its lines back", function()
+    local m, fire, list = retailErrorsSetup()
+    m.db.errorText, m.db.quietErrors = false, false
+    m:OnSettingChanged()
+    local game, ours = fire("INV_FULL")
+    T.truthy(game); T.falsy(ours)
+    game = fire("OUT_OF_MANA")
+    T.truthy(game, "a quieted type comes back")
+    T.falsy(fire("OUT_OF_RAGE"), "the game's own entry is still the game's")
+    T.eq(list()[ERR.OUT_OF_RAGE], true)
+    errorsDone()
+end)
+
 T.test("qol: a quieted error plays the soft tick in place of its voice line, out of the box", function()
     local m, fire = errorsSetup()
     T.eq(m.db.errorSound, true)

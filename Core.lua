@@ -482,7 +482,8 @@ end
 
 -- Messages in the middle of the screen. The game's error frame
 -- (UIErrorsMixin:TryDisplayMessage) skips every message type listed in its
--- global BLACK_LISTED_MESSAGE_TYPES, voice line included. Several of our
+-- BLACK_LISTED_MESSAGE_TYPES, voice line included (a global on Forever, local on
+-- Retail, where UIErrorsFrame:SetMessageTypeEnabled writes it). Several of our
 -- features hide types this way (QoL's quiet errors and error text, Quests'
 -- progress lines). Each registers a claim here, so dropping one claim never
 -- brings back a line another feature still draws. The game's own entries
@@ -494,6 +495,37 @@ local claims = {} -- [type id] = { [owner] = "main" | "fallback" }
 local written = {} -- [type id] = true for entries we wrote on the game's list
 local listed -- the list `written` refers to
 
+-- Retail keeps that list local to its UIErrorsFrame.lua and changes it only
+-- through UIErrorsFrame:SetMessageTypeEnabled(type, enabled). There the game's
+-- own entries can't be read, so they're named here, from
+-- Blizzard_UIErrorsFrame/Mainline/UIErrorsFrame.lua (12.1.5). Without this the
+-- game drew every claimed line too, under ours (Retail showed each error twice).
+local RETAIL_GAME_HIDDEN = {
+    "ABILITY_COOLDOWN", "SPELL_COOLDOWN", "SPELL_FAILED_ANOTHER_IN_PROGRESS",
+    "OUT_OF_HOLY_POWER", "OUT_OF_POWER_DISPLAY", "OUT_OF_SOUL_SHARDS", "OUT_OF_FOCUS",
+    "OUT_OF_COMBO_POINTS", "OUT_OF_CHI", "OUT_OF_PAIN", "OUT_OF_HEALTH", "OUT_OF_RAGE",
+    "OUT_OF_ARCANE_CHARGES", "OUT_OF_RANGE", "OUT_OF_ENERGY", "OUT_OF_LUNAR_POWER",
+    "OUT_OF_RUNIC_POWER", "OUT_OF_INSANITY", "OUT_OF_RUNES", "OUT_OF_FURY",
+    "OUT_OF_MAELSTROM", "OUT_OF_ESSENCE",
+}
+local gameHidden -- [type id] = true: the game's own entries, on Retail
+local disabled = {} -- [type id] = true for types we turned off through the frame
+
+-- The game's error frame when it only takes SetMessageTypeEnabled (Retail).
+local function retailFrame()
+    if type(_G.BLACK_LISTED_MESSAGE_TYPES) == "table" then return nil end
+    local f = _G.UIErrorsFrame
+    if type(f) ~= "table" or type(f.SetMessageTypeEnabled) ~= "function" then return nil end
+    if not gameHidden then
+        gameHidden = {}
+        for _, name in ipairs(RETAIL_GAME_HIDDEN) do
+            local id = _G["LE_GAME_ERR_" .. name]
+            if type(id) == "number" then gameHidden[id] = true end
+        end
+    end
+    return f
+end
+
 local function messageList()
     local t = _G.BLACK_LISTED_MESSAGE_TYPES
     if type(t) ~= "table" then return nil end
@@ -503,7 +535,18 @@ end
 
 local function syncMessageType(id)
     local t = messageList()
-    if not t then return end
+    if not t then
+        local f = retailFrame()
+        if not f or gameHidden[id] then return end   -- the game's own entries are never written
+        if claims[id] and not disabled[id] then
+            disabled[id] = true
+            DUI.SafeCall(f.SetMessageTypeEnabled, f, id, false)
+        elseif not claims[id] and disabled[id] then
+            disabled[id] = nil
+            DUI.SafeCall(f.SetMessageTypeEnabled, f, id, true)
+        end
+        return
+    end
     if claims[id] then
         if t[id] ~= true then
             t[id] = true
@@ -542,6 +585,7 @@ function DUI.MessageTypeOwner(id)
     if not plainId(id) then return nil end
     local t = messageList()
     if t and t[id] == true and not written[id] then return "game" end
+    if not t and retailFrame() and gameHidden[id] then return "game" end
     local c = claims[id]
     if not c then return nil end
     local fallback

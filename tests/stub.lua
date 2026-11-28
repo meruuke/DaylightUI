@@ -2235,11 +2235,16 @@ _G.C_RestrictedActions = {
 function stub.SetInstance(kind) stub.instance = kind end
 
 -- C_NamePlate.GetNamePlateForUnit takes a plain token only: a chained one
--- ("targettarget", "focustarget", "nameplate2target") errors in the client.
+-- ("targettarget", "focustarget", "nameplate2target") or a boss frame's
+-- ("boss1") errors in the client.
 -- A test's own GetNamePlateForUnit calls this first.
 function stub.CheckPlateUnit(unit)
     if type(unit) == "string" and #unit > 6 and unit:sub(-6) == "target" then
         error("bad argument #1 to 'get' (Target-of-target unit tokens are not allowed for this call. - Usage: local nameplate = C_NamePlate.GetNamePlateForUnit(unitToken [, includeForbidden]))", 2)
+    end
+    -- Boss frames' tokens too ("boss1".."boss8"), seen in game on Retail.
+    if type(unit) == "string" and unit:match("^boss%d+$") then
+        error("bad argument #1 to 'get' (Boss<n> unit tokens are not allowed for this call. - Usage: local nameplate = C_NamePlate.GetNamePlateForUnit(unitToken [, includeForbidden]))", 2)
     end
 end
 
@@ -3368,6 +3373,8 @@ end
 -- Like the game's time(): a date table turns into its seconds.
 _G.time = function(t) if type(t) == "table" then return os.time(t) end return wallClock end
 _G.GetTime = function() return upClock end
+-- WoW: Forever's build (Book/TalentData.lua tells Retail from it by the interface number).
+_G.GetBuildInfo = function() return "1.15.8", "60000", "Nov 1 2026", 16001 end
 _G.date = function(fmt, t) return os.date(fmt, t or wallClock) end
 -- The server's clock, set apart from wallClock (the local clock) so tests can
 -- tell them apart.
