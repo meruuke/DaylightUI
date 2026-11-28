@@ -465,7 +465,10 @@ local function plateToken(unit)
     if #unit > 6 and string.sub(unit, -6) == "target" then return nil end
     local get = C_NamePlate and C_NamePlate.GetNamePlateForUnit
     if type(get) ~= "function" then return nil end
-    local plate = get(unit, false)
+    -- The client refuses some tokens outright (boss frames' "boss1", and
+    -- likely others later): a refusal means no plate.
+    local ok, plate = pcall(get, unit, false)
+    if not ok then return nil end
     local token = type(plate) == "table" and plate.unitToken
     if type(token) == "string" and not isSecret(token) and string.find(token, "^nameplate%d+$") then return token end
     return nil

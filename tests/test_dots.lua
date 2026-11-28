@@ -544,6 +544,22 @@ T.test("dots: with GUIDs hidden and no plate, only the target is tracked", funct
     _G.C_NamePlate = nil
 end)
 
+T.test("dots: with GUIDs hidden, a hit on a boss frame's unit raises no error", function()
+    local _, Dots = world()
+    hiddenGUIDs()
+    stub.units.boss1 = { name = "Gnoll Chief", reaction = 2, guid = "Creature-3", health = 900, maxHealth = 900 }
+    cast(COR)
+    tick(3)
+    T.noerror(function()
+        stub.FireEvent("UNIT_COMBAT", "boss1", "WOUND", "", stub.Secret(9), SHADOW)
+    end)
+    T.isnil(Dots.KeyOf("boss1"), "no plate to tell it apart by")
+    T.eq(#stub.errors, 0, tostring(stub.errors[1]))
+    stub.units.boss1 = nil
+    stub.SetRestriction("Map", false)
+    _G.C_NamePlate = nil
+end)
+
 T.test("dots: with GUIDs hidden, a hit on your target's target asks no plate", function()
     local _, Dots = world()
     hiddenGUIDs()
