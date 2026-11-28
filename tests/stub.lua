@@ -3368,6 +3368,8 @@ end
 -- Like the game's time(): a date table turns into its seconds.
 _G.time = function(t) if type(t) == "table" then return os.time(t) end return wallClock end
 _G.GetTime = function() return upClock end
+-- WoW: Forever's build (Book/TalentData.lua tells Retail from it by the interface number).
+_G.GetBuildInfo = function() return "1.15.8", "60000", "Nov 1 2026", 16001 end
 _G.date = function(fmt, t) return os.date(fmt, t or wallClock) end
 -- The server's clock, set apart from wallClock (the local clock) so tests can
 -- tell them apart.
